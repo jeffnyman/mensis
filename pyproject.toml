@@ -1,0 +1,18 @@
+[project]
+name = "mensis"
+version = "0.1.0"
+description = "Notes and tools for taking apart the PS4 Bloodborne: package, executable and data formats"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Jeff Nyman" }]
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=42",   # pkgtool.py: AES-CBC, AES-XTS for the PKG/PFS layers
+    "pyelftools>=0.31",   # ELF inspection while surveying executables
+    "capstone>=5",        # ad-hoc disassembly while surveying executables
+]
+
+# The tools are run as scripts (python -I tools/<tool>.py ...), not installed as a package.
+[tool.uv]
+package = false

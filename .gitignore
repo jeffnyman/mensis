@@ -1,0 +1,23 @@
+# extracted game files, ELFs, the Ghidra project and logs: all rebuilt by the tools
+work/
+
+# Python tooling
+.venv/
+__pycache__/
+*.pyc
+
+# game data never goes in the repository
+*.pkg
+*.bin
+*.prx
+*.sprx
+*.elf
+*.dcx
+*.gpr
+*.rep/
+
+# editors
+.vs/
+.vscode/
+.idea/
+*.swp
