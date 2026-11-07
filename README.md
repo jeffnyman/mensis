@@ -3,6 +3,12 @@
 Taking apart the PS4 *Bloodborne: Game of the Year Edition* (CUSA03173, EU) to see how it is built,
 in the same spirit as *Confederation*, a sibling project, does for *Wing Commander*.
 
+**The name.** In the game, the School of Mensis is a scholarly order. With the Choir it forms "the
+upper echelons of the Healing Church", and it founded the Unseen Village, Yahar'gul. Its scholars
+wear the Mensis Cage, an iron cage around the head that, in the game's own words, "restrains the
+will of the self, allowing one to see the profane world for what it is". Seeing past the surface
+of the thing to how it works is what this project is about.
+
 ## What's here
 
 **The package opens all the way down.** It is a *fake* (homebrew re-signed) PKG, so its keys are
@@ -23,6 +29,24 @@ scripts, and map layouts.
 layout. Untiled and decoded, they come out as ordinary PNG files: 1,056 item pictures, and every
 character, equipment, object and map texture. The 3D models read too, so the tools export them
 to OBJ and render every character and piece of equipment as a picture.
+
+A sample of what the tools produce: item pictures as the game ships them (`textures.py items`),
+and character models rendered from the game's own meshes and textures (`flver.py`):
+
+<table>
+<tr>
+<td align="center" width="25%"><img src="assets/showcase/item-mensis-cage.png" width="180" alt="Mensis Cage"><br><sub>Mensis Cage</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/item-saw-cleaver.png" width="180" alt="Saw Cleaver"><br><sub>Saw Cleaver</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/item-blood-vial.png" width="180" alt="Blood Vial"><br><sub>Blood Vial</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/item-cainhurst-badge.png" width="180" alt="Cainhurst Badge"><br><sub>Cainhurst Badge</sub></td>
+</tr>
+<tr>
+<td align="center" width="25%"><img src="assets/showcase/chr-c2010.png" width="180" alt="c2010, a lantern-bearer"><br><sub>c2010, a lantern-bearer</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/chr-c1110.png" width="180" alt="c1110, Patches the spider"><br><sub>c1110, Patches the spider</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/chr-c5100.png" width="180" alt="c5100, Rom, the Vacuous Spider"><br><sub>c5100, Rom, the Vacuous Spider</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/chr-c2100.png" width="180" alt="c2100, the Witch of Hemwick"><br><sub>c2100, the Witch of Hemwick</sub></td>
+</tr>
+</table>
 
 **Together they answer real questions.** Four worked examples so far:
 
@@ -154,7 +178,8 @@ python -I tools/flver.py parts <base dvdroot> <update dvdroot> <out dir>       #
 
 Everything the tools produce goes under `work/`, which `.gitignore` excludes: it is the game's
 own data, or derived from it. [Rebuilding `work/`](docs/rebuilding-work.md) recreates it from
-scratch.
+scratch. The only generated pictures in the repository are the eight samples above, in
+`assets/showcase/`, reduced to 256×256.
 
 | Path | |
 |---|---|
