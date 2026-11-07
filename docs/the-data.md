@@ -130,6 +130,21 @@ python -I tools/souls.py fmg   <fmg | msgbnd> [id]       # dump text
 python -I tools/souls.py param <parambnd>                # tables and row counts
 ```
 
+`tools/params.py` decodes the gameplay tables field by field, using the game's own layouts in
+`paramdef/paramdef.paramdefbnd.dcx`:
+
+```
+python -I tools/params.py check <parambnd> <paramdefbnd>                    # every table matches its layout?
+python -I tools/params.py dump  <parambnd> <paramdefbnd> EquipParamWeapon 2000000
+python -I tools/params.py diff  <old> <new> <paramdefbnd> <out.md> [--msg item.msgbnd.dcx]
+```
+
+For example, `dump` on row 2000000 of `EquipParamWeapon` gives the Chikage's fields
+(`weight 5`, `sellValue 30000`, `correctStrength 15`, `correctAgility 45`, …) with each field's
+Japanese display name. Several names are Dark Souls' (`correctAgility`, `correctFaith`) carried
+over into Bloodborne. [What the 1.09 patch changed](the-patch.md#the-balance-changes-in-the-data-not-the-code)
+uses `diff` to read the update's balance changes.
+
 For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
 tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4
 holds GNF-tiled data that has to be de-tiled before it becomes a viewable DDS.

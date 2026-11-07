@@ -178,11 +178,91 @@ Further changes sit in functions that use `FrpgNetMan`, `SprjNetworkClientMan`,
 These are real logic changes, but explaining what they *mean* needs the managers' methods named
 first. They are the natural next targets for hand-naming.
 
-### And not in the code
+## The balance changes: in the data, not the code
 
-The patch's headline item, "Improved game balance", is not in the executable at all. It's in the
-replaced `param/gameparam/gameparam.parambnd.dcx` ([the data](the-data.md#params)). Comparing
-params between the two builds is a data task.
+The patch notes' headline, "Improved game balance", isn't in the executable at all. It's in the
+replaced `param/gameparam/gameparam.parambnd.dcx`: the 65 tables of numbers the game plays by
+([the data](the-data.md#params)).
+
+### Reading the tables: `tools/params.py`
+
+A PARAM file is a table of fixed-size rows with no field names. The names and layout are in a
+PARAMDEF, and the game ships all 63 of them in `paramdef/paramdef.paramdefbnd.dcx`. Each field
+has a Japanese display name, a storage type and an internal name:
+
+```
+behaviorVariationId   s32   行動バリエーションID   (behaviour variation ID)
+isEnableDropSoulCapture:1   u8   ドロップソウル所持可   (can hold dropped souls)
+```
+
+`params.py` decodes rows through their PARAMDEF. Two details needed fixing before every table
+decoded:
+
+* **The storage type is not the internal type.** The internal type is often an enum name
+  (`ACTION_BUTTON_REGION_TYPE`); the actual storage type (`s32`, `u8`, …) is the *display* type
+  at offset 0x40 of the field record.
+* **Padding bits share units with flags.** Bit fields of one type pack into a shared unit, and
+  `dummy8 pad:5` fills the rest of the `u8` that the flags before it started. Treating padding as
+  its own type made 9 tables one byte too long per row. With the fix, every field lands on its
+  natural alignment (`breakSfxId`, an `s32`, at offset 12).
+
+`params.py check` confirms every table's row stride matches its PARAMDEF: **65/65** in both
+builds. `params.py diff … --msg item.msgbnd.dcx` compares two builds and labels weapons, armour
+and goods with their English names.
+
+```
+python -I tools/params.py diff work/base/dvdroot_ps4/param/gameparam/gameparam.parambnd.dcx \
+       work/update/dvdroot_ps4/param/gameparam/gameparam.parambnd.dcx \
+       work/base/dvdroot_ps4/paramdef/paramdef.paramdefbnd.dcx work/params/gameparam-1.00-to-1.09.md \
+       --msg work/update/dvdroot_ps4/msg/engus/item.msgbnd.dcx
+```
+
+### What changed
+
+13 of the 65 tables changed. IDs were traced to names through the tables themselves: weapons
+through `behaviorVariationId`, enemy attacks through `BehaviorParam` to the `NpcParam` rows of
+the same behaviour variation, and characters through `nameId` and the `NPC名` text table. Where
+no name exists, the enemy model was located by searching the map layouts (`map/mapstudio/*.msb`)
+for its model ID.
+
+**Player weapons**
+
+| Change | Detail |
+|---|---|
+| **Boom Hammer**: cheaper to use | stamina cost of 17 moves (`BehaviorParam_PC` 1028xxxxx) cut by 17–29%: 30→25, 40→30, 50→40, 60→50, 70→50, 80→60, 90→70, 100→75, 120→90 |
+| **Whirligig Saw**: three attacks toned down | attacks 3100930–3100932: poise damage (`atkSuperArmorCorrection`) 80/65 → 30, HP regained on hit (`wepRegainHpScale`) 65 → 30, damage 65 → 60 |
+| one more attack (3800932) toned down | all damage corrections 350 → 320; its owner wasn't traced (no player behaviour references it) |
+
+**Enemies: all in The Old Hunters' areas**
+
+| Enemy | Where | Change |
+|---|---|---|
+| **Valtr, Master of the League / Beast Eater** | NPC 6502, 6505 | his resident effect (7915/7916) now cuts incoming damage by 25%, not 35%, for every damage type |
+| enemy families 402xxx and 412xxx (models c4020/c4021, c4120) | Research Hall (m35) | 32 rows (30 + 2) gain a resident effect (5346/5351) that sets how hard each kind of hit staggers them (`dmgLv_*`) |
+| **Living Failures** (403xxx) | Research Hall (m35) | can no longer pick up blood echoes the player dropped (`isEnableDropSoulCapture` 1 → 0) |
+| enemy 406xxx (model c4060) | Fishing Hamlet (m36) | five attacks hit less hard: 220→120, 200→160, 180→120, 180→160, 220→160 |
+| enemy 450000 (model c4500) | Hunter's Nightmare (m34) | two pairs of attacks **swap** their damage (194↔136, 229↔194): a mix-up fixed. One attack's damage level 6 → 3 |
+| enemy 402xxx | Research Hall | two attacks change their hit material (sound/effect) 3 → 6 |
+| AI | NpcThinkParam 7043, 7161 | 7043: the action taken when path search fails (`actTypeOnFailedPath`) changes from type 2 to 0. 7161: the "return home" time after touching an enemy wall (`BackHomeLife_OnHitEneWal`) goes from 5 seconds to 0 |
+
+**Items, shops, gems**
+
+| Change | Detail |
+|---|---|
+| **Blood Rock** can be bought | added to five shop line-ups (200025–240025) at a price of 60. The same line-ups sell Blood Stone Chunk (row xx0024) at 20 |
+| **Vermin** | can no longer be used several at once (`canMultiUse` 1 → 0) |
+| three blood gem generation rows | 90330, 90340, 90341 (gem effect 1013) become usable in weapons (`equipableSegmentWeapon` 0 → 1) |
+| Butcher Garb | one hide-model flag cleared (`invisibleFlag28`) |
+
+**Housekeeping:** `TalkParam`'s 1,516 changed fields are 108 rows whose unused effect and motion
+slots went from `0` ("effect 0") to `-1` ("none"). That's data hygiene, not balance. Also: one
+object row added, an NPC's type and team changed (6620), another's team changed (455000), and an
+unnamed weapon row (38090000) given a different model.
+
+The parameters are about a quarter of what the update replaced. Event scripts for ten maps, AI
+Lua for seven, talk scripts for three, and the DLC areas' navmeshes and map layouts change too
+([the package](the-package.md#the-update-is-file-replacement)). Those are the next data diffs to
+make readable.
 
 ## Files
 
