@@ -145,6 +145,16 @@ Japanese display name. Several names are Dark Souls' (`correctAgility`, `correct
 over into Bloodborne. [What the 1.09 patch changed](the-patch.md#the-balance-changes-in-the-data-not-the-code)
 uses `diff` to read the update's balance changes.
 
+`tools/events.py` decodes the event scripts (EMEVD) with the instruction set the game describes in
+`event/common.emedf.dcx` (25 classes, 287 instructions, Japanese names, typed arguments) and the
+event names in each map's `.emeld.dcx`:
+
+```
+python -I tools/events.py check <emedf> <emevd ...>                    # every instruction decodes?
+python -I tools/events.py dump  <emedf> <emevd> [--eld <emeld>] [--event ID]
+python -I tools/events.py diff  <emedf> <old.emevd> <new.emevd> <out.md> [--eld <emeld>]
+```
+
 For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
 tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4
 holds GNF-tiled data that has to be de-tiled before it becomes a viewable DDS.

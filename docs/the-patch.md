@@ -264,6 +264,135 @@ Lua for seven, talk scripts for three, and the DLC areas' navmeshes and map layo
 ([the package](the-package.md#the-update-is-file-replacement)). Those are the next data diffs to
 make readable.
 
+## The event scripts
+
+The update also replaces the event scripts (EMEVD) of ten maps. Events are small programs the
+maps run: wait for a condition (a flag, the player in a region, a boss dead), then act (open a
+door, play a cutscene, set a flag, warp the player).
+
+### Reading them: `tools/events.py`
+
+As with the params, the game *describes* its own instruction set: `event/common.emedf.dcx` lists
+25 instruction classes and 287 instructions with Japanese names and typed arguments. And each
+map's `.emeld.dcx` names its events, again in Japanese:
+
+```
+Event 0  コンストラクタ  (constructor)
+    [2000:00] イベント起動(イベントスロット番号=0, 起動イベントID=12100010, 引数=0)        start event 12100010
+    [2003:23] 復活ポイント設定(復活ポイントエンティティID=2102961)                          set respawn point
+    [2003:02] イベントフラグ設定(イベントフラグID=12101999, 設定フラグ=1)                   set event flag
+```
+
+`events.py check` decodes every instruction in every map and confirms its argument bytes match
+the EMEDF's argument list, the way `params.py check` does for the tables. Two things came out of
+it:
+
+* **One instruction is variadic.** All 3,086 mismatches on the first run were `[2000:00]
+  イベント起動` ("start an event"). After its three declared arguments it takes any number of
+  extra 32-bit arguments and passes them to the event it starts. That's how one event definition
+  serves many doors or enemies, and the started event reads them through its parameter table
+  (shown as `X<byte>_<length>`).
+* **Three instructions aren't in the EMEDF** (`2011:03`, `2004:55`, `2003:54`), used 62 times.
+  They are shown as raw values.
+
+After that, all 44,627 instructions in the base game decode with matching layouts.
+`events.py diff` then compares two versions of a map event by event.
+
+```
+python -I tools/events.py diff work/base/dvdroot_ps4/event/common.emedf.dcx \
+       work/base/dvdroot_ps4/event/m35_00_00_00.emevd.dcx work/update/dvdroot_ps4/event/m35_00_00_00.emevd.dcx \
+       work/events/m35_00_00_00.md --eld work/update/dvdroot_ps4/event/m35_00_00_00.emeld.dcx
+```
+
+| Map | Events | Changed | Added / removed |
+|---|---:|---:|---|
+| common | 82 | 4 | |
+| m21 Hunter's Dream | 105 | 5 | |
+| m24_01 (Cathedral Ward area) | 250 | 3 | |
+| m27 Forbidden Woods | 115 | 1 | 1 / 1 (a replacement) |
+| m28 Yahar'gul | 101 | 2 | |
+| m29 Chalice Dungeons | 428 | 1 | |
+| m32 Byrgenwerth | 71 | 1 | |
+| m34 Hunter's Nightmare | 118 | 1 | |
+| m35 Research Hall / Astral Clocktower | 160 | 15 | |
+| m36 Fishing Hamlet | 84 | 5 | |
+
+In what follows, quoted Japanese is the developers' own event names; the English translations are
+ours.
+
+### Elevators remember where they are
+
+The largest group of changes, in Cathedral Ward, Yahar'gul, the Astral Clocktower and the Fishing
+Hamlet. Each elevator has a "goes up" and a "goes down" event (`エレベーター上がる_聖堂街B`,
+"elevator goes up, Cathedral Ward B"). In 1.09 each one first checks its flags, and if the
+elevator is already at the other end, restores it there without running the trip:
+
+```diff
++    [3:00] イベントフラグ状態で判定(登録条件グループ=3, ..., 対象イベントフラグID=X0_4)      if flag A
++    [3:00] イベントフラグ状態で判定(登録条件グループ=3, ..., 対象イベントフラグID=X4_4)      and flag B
++    [1000:101] 条件グループ条件状態でラベルジャンプ(ジャンプ先ラベル=0, ...)                 else skip ahead
++    [2005:07] オブジェアニメ再現(対象オブジェクトのエンティティID=2411320, アニメID=3)       restore the object's animation state
++    [1000:103] 無条件でラベルジャンプ(ジャンプ先ラベル=1)
+```
+
+In the Clocktower the restore also disables the call levers (`ObjAct有効化 … 有効化設定=0`) and
+switches collision parts (`ヒットパーツ有効化`). In the Fishing Hamlet it replaces a forced,
+waited-for animation (`強制アニメ再生要求 … 終了待つか=1`). The likely fix: elevators no longer end
+up in the wrong place after reloading the area or in multiplayer.
+
+### Missing DLC handled safely
+
+Common event 3503, `DLC削除_03` ("DLC removal 03"), is now started from the pre-constructor.
+In 1.00 it cleared ten flags. In 1.09 it clears a list of DLC flags and then, if the player is in
+area 34, 35 or 36 (the three DLC maps), warps them to the Hunter's Dream lamp:
+
+```diff
++    [3:08] 現在マップIDで判定(登録条件グループ=-1, 同じか？=1, エリアNo=34, ブロックNo=0)       in m34?
++    [3:08] 現在マップIDで判定(登録条件グループ=-1, 同じか？=1, エリアNo=35, ブロックNo=0)       or m35?
++    [3:08] 現在マップIDで判定(登録条件グループ=-1, 同じか？=1, エリアNo=36, ブロックNo=0)       or m36?
++    [0:00] 条件グループ条件状態で判定(登録条件グループ=0, 条件成立条件状態=1, 対象条件グループ=-1)
++    [2003:49] 復活ポイントワープ(復活ポイントパラメータID=2102961)                             warp to respawn point
+```
+
+Respawn point 2102961 is the one the Hunter's Dream constructor sets. Given the label, this looks
+like the game's handling of a save that is in the DLC when the DLC is no longer installed.
+
+### NPCs
+
+* `ヤマムラ無敵` ("Yamamura invincible"), now started by the Research Hall's constructor. In
+  1.00 it switched a character's team. In 1.09 it makes Yamamura invincible, with his HP bar
+  hidden, until flag 9471 is set.
+* In the Forbidden Woods, event 12700907 is replaced by 12700910, `DLC_連盟：処刑人裏切り`
+  ("League: the executioner's betrayal"). The new version also disables the character entirely
+  (`キャラ無効化`), not just his AI, until his conditions are met, and only when the player is
+  the host (`キャラタイプ=0`).
+* Common event 9480, an NPC-kill event (`血族BJを付けてNPC殺害2_XX`), takes one more argument
+  and is started for more NPCs (flags 1710–1713, 1730, 1790, 12700909). Flag 1790 is also one
+  of the executioner event's conditions.
+* `時計塔の女医_初期化` ("Clocktower woman doctor: initialise") starts her in a different idle
+  animation (2250 → 7011).
+
+### Bosses and enemies
+
+* **The DLC's final boss** (`ラスボス`, the Orphan of Kos in the Fishing Hamlet) now also wakes
+  when it takes damage (`属性ダメージ判定`), not only when the player comes within range. Its
+  `黒ニョロ` ("black squiggle") spawns with gravity off.
+* **Father Gascoigne** (on defeat), **Ludwig** (on waking) and the Orphan get a fixed update
+  frequency (`更新頻度指定`: −1 → 5, 2 and 0).
+* **Rom's small spiders** (`白痴の蜘蛛`, "the Vacuous Spider"), in Byrgenwerth and in the
+  Chalice Dungeons, now spawn with gravity off (`重力無効化`, switched back on once they are
+  placed), with some timing changes. In Byrgenwerth they also finish turning toward the player
+  before acting (`キャラの旋回 … 終了待つか` 0 → 1).
+
+### The Hunter's Dream
+
+* `売買メッセンジャー＿ラインナップ拡充_時間帯フラグ` ("trading messenger: line-up expansion,
+  time-of-day flags") now sets flags 5900–5904 when flags 6603 or 12601800 are set. The five new
+  shop rows that sell Blood Rock ([above](#what-changed)) are in five line-ups, so this is
+  plausibly what unlocks them; the shop rows themselves carry no flag.
+* The gravestone messengers' animations (`墓石メッセンジャーアニメ可否判定`) now check the DLC
+  flags on gravestone 4, not 3, and the Doll's position check follows.
+
 ## Files
 
 | Path | |

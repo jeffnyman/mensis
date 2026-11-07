@@ -29,8 +29,9 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
   and 1.09 builds were compared, and how functions get named: by rule from the strings around
   them, and by hand for the most-called helpers.
 * [What the 1.09 patch changed](docs/the-patch.md): the last update read function by function
-  and table by table: developer tooling switched off, an SOS-sign limit read live, and the
-  balance changes (Boom Hammer, Whirligig Saw, Valtr, the DLC enemies, Blood Rock in the shop).
+  and table by table: developer tooling switched off, an SOS-sign limit read live, the balance
+  changes (Boom Hammer, Whirligig Saw, Valtr, the DLC enemies, Blood Rock in the shop), and the
+  event-script fixes (elevators, missing DLC, NPCs, bosses).
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -62,6 +63,7 @@ python -I tools/pkgtool.py info|list|extract <pkg> …               # PKG/PFS e
 python -I tools/unfself.py <eboot.bin> <out.elf>                     # fake SELF → ELF
 python -I tools/souls.py dcx|bnd|fmg|param <file> …                  # DCX/BND4/FMG/PARAM
 python -I tools/params.py check|dump|diff <parambnd> <paramdefbnd> …  # gameplay tables, decoded
+python -I tools/events.py check|dump|diff <emedf> <emevd> …           # event scripts, decoded
 python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → Ghidra-ready
 pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
 python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
