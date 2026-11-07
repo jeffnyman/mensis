@@ -19,12 +19,14 @@ of its event instructions and the names of its events, all in Japanese, and the 
 them: gameplay tables field by field, event scripts instruction by instruction, AI and talk
 scripts, and map layouts.
 
-**Together they answer real questions.** Two worked examples so far:
+**Together they answer real questions.** Three worked examples so far:
 
 * [What the 1.09 patch changed](docs/the-patch.md): developer tooling switched off, the balance
   changes, elevator, DLC and NPC fixes, and changes that span code, data, scripts and layout.
 * [Where the items are](docs/the-items.md): every treasure, drop, event award and shop row, down
   to which badge unlocks the Chikage.
+* [The Chalice Dungeons](docs/the-chalice-dungeons.md): "random" Root Chalice dungeons are one of
+  100 or 200 layouts that ship with the game.
 
 ## Reading order
 
@@ -37,7 +39,9 @@ scripts, and map layouts.
 4. [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs, params
    and text, and the readers for them.
 5. [Where the items are](docs/the-items.md): the readers joined into one answer.
-6. [What the 1.09 patch changed](docs/the-patch.md): every kind of replaced file, read and
+6. [The Chalice Dungeons](docs/the-chalice-dungeons.md): rituals, their 100 or 200 pre-built
+   layouts, the rites, and the deeper chalices the tables define but the game doesn't contain.
+7. [What the 1.09 patch changed](docs/the-patch.md): every kind of replaced file, read and
    explained.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
@@ -109,6 +113,7 @@ python -I tools/msb.py check|dump|diff <msb> …                       # map lay
 
 ```
 python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
+python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the Chalice Dungeon catalogue
 ```
 
 ## Working files (`work/`, ~34 GiB, not source)
@@ -124,7 +129,7 @@ own data, or derived from it.
 | `work/ref/aerolib.inl` | NID → name database (shadPS4), downloaded on first use |
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
-| `work/items/` | the generated item index |
+| `work/items/`, `work/chalice/` | the generated item index and chalice catalogue |
 
 ## Not looked at yet
 

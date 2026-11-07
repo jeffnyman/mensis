@@ -140,8 +140,9 @@ derived "owns" flags, so what sets it isn't established.
 
 ## What it doesn't cover yet
 
-* **Chalice Dungeons.** Their treasure is generated from the dungeon tables
-  (`DungeonFeatureParam`, `DungeonSubFeatLotParam`, …), not placed in layouts.
+* **Chalice Dungeons.** Each Root chalice has 100 or 200 pre-built layouts, each placing its own
+  treasure ([the Chalice Dungeons](the-chalice-dungeons.md)); those layouts aren't in the index
+  yet.
 * **Unlock flags that aren't "owns X".** Flag 6680 (Beast Claw), and the line-up flags 5900–5904,
   which the messengers' event sets from progress flags (see [the patch](the-patch.md)).
 * **Three event awards** (event 9440, `誓約ボディジェム入手`, "obtain covenant body gem", lots

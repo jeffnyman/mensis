@@ -79,7 +79,7 @@ numbering:
 | m26 | Nightmare of Mensis |
 | m27 | Forbidden Woods |
 | m28 | Yahar'gul, Unseen Village |
-| m29 | **Chalice Dungeons**: 80+ `m29_XX_YY_00` map blocks and 2,685 layout files (`map/mapstudio/m29_*/`), each a near-complete copy of a dungeon layout template |
+| m29 | **Chalice Dungeons**: 68 `m29_AB_CD_00` map blocks and 2,685 layout files (`map/mapstudio/m29_*/`), mostly the 100 or 200 pre-built layouts of each Root chalice; see [the Chalice Dungeons](the-chalice-dungeons.md) |
 | m32 | Byrgenwerth / Lecture Building / Moonside Lake |
 | m33–m36 | *The Old Hunters*: Nightmare Frontier, Hunter's Nightmare, Research Hall, Fishing Hamlet |
 
