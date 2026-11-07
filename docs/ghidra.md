@@ -510,8 +510,10 @@ address   kind      name                   confidence  evidence
 02483fe0  function  PthreadMutex_InitRecursive  certain  rank 4: scePthreadMutexattrSettype(attr, 2 = recursive) ...
 ```
 
-(The list has grown since this reading: `ChaliceGlyphEntry_OnInput`, found while working out
-[Chalice Glyphs](the-chalice-dungeons.md#glyphs), was added later and applied to 1.09 only.)
+(The list has grown since this reading, for 1.09 only: `ChaliceGlyphEntry_OnInput`, found while
+working out [Chalice Glyphs](the-chalice-dungeons.md#glyphs), and 44 network functions (the HTTP
+client, the `ss.info` fetch and one builder per game-service request) from
+[the online boundary](the-online-boundary.md#the-requests).)
 
 `ApplyNames.java <names.tsv>` applies a list as **user-defined** names, which outrank both
 analysis and `NameFromStrings`. Each item gets a comment like `[mensis:hand/likely] rank 1, …`,

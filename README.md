@@ -11,7 +11,7 @@ public: `tools/pkgtool.py` decrypts it and produces the game's real filesystem, 
 
 **The executable decompiles.** It is a *fake* SELF with plaintext segments. Converted back to an
 ordinary x86-64 ELF and prepared for Ghidra, it analyses in about 24 minutes: 167,054 functions,
-all 701 system imports named, and about 860 functions and 110 globals named from the strings
+all 701 system imports named, and about 900 functions and 110 globals named from the strings
 the engine leaves behind or by hand, each with its evidence.
 
 **The data reads, in the game's own terms.** The game ships the layouts of its tables, the names
@@ -28,7 +28,8 @@ scripts, and map layouts.
 * [The Chalice Dungeons](docs/the-chalice-dungeons.md): "random" Root Chalice dungeons are one of
   100 or 200 layouts that ship with the game.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
-  asks a server, and what that means for running it off a PS4.
+  asks a server, how it finds that server, the 37 requests it can send, and what that means for
+  running it off a PS4.
 
 ## Reading order
 

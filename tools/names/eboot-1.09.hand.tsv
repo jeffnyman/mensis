@@ -35,3 +35,47 @@ address	kind	name	confidence	evidence
 05940670	global	g_DefaultHeap	likely	cache of Heap_GetDefault(), used by WString_FromCStr and others
 05940668	global	g_ContainerHeap	likely	cache of MemorySystem_Get() + 0x458, the allocator HeapContainer_Construct binds
 01ebd5b0	function	ChaliceGlyphEntry_OnInput	likely	the only user of the glyph alphabet L"23456789abcdefghijkmnpqrstuvwxyz" (04b349a0): menu items 100-107 are the 8 glyph slots (UTF-16 at +0x668), each cycled over the 32 letters; on confirm, if FrpgNetMan reports online, sends the 8 characters to the network lookup
+013d1cb0	function	HttpClient_Create	certain	sceHttpCreateTemplate(FD4HttpMan context, user agent, HTTP/1.1, auto-proxy) + sceHttpSetNonblock + sceHttpCreateEpoll; used by the game-service client and the telemetry uploader
+013d1e90	function	HttpClient_SetServerVerify	certain	sceHttpsEnableOption / sceHttpsDisableOption(template, 1 = server certificate verification); the only caller passes Game.Network.IsCheckServerVeryfy (default 1)
+0227c940	function	GameServiceClient_Init	likely	creates the game-service HttpClient with the per-region, per-SKU 'PS4Application FROMhttp/1.0 (...)' user agent (table 05758470), applies Game.Network.IsCheckServerVeryfy, registers the Network/NetworkClient debug menu
+0228aa40	function	ServerStatus_Fetch	likely	fetches ss.info from the per-region URL table 05758440 (ss4.scej-network.jp:20443/bb-<region>/ss.info), overridable by Game.Network.SsInfoUrl; in demo modes calls ServerStatus_LoadLocal instead
+0227e6b0	function	ServerStatus_LoadLocal	likely	reads testdata:/server/ss.info.xml (not shipped) and parses it as the server status
+01c2d5c0	function	ServerStatus_UseLocal	likely	true if Game.IsBetatestMode, Game.IsTgsMode or Game.IsGamescomMode, else Game.Network.UseLocalSsInfo (default 0)
+0228a880	function	GameService_SendRequest	likely	(client, request number 0-36, ...) -> GameService_BuildRequest then HttpClient send; called once per request type
+022b58d0	function	GameService_BuildRequest	likely	adds SessionId, UserId and '?user_id=%lu' (except requests 0 Login and 5 UserAgreementGet), sets MessageId from the name table 05750b70 (LoginRequest ... WanderingGhostGetRequest), serialises the body with JsonValue_Serialize
+02da4cd0	function	JsonValue_Serialize	likely	recursive writer emitting '{', '}', '[', ':' around keys and values; serialises every game-service request body
+0228b040	function	GameService_Login	certain	calls GameService_SendRequest with request number 0 (LoginRequest in the MessageId table)
+0228be50	function	GameService_SyncCharaId	certain	calls GameService_SendRequest with request number 2 (SyncCharaIdRequest in the MessageId table)
+022a3cd0	function	GameService_NoticeNormalGet	certain	calls GameService_SendRequest with request number 3 (NoticeNormalGetRequest in the MessageId table)
+022a45a0	function	GameService_NoticeEmergencyGet	certain	calls GameService_SendRequest with request number 4 (NoticeEmergencyGetRequest in the MessageId table)
+0228cae0	function	GameService_BloodMessCreate	certain	calls GameService_SendRequest with request number 6 (BloodMessCreateRequest in the MessageId table)
+0228e160	function	GameService_BloodMessGetList	certain	calls GameService_SendRequest with request number 7 (BloodMessGetListRequest in the MessageId table)
+02290400	function	GameService_BloodMessEvaluate	certain	calls GameService_SendRequest with request number 8 (BloodMessEvaluateRequest in the MessageId table)
+0228fdb0	function	GameService_BloodMessGetEvaluate	certain	calls GameService_SendRequest with request number 9 (BloodMessGetEvaluateRequest in the MessageId table)
+0228ded0	function	GameService_BloodMessRemove	certain	calls GameService_SendRequest with request number 10 (BloodMessRemoveRequest in the MessageId table)
+0228f190	function	GameService_BloodMessSearchAdd	certain	calls GameService_SendRequest with request number 11 (BloodMessSearchAddRequest in the MessageId table)
+0229af40	function	GameService_ChannelUpload	certain	calls GameService_SendRequest with request number 12 (ChannelUploadRequest in the MessageId table)
+0229c0a0	function	GameService_ChannelShare	certain	calls GameService_SendRequest with request number 13 (ChannelShareRequest in the MessageId table)
+0229ee50	function	GameService_ChannelSearch	certain	calls GameService_SendRequest with request number 14 (ChannelSearchRequest in the MessageId table)
+022a0420	function	GameService_ChannelWordSearch	certain	calls GameService_SendRequest with request number 15 (ChannelWordSearchRequest in the MessageId table)
+0229d5b0	function	GameService_ChannelGetDetailsInfo	certain	calls GameService_SendRequest with request number 16 (ChannelGetDetailsInfoRequest in the MessageId table)
+0229cf60	function	GameService_ChannelGetInfo	certain	calls GameService_SendRequest with request number 17 (ChannelGetInfoRequest in the MessageId table)
+0229dbf0	function	GameService_ChannelRandomJoin	certain	calls GameService_SendRequest with request number 18 (ChannelRandomJoinRequest in the MessageId table)
+0229c4d0	function	GameService_ChannelAddMaterial	certain	calls GameService_SendRequest with request number 19 (ChannelAddMaterialRequest in the MessageId table)
+0229cdb0	function	GameService_ChannelAddMaterialCompleteNotify	certain	calls GameService_SendRequest with request number 20 (ChannelAddMaterialCompleteNotifyRequest in the MessageId table)
+02298e20	function	GameService_MessengerShellUpload	certain	calls GameService_SendRequest with request number 21 (MessengerShellUploadRequest in the MessageId table)
+022a4ee0	function	GameService_MultiPlayNetError	certain	calls GameService_SendRequest with request number 22 (MultiPlayNetErrorRequest in the MessageId table)
+0228c5f0	function	GameService_UserPropertiesMoveCount	certain	calls GameService_SendRequest with request number 23 (UserPropertiesMoveCountRequest in the MessageId table)
+0228c860	function	GameService_UserPropertiesMoveCountCheck	certain	calls GameService_SendRequest with request number 24 (UserPropertiesMoveCountCheckRequest in the MessageId table)
+02290e30	function	GameService_SummonDataCreate	certain	calls GameService_SendRequest with request number 25 (SummonDataCreateRequest in the MessageId table)
+022946e0	function	GameService_SummonDataGetList	certain	calls GameService_SendRequest with request number 26 (SummonDataGetListRequest in the MessageId table)
+022942e0	function	GameService_SummonDataRemove	certain	calls GameService_BuildRequest directly with request number 27 (SummonDataRemoveRequest in the MessageId table)
+02298650	function	GameService_SummonDataSummon	certain	calls GameService_SendRequest with request number 28 (SummonDataSummonRequest in the MessageId table)
+022a0b10	function	GameService_ChairMessGetList	certain	calls GameService_SendRequest with request number 29 (ChairMessGetListRequest in the MessageId table)
+022a06d0	function	GameService_ChairMessRespawnPointNotice	certain	calls GameService_SendRequest with request number 30 (ChairMessRespawnPointNoticeRequest in the MessageId table)
+022a1820	function	GameService_TombMessCreate	certain	calls GameService_SendRequest with request number 31 (TombMessCreateRequest in the MessageId table)
+022a24c0	function	GameService_TombMessGetList	certain	calls GameService_SendRequest with request number 32 (TombMessGetListRequest in the MessageId table)
+022a2f70	function	GameService_DeathVisionGet	certain	calls GameService_SendRequest with request number 33 (DeathVisionGetRequest in the MessageId table)
+022a37c0	function	GameService_TombMessRemove	certain	calls GameService_SendRequest with request number 34 (TombMessRemoveRequest in the MessageId table)
+02299590	function	GameService_WanderingGhostCreate	certain	calls GameService_SendRequest with request number 35 (WanderingGhostCreateRequest in the MessageId table)
+0229a0e0	function	GameService_WanderingGhostGet	certain	calls GameService_SendRequest with request number 36 (WanderingGhostGetRequest in the MessageId table)
