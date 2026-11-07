@@ -163,6 +163,16 @@ python -I tools/lua50.py dis  <luabnd | .lua> [name-filter]
 python -I tools/lua50.py diff <old.luabnd> <new.luabnd> <out.md>
 ```
 
+`tools/esd.py` decodes the talk scripts (ESD state machines) in `script/talk/*.talkesdbnd.dcx`,
+folds the arithmetic their compiler leaves in, and labels talk IDs with their English subtitle
+line:
+
+```
+python -I tools/esd.py check <talkesdbnd ...>
+python -I tools/esd.py dump  <talkesdbnd> [name-filter] [--talk menu.msgbnd.dcx]
+python -I tools/esd.py diff  <old> <new> <out.md> [--talk menu.msgbnd.dcx]
+```
+
 For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
 tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4
 holds GNF-tiled data that has to be de-tiled before it becomes a viewable DDS.

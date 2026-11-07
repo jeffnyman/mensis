@@ -463,6 +463,56 @@ Together with the event scripts' fixes for Yamamura and the League executioner, 
 changes to Valtr and Lady Maria's area, the update spends much of its effort on The Old Hunters'
 NPCs.
 
+## The talk scripts
+
+The update also replaces the talk scripts (`script/talk/*.talkesdbnd.dcx`) of three maps. NPC
+conversations, and some menus, are state machines compiled to ESD.
+
+### Reading them: `tools/esd.py`
+
+ESD's container is documented by SoulsFormats (`ESD.cs`) and its expression bytecode by ESDLang
+(`EzInfixor`). `esd.py` follows both. A script is a set of state groups. Each state has entry,
+exit and while commands, plus conditions that lead to other states. Command arguments and
+conditions are small stack-machine expressions: constants, function calls, comparisons, logic,
+and "registers". `esd.py check` decodes all 271 talk scripts (16,551 states) and confirms that
+every expression reduces to exactly one value.
+
+Two details make the output readable:
+
+* **Constant folding.** The compiler leaves ID arithmetic unfolded
+  (`10000000 + 241*10000 + 7810 + 20*n`), so `esd.py` folds it. That turns out to build event-flag
+  IDs (12417810 + 20n), the same flag numbering the event scripts use.
+* **Talk lines.** Folded integers that are talk IDs are annotated with their English subtitle,
+  from the conversation (`会話`) table of `menu.msgbnd.dcx`:
+
+  ```
+  entry c1_1(1400300 /* "Oh, hello... You're all right. Very good." */, -1, -1)
+  ```
+
+  Annotation only happens after folding. On raw literals, the `10000000` inside a flag
+  calculation was "annotated" with whatever line has ID 10,000,000.
+
+**The limit:** Bloodborne's command and function *names* aren't public, so they print as
+numbers (`c1_1`, `f15`). From context, `c1_1` speaks a line and `f15(flag)` reads an event
+flag, but most others can only be described by what their arguments are. Also, an inserted state
+renumbers the states after it, which inflates the diffs. `esd.py` doesn't renormalise this yet.
+
+### What changed
+
+| Script | Map | Change |
+|---|---|---|
+| t210000–t210003 | Hunter's Dream | the same new state in all four: one call to command `c1_39()` before the conversation's main path |
+| t210721 | Hunter's Dream | small structural change (15 lines, mostly renumbering) |
+| t270503 | Forbidden Woods | a new state that calls a shared state group with arguments `(22, 822, 6770)` before the common exit. It sits next to the replaced "League: the executioner's betrayal" event |
+| t350511 | Research Hall | the conversation now also needs flag 13505911 set and 13505912 clear to start, and ends early when 13505912 or 1730 is set |
+
+The last one ties into two event changes. Flags 13505911/13505912 are arguments of event
+13505900, `時計塔_NPC殺し屋_予兆開始` ("Clocktower: NPC assassin, warning signs begin"), whose
+arguments 1.09 also changed. And 1730 is one of the NPC flags 1.09 added to the NPC-kill event
+9480. So this conversation is now held back while the NPC assassin's sequence is under way, and
+closed once it has run its course. None of these scripts speak a line themselves, so their
+speakers can't be named from the text.
+
 ## Files
 
 | Path | |
