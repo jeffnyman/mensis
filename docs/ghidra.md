@@ -215,6 +215,117 @@ The other landmarks in `work/ghidra/report-eboot-1.09/`: eight frame-submission 
 routines, trophy unlocking, draw-param loading, and the AI Lua loader that still knows the
 developers' `dbgai:/ai/out/%06d_battle.lua` path.
 
+## Comparing two builds
+
+The package carries two executables: 1.00 in the base PKG and 1.09 in the update. Comparing them
+shows the *code* side of the last patch, alongside the data files the update replaced (see
+[the package](the-package.md#the-update-is-file-replacement)).
+
+### Load the second build
+
+```
+pwsh tools/ghidra/analyze.ps1 -Self work/base/eboot.bin -Name eboot-1.00
+```
+
+This runs the same pipeline as above into the same project: 24 minutes of analysis, with the same
+outcome as 1.09. Both builds have exactly **162,959** `.eh_frame_hdr` entries and 167,054
+functions after analysis, which is the first finding. The patch did not add or remove functions
+overall; it edited code inside them. A byte-level comparison is no use, though: the first
+difference comes 45 bytes into the code, and from there everything is shifted, so 20,498 of
+20,697 code pages differ.
+
+### Why not Version Tracking
+
+Ghidra's own tool for this is *Version Tracking*, and it runs headless through the bundled
+`AutoVersionTrackingScript.java`:
+
+```
+analyzeHeadless work\ghidra\project Bloodborne -process eboot-1.09.ghidra.elf -noanalysis ^
+    -postScript AutoVersionTrackingScript.java "/" "vt-1.00-to-1.09" "/eboot-1.00.ghidra.elf"
+```
+
+It keeps **both** programs in memory and runs every correlator across 160k × 160k functions. On a
+32 GB machine with a 20 GB Ghidra heap it ran the system out of memory before finishing. It also
+leaves a half-made session behind that blocks a rerun under the same name;
+`DeleteProjectFile.java` removes it. Version Tracking is the right tool for programs that differ a
+lot. Two builds of the same game a patch apart don't need it.
+
+### The lighter way
+
+Instead, each build is summarised on its own, one program in memory at a time, and the comparison
+happens outside Ghidra.
+
+1. **`ExportFunctionHashes.java`** writes one row per function: address, size, instruction count,
+   strings it references, and two *Function ID* hashes. The **full hash** covers the instructions
+   with every address-dependent operand masked out, so the same code at a different address
+   hashes the same. The **specific hash** also covers constant operands, so it catches a changed
+   number that leaves the instructions alone.
+
+   ```
+   analyzeHeadless work\ghidra\project Bloodborne -process "eboot-1.*.ghidra.elf" -noanalysis -readOnly ^
+       -scriptPath tools\ghidra -postScript ExportFunctionHashes.java work\ghidra\diff
+   ```
+
+   Both builds take a few minutes with a 12 GB heap.
+
+2. **`tools/build_diff.py`** sorts each list by address and aligns them as two token sequences
+   (Python's `difflib`, one token per function's full hash). This works because a linker lays
+   functions out in object-file order, and a patch build keeps that order. Runs that align are
+   *identical*, or *constants* where only the specific hash differs. A run that differs but has
+   the same length on both sides is the same functions *changed*. Whatever is left over is paired
+   by hash where possible, because the linker sometimes places a whole object file elsewhere and
+   an alignment sees that as a delete in one place and an insert in another.
+
+   ```
+   python -I tools/build_diff.py work/ghidra/diff/eboot-1.00.functions.tsv \
+          work/ghidra/diff/eboot-1.09.functions.tsv work/ghidra/diff/diff-1.00-to-1.09.md
+   ```
+
+   It takes under a minute.
+
+### 1.00 → 1.09
+
+| Bucket | Functions |
+|---|---:|
+| identical | 157,840 |
+| moved (same code, new place) | 484 |
+| constants only | 34 (+3 moved) |
+| **changed** | **80** (+2 less certain) |
+| removed | 8 |
+| added | 8 |
+
+158,451 non-thunk functions per build. So **99.6% of the code is unchanged**, and the patch
+touches about a hundred functions. Their referenced strings and class names (taken from the
+singleton asserts) show where the changes are:
+
+* **Developer tooling switched off.** The clearest pattern in the patch. Four functions that read
+  the `Game.IsUseLuaConsole` property shrink to a 3-byte stub, and one is removed. Functions
+  touching `SprjSystemProperties`/`FsrmiWrapper.Port` (a remote debugging connection) shrink from
+  1,139 to 750 and from 165 to 3 bytes. The `DbgRemote` singleton user drops from 143 to 47
+  bytes. Three remote-probe functions (`TestRemoteProbe`, `ClientSendWithReply_ReqPos`, …) are
+  removed outright. The release build had shipped with these hooks compiled in, and 1.09
+  stubbed them out.
+* **AI scripting:** the `AiLua` / `SprjAiLua` set-up and the `aiscript`/`luascriptpatch` mount
+  logic changed. That fits the update replacing AI Lua for seven maps, and `luascriptpatch:` is how
+  patched Lua is overlaid.
+* **Online play:** several `FrpgNetMan`, `SprjNetworkClientMan`, `SprjSessionManager` and
+  `CSMultiPlayMan` functions, plus one reading `ChrSync.FrameSkipCount`: co-op/PvP session and
+  character-sync fixes.
+* **Items and menus:** `SprjGaitem` (item instances), `MsgRepository` users that build weapon and
+  gem lists (`forWepList`, `forGemList`, `?GemName?`), and save-slot text (`SLOT%d:`).
+* **World and events:** `WorldChrMan`, `SprjEventMan`/`SprjLuaEventMan`, `SprjEventFlagMan` with
+  `CSDlc`/`CSPlaygo`, a new `SprjBulletIns` function, and the hit-box `Weapon&Body` helper.
+* **Engine internals:** a dantelion2 linear-heap check (`DLLinearHeap::FreeUntil()` grows from 117
+  to 469 bytes) and the system texture/shader loader.
+
+The 34 constant-only changes are mostly in third-party code at addresses that did not move
+(`/libexec/ld-elf.so.1` and PCRE-style option strings appear among them). They look like
+references to data that moved, not tuned numbers. The game's *balance* changes are not in code
+at all: they are in the replaced `gameparam.parambnd.dcx`.
+
+The full tables, with addresses in both builds for every changed, moved, added and removed
+function, are in `work/ghidra/diff/diff-1.00-to-1.09.md`.
+
 ## Where to go from here
 
 Ordered by payoff for effort:
@@ -232,8 +343,9 @@ Ordered by payoff for effort:
 4. **Port names from better-mapped relatives.** Dark Souls III (PC) runs on the same FD4 and
    dantelion2 engine, and community work has mapped a great deal of it. BSim similarity search
    can carry those names across.
-5. **Diff 1.00 against 1.09.** Run `analyze.ps1 -Self work/base/eboot.bin -Name eboot-1.00` and
-   compare with Ghidra's *Version Tracking* to see the code side of the last patch.
+5. **Read the patch.** The 82 functions the 1.09 update changed (see
+   [Comparing two builds](#comparing-two-builds)) are a small, self-contained place to start
+   naming: each one has an older twin to compare it with.
 6. **Map the data interpreters.** The EMEVD event VM, the ESD state machines, the Lua AI bindings
    (`SprjAiLua`) and the param readers are the places where code and data meet, and the community
    documentation of the data formats tells you what each one should be doing.

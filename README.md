@@ -25,7 +25,8 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
 * [The executable](docs/the-executable.md): SELF → ELF, imports, the engine and middleware it was
   built from, and what decompiling it involves.
 * [Loading it into Ghidra](docs/ghidra.md): the step-by-step procedure from `eboot.bin` to an
-  analysed Ghidra project, why each step is needed, and what the result looks like.
+  analysed Ghidra project, why each step is needed, what the result looks like, and how the 1.00
+  and 1.09 builds were compared.
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -58,11 +59,14 @@ python -I tools/unfself.py <eboot.bin> <out.elf>                     # fake SELF
 python -I tools/souls.py dcx|bnd|fmg|param <file> …                  # DCX/BND4/FMG/PARAM
 python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → Ghidra-ready
 pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
+python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
 ```
 
 (`python` meaning the one in `.venv`, e.g. `.venv/Scripts/python` on Windows.)
 
-`tools/ghidra/` also holds the two Ghidra scripts, `ApplyOrbisSymbols.java` and `OrbisReport.java`.
+`tools/ghidra/` also holds the Ghidra scripts: `ApplyOrbisSymbols.java` (names and function
+starts before analysis), `OrbisReport.java` (summary and landmark decompilations),
+`ExportFunctionHashes.java` (per-function hashes for `build_diff.py`) and `DeleteProjectFile.java`.
 `tools/pkgkeys.py` holds the public fake-package RSA keys.
 
 ## Working files (`work/`, ~30 GiB, not source)
@@ -72,7 +76,7 @@ pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghi
 | `work/base/` | full extracted 1.00 base game (`eboot.bin`, `dvdroot_ps4/`, `sce_sys/`, …) |
 | `work/update/` | extracted 1.09 patch: lay over `base/` for the current game |
 | `work/elf/` | `eboot-1.00.elf`, `eboot-1.09.elf`, the bundled `.prx` modules as ELFs, resolved import list |
-| `work/ghidra/` | Ghidra-ready ELF + symbols, the Ghidra project (`project/Bloodborne.gpr`, 828 MB), logs, `report-eboot-1.09/` |
+| `work/ghidra/` | Ghidra-ready ELFs + symbols, the Ghidra project with both builds (`project/Bloodborne.gpr`), logs, `report-eboot-1.0x/`, `diff/` (function hashes and the 1.00 → 1.09 diff) |
 | `work/ref/aerolib.inl` | NID → name database (shadPS4) |
 | `work/base-files.txt`, `work/update-files.txt` | full file listings with sizes |
 
