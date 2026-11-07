@@ -249,7 +249,7 @@ for its model ID.
 
 | Change | Detail |
 |---|---|
-| **Blood Rock** can be bought | added to five shop line-ups (200025–240025) at a price of 60. The same line-ups sell Blood Stone Chunk (row xx0024) at 20 |
+| **Blood Rock** can be bought | added to the Bath Messengers' insight shop (rows 200025–240025, one per tier) at 60, unlocked by flag 5904. The same shop sells Blood Stone Chunk (row xx0024) at 20, unlocked by flag 5903 |
 | **Vermin** | can no longer be used several at once (`canMultiUse` 1 → 0) |
 | three blood gem generation rows | 90330, 90340, 90341 (gem effect 1013) become usable in weapons (`equipableSegmentWeapon` 0 → 1) |
 | Butcher Garb | one hide-model flag cleared (`invisibleFlag28`) |
@@ -387,9 +387,15 @@ like the game's handling of a save that is in the DLC when the DLC is no longer 
 ### The Hunter's Dream
 
 * `売買メッセンジャー＿ラインナップ拡充_時間帯フラグ` ("trading messenger: line-up expansion,
-  time-of-day flags") now sets flags 5900–5904 when flags 6603 or 12601800 are set. The five new
-  shop rows that sell Blood Rock ([above](#what-changed)) are in five line-ups, so this is
-  plausibly what unlocks them; the shop rows themselves carry no flag.
+  time-of-day flags") sets the insight shop's unlock flags 5900–5904 from progress flags. 1.09
+  adds the last one: **5904 when flag 12601800 is set** (a Nightmare of Mensis flag of the same
+  `xx01800` form as 12801800, which sets 5903). It also adds **all of 5900–5904 once flag 6603 is
+  set**, and 6603 is set by the events `Aエンド`, `Bエンド` and `Cエンド`, the game's three
+  endings. The new Blood Rock shop rows ([above](#what-changed)) carry unlock flag 5904 in their
+  `qwcId` field (Blood Stone Chunk's carry 5903), so this event change is what makes Blood Rock
+  buyable: after that point in the Nightmare of Mensis, or after finishing the game. (An earlier
+  version of this page guessed the link and said the shop rows carry no flag; reading
+  `ShopLineupParam`'s `qwcId` settled it. See [where the items are](the-items.md#unlock-flags).)
 * The gravestone messengers' animations (`墓石メッセンジャーアニメ可否判定`) now check the DLC
   flags on gravestone 4, not 3, and the Doll's position check follows.
 

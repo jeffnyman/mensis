@@ -10,6 +10,7 @@ chain below is read from the data, and the result can be checked against what pl
 map layout (MSB)   treasure event ──► item lot(s) ──► item id + category ──► English name
                    placed enemy ──► NpcParam ──► blood echoes + item lots ──► …
 event script       [2003:04] アイテム取得 ("obtain item")(lot) ──► …
+shop table         ShopLineupParam row ──► item + price + unlock flag ──► "owns <badge>" …
 ```
 
 Each step uses a tool from earlier work:
@@ -17,6 +18,7 @@ Each step uses a tool from earlier work:
 | Link | Read by | Source |
 |---|---|---|
 | treasure events, placed enemies | `tools/msb.py` | `map/mapstudio/<map>.msb.dcx` |
+| shops and their unlock flags | `tools/params.py`, `tools/events.py` | `ShopLineupParam`, the event scripts |
 | item lots, NPC drops, level-dependent items | `tools/params.py` | `ItemLotParam`, `NpcParam`, `ItemLotLvdepParam` |
 | items given by scripts | `tools/events.py` | `event/<map>.emevd.dcx` |
 | names | `tools/souls.py` (FMG) | `msg/engus/item.msgbnd.dcx` |
@@ -30,7 +32,8 @@ python -I tools/items.py find  work/base/dvdroot_ps4 work/update/dvdroot_ps4 "Sa
 ```
 
 `world` writes the whole index (every map's treasure with position and pickup flag, every
-enemy's echoes and drops, every event-given item) in under a second. `find` searches it.
+enemy's echoes and drops, every event-given item, every shop row) in under a second. `find`
+searches it.
 
 ## Item lots
 
@@ -76,17 +79,69 @@ Yahar'gul and Byrgenwerth. The variants have the same treasure but slightly diff
 Cathedral Ward's two have 139 and 140, Byrgenwerth's 80 and 83. Bloodborne changes its world
 as the night progresses, and these are that, as separate layout files.
 
+## Shops, and a wrong guess corrected
+
+The first version of this page said the Chikage must be "handed over by an NPC in a talk
+script", because it wasn't in any item lot. That was tested rather than assumed: ranking every
+talk command by how often its arguments are real item-lot IDs found no item-giving command (the
+best scored about 30%, and those were flags that share lot numbering). Searching the other way,
+from the Chikage's weapon ID, found it in no lot at all, but in five rows of **`ShopLineupParam`**.
+It is *sold*.
+
+### The shop table
+
+| Series (row id ÷ 10000) | `shopType` | What the rows contain | Is |
+|---|---:|---|---|
+| 0 | 0 | Saw Cleaver, Hunter Axe, Threaded Cane at price 0 | the starting-weapon choice |
+| 10–14 | 0 | the same 144 items in each, prices rising tier by tier (Blood Vial 180 → 360 → 540 → 720 → 900) | the Bath Messengers' blood-echo shop, five price tiers |
+| 20–24 | 5 | 51 items at prices 1–60 (Small Resonant Bell 1, Blood Rock 60) | the Bath Messengers' insight shop |
+| 51–54, 61–64 | 0 | 38 items each, priced well above the Bath Messengers | two more echo shops, four tiers each (which in-game shops isn't established) |
+
+Insight is "SAN値" (SAN value) internally. The shop table has a `value_SAN` price field, and the
+Hunter's Dream event `売買メッセンジャー（SAN値）アニメ` ("trading messenger (SAN value)
+animation") tests `SAN値で判定` ("judge by SAN value") ≥ 1 before that messenger appears, which
+is the insight shop appearing once you have insight. What selects the price tier isn't
+established yet.
+
+### Unlock flags
+
+A row is for sale only once the event flag in its `qwcId` field is set. In Dark Souls that field
+held a world-tendency parameter ID; Bloodborne reuses it for the unlock flag. The Chikage's flag
+is 12101007. No event script, talk script, table or event argument writes that flag, and the
+reason is an engine convention:
+
+* Event 12101000, `売買メッセンジャー_ラインナップ拡充_XX` ("trading messenger: line-up
+  expansion"), is a template that waits until the player owns a goods item (`[3:04]
+  アイテムの所有状態で判定`, "judge by item ownership") passed in as an argument.
+* It is started ten times, in slots 0–9, once per **hunter badge**.
+* When an event finishes, the engine sets the event's own flag: its ID plus its slot.
+
+So flag 12101000 + *slot* means "owns that badge", and 12101007 is **"owns the Cainhurst Badge"**.
+The Chikage is bought from the Bath Messengers for 50,000 echoes once you have it. The same
+template explains the rest of the badge groups: the Saw Hunter Badge (slot 0, flag 12101000)
+unlocks the Saw Cleaver, Hunter Axe, Threaded Cane and Saw Spear rows.
+
+`items.py` finds these flags generically: any event that waits on item ownership with the item
+from an argument, started with that argument in slot *s*, defines "flag = event + *s* → owns
+that item". That finds **47** such flags: the ten badges, the messengers' decorations ("owns
+Messenger Top Hat", the items that change the Bath Messengers' look), and the Uncanny/Lost
+versions of the DLC weapons (5500–5521, so the shop re-sells them once you have them). Shop rows
+with one of these flags show their condition in words:
+
+```
+shop  Bath Messengers, echoes, tier 1   Chikage: price 50000, unlocked by flag 12101007 (owns Cainhurst Badge)
+```
+
+The **Beast Claw** is also a shop row (34,000, flag 6680). It isn't placed in any main map
+layout, which fits it being found first in the Chalice Dungeons; flag 6680 isn't one of the
+derived "owns" flags, so what sets it isn't established.
+
 ## What it doesn't cover yet
 
-* **Items given in conversation.** Some items (the Chikage, for one) are handed over by an NPC
-  in a talk script. Bloodborne's talk commands are unnamed, so the item-giving command hasn't been
-  identified. Finding it, by looking for a talk command whose argument is always a valid item
-  lot, would close the gap.
-* **Chalice Dungeons.** Their treasure is generated from the dungeon tables (`DungeonFeatureParam`,
-  `DungeonSubFeatLotParam`, …), not placed in layouts. The Beast Claw, for example, comes from
-  there.
-* **Shops.** `ShopLineupParam` lists what each shop sells (it's where 1.09's Blood Rock rows are),
-  but isn't joined into the index yet.
+* **Chalice Dungeons.** Their treasure is generated from the dungeon tables
+  (`DungeonFeatureParam`, `DungeonSubFeatLotParam`, …), not placed in layouts.
+* **Unlock flags that aren't "owns X".** Flag 6680 (Beast Claw), and the line-up flags 5900–5904,
+  which the messengers' event sets from progress flags (see [the patch](the-patch.md)).
 * **Three event awards** (event 9440, `誓約ボディジェム入手`, "obtain covenant body gem", lots
   10500/11500/12500) point at lots that don't exist in `ItemLotParam`, so they must resolve some
   other way.

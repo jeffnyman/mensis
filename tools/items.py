@@ -9,6 +9,7 @@ The chain, every link read from the game (1.09 files laid over 1.00):
     map layout (MSB)  treasure event --> item lot(s) --> item id + category --> English name
                       enemy part --> NpcParam --> blood echoes + item lots --> ...
     event script      [2003:04] obtain item(lot) --> ...   (literal, or passed in by [2000:00])
+    ShopLineupParam   item, price per tier, unlock flag (qwcId)
 
 Item lot categories, established by matching IDs against the tables:
     0 weapon (EquipParamWeapon)   1 armour (EquipParamProtector)   4 goods (EquipParamGoods)
@@ -89,6 +90,80 @@ class World:
 
     def layout(self, m: str):
         return msblib.Msb(souls.load(self.path(f"map/mapstudio/{m}.msb.dcx")))
+
+
+SHOP_EQUIP = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}
+
+
+def shop_series(series: int, shop_type: int) -> str:
+    """ShopLineupParam row id // 10000, described from what the rows contain (see docs/the-items.md)."""
+    if series == 0:
+        return "starting weapons"
+    if 10 <= series <= 14:
+        return f"Bath Messengers, echoes, tier {series - 9}"
+    if 20 <= series <= 24:
+        return f"Bath Messengers, insight, tier {series - 19}"
+    if 51 <= series <= 54 or 61 <= series <= 64:
+        return f"shop series {series // 10}x, echoes, tier {series % 10}"
+    return f"shop series {series} (type {shop_type})"
+
+
+def ownership_flags(w: World) -> dict[int, str]:
+    """Event flags that mean "the player owns item X", worked out from the event scripts.
+
+    An event that waits on [3:04] / [3:16] アイテムの所有状態で判定 ("judge by item ownership")
+    with the item taken from a parameter, and is started with [2000:00] イベント起動 in slot s,
+    finishes when the player owns that item, and the engine sets the event's own flag: event id
+    + slot. The Bath Messengers' line-up expansion (event 12101000, one slot per hunter badge) is
+    the case that matters: flag 12101007 is "owns the Cainhurst Badge".
+    """
+    import events as evlib
+    import struct
+    out = {}
+    evdir = os.path.join(w.base, "event")
+    for fn in sorted(os.listdir(evdir)):
+        if not fn.endswith(".emevd.dcx"):
+            continue
+        evs = {e.id: e for e in evlib.read_emevd(souls.load(w.path(f"event/{fn}")))}
+        waits = {}  # event id -> (parameter source byte of the item id, item type)
+        for e in evs.values():
+            subst = {(idx, dst): src for idx, dst, src, ln in e.params}
+            for k, (c, i, raw) in enumerate(e.instructions):
+                # args: s8 condition group @0, u8 item type @1, s32 item id @4, u8 state @8
+                if (c, i) in ((3, 4), (3, 16)) and (k, 4) in subst:
+                    waits[e.id] = (subst[(k, 4)], raw[1])
+        for e in evs.values():
+            for c, i, raw in e.instructions:
+                if (c, i) == (2000, 0) and len(raw) >= 12:
+                    slot, target = struct.unpack_from("<iI", raw, 0)
+                    if target in waits:
+                        src, itype = waits[target]
+                        args = raw[8:]
+                        if src + 4 <= len(args):
+                            item = struct.unpack_from("<i", args, src)[0]
+                            table = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}.get(itype)
+                            name = w.names.get(table, {}).get(item, f"item {item}") if table else f"item {item}"
+                            out[target + slot] = f"owns {name.strip()}"
+    return out
+
+
+def shops(w: World):
+    """{item name: [(where, price, unlock flag)]} from ShopLineupParam.
+
+    The unlock flag is the qwcId field: Dark Souls' world-tendency ID, reused by Bloodborne as
+    the event flag a row needs before it is for sale (-1/0: always). Flags that mean "owns item X"
+    (see ownership_flags) are spelled out, e.g. 12101007 (owns Cainhurst Badge).
+    """
+    out = collections.defaultdict(list)
+    meanings = ownership_flags(w)
+    for rid, r in sorted(w.rows("ShopLineupParam").items()):
+        table = SHOP_EQUIP.get(r["equipType"])
+        name = (w.names.get(table, {}).get(r["equipId"]) or f"{table or r['equipType']} {r['equipId']}").strip()
+        flag = r["qwcId"] if r["qwcId"] > 0 else None
+        if flag and flag in meanings:
+            flag = f"{flag} ({meanings[flag]})"
+        out[name].append((shop_series(rid // 10000, r["shopType"]), r["value"], flag, rid))
+    return out
 
 
 AWARD = {(2003, 4): "obtain item", (2003, 36): "obtain item (client too)"}
@@ -178,6 +253,11 @@ def main():
 
     if cmd == "find":
         q = sys.argv[4].lower()
+        for name, rows in shops(w).items():
+            if q in name.lower():
+                for where, price, flag, rid in rows:
+                    print(f"{'shop':14} {where:38} {name}: price {price}" + (f", unlocked by flag {flag}" if flag else "")
+                          + f"  (row {rid})")
         for stem, rows in event_awards(w).items():
             for r in rows:
                 for name, n, c in r["items"]:
@@ -221,6 +301,15 @@ def main():
     for stem in sorted(awards):
         for r in awards[stem]:
             out.append(f"| {stem} | {r['event']} | {r['name']} | {r['lot']} | {fmt_items(r['items'])} |")
+    out += ["", "## Sold in shops", "",
+            "From `ShopLineupParam`. Price per tier; the unlock flag is the row's `qwcId`.", "",
+            "| Item | Where | Prices by tier | Unlock flag |", "|---|---|---|---:|"]
+    for name, rows in sorted(shops(w).items()):
+        groups = collections.defaultdict(list)
+        for where, price, flag, rid in rows:
+            groups[(where.rsplit(", tier", 1)[0], flag)].append(price)
+        for (where, flag), prices in groups.items():
+            out.append(f"| {name} | {where} | {' / '.join(map(str, prices))} | {flag or ''} |")
     with open(sys.argv[4], "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
     print("\n".join(out[3:5 + len(w.maps())]))
