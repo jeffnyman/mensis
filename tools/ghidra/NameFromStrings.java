@@ -29,7 +29,8 @@
 //             the branches into the assert's basic block; the global read there is the instance
 //             pointer of the named class and becomes g_<Class> (given a clear majority of votes,
 //             and only one global per class). The function called is the assert handler and
-//             becomes FD4_SingletonAssert (a descriptive name, not one found in the binary).
+//             becomes AssertFailed: it turns out to be the engine-wide assert handler (file, line,
+//             message, ...), not only for singletons. A descriptive name, not one in the binary.
 //
 // Names are applied with SourceType.ANALYSIS, so any name a person sets later wins, and every
 // named function or global gets a plate/EOL comment saying which rule named it and why.
@@ -339,7 +340,7 @@ public class NameFromStrings extends GhidraScript {
             try {
                 Function f = getFunctionAt(h.getKey());
                 if (f != null) {
-                    nameFunction("singleton", f, null, "FD4_SingletonAssert",
+                    nameFunction("singleton", f, null, "AssertFailed",
                         "called by " + h.getValue() + " FD4Singleton.h / FD4DerivedSingleton.h asserts (descriptive name)");
                 }
             }

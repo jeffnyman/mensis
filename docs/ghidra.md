@@ -399,14 +399,15 @@ The singleton rule needed two corrections, both worth knowing for this kind of w
    allows each class name on only one global. Result: 109 globals, every name unique; 30
    ambiguous ones are logged and left unnamed.
 
-The singleton handler itself, called by all 5,659 asserts, becomes `FD4_SingletonAssert`. That
-name and the `g_` prefix are *descriptive*, chosen here; the step and marker names are *the
+The handler, called by all 5,659 asserts, becomes `AssertFailed`. (It was first named
+`FD4_SingletonAssert`; [hand-naming](#naming-the-hot-helpers-by-hand) showed it is the engine-wide
+assert handler, used by lock, mutex and heap code too.) That name and the `g_` prefix are *descriptive*, chosen here; the step and marker names are *the
 binary's own*. Every name is applied with Ghidra's **analysis** source type, so a name a person
 sets later always wins. Each named item also gets a comment saying which rule named it and on
 what evidence (`[mensis:step] step table entry 05957960 written by FUN_0198d3d0`).
 
 The results agree with everything identified by hand earlier: `DAT_0593b118` → `g_SprjFile`,
-`FUN_024b55b0` → `FD4_SingletonAssert`, `FUN_016f2510` →
+`FUN_024b55b0` → `AssertFailed`, `FUN_016f2510` →
 `SprjEmkSystemUpdateTask::_STEP_Update`. The parameter loader now decompiles as:
 
 ```c
@@ -414,7 +415,7 @@ The results agree with everything identified by hand earlier: `DAT_0593b118` →
     pcVar1 = *(code **)(*g_SprjFile + 0x18);
     FUN_02bc0e00(local_78, L"param:/GameParam/GameParam.parambnd");
     ...
-      FD4_SingletonAssert("E:\\AB\\SPRJ\\...\\FD4DerivedSingleton.h", 0xaa, &DAT_04d3b3bd, "SprjFile");
+      AssertFailed("E:\\AB\\SPRJ\\...\\FD4DerivedSingleton.h", 0xaa, &DAT_04d3b3bd, "SprjFile");
 ```
 
 **Numbers:** 835 functions and 109 globals named in 1.09 (834 and 109 in 1.00). That's under 1% of the
@@ -422,6 +423,112 @@ functions, but the globals are the engine's managers (`g_WorldChrMan`, `g_FrpgNe
 `g_SprjEventFlagMan`, `g_SprjGaitem`, `g_CSMovie`, `g_LuaConsoleManager`, …), and between them
 they are null-checked at over 5,000 sites. Their names now show up in every function that uses a
 manager, and those uses are the starting point for naming the managers' methods.
+
+## Naming the hot helpers by hand
+
+Rules name what the strings point at. The next most valuable names belong to the small helpers
+every other function calls: allocators, locks, string routines. Naming one of those improves
+thousands of decompiled functions at once. These need reading, not rules.
+
+### Finding them: `MostCalled.java`
+
+```
+analyzeHeadless work\ghidra\project Bloodborne -process eboot-1.09.ghidra.elf -noanalysis -readOnly ^
+    -scriptPath tools\ghidra -postScript MostCalled.java work\ghidra\hot 40
+```
+
+It counts, for every unnamed function, how many distinct functions call it (following thunks to
+the real target), and writes the top N to `most-called.tsv` along with a decompilation of each.
+The top of the list in 1.09:
+
+| Rank | Address | Callers |
+|---:|---|---:|
+| 1 | `0247b720` | 4,057 |
+| 2 | `0247fa50` | 3,827 |
+| 3 | `0247ee80` | 2,744 |
+| 4 | `02483fe0` | 2,718 |
+| 5 | `0247bbf0` | 2,672 |
+
+A companion script, `Decompile.java`, decompiles any list of addresses. An address written as
+`addr:callers` also gets up to three of its callers, which is often how a function's meaning
+becomes clear: #14 is a one-line call through a vtable, and only its callers (`#14(0xB0, 0x10,
+heap)`, then an object built in the result) show it is an aligned allocation.
+
+### What they turned out to be
+
+Reading the top 40 gave names to 25 of them. Two more functions were named along the way
+(`WString_FromCStr`, and `AssertFailed`, below), plus two globals. The other 15 are clear as code
+but nothing says *what* they are, so they stay unnamed rather than get invented names. The named ones fall into a
+few families:
+
+* **Memory.** The engine's heaps (dantelion2's). `Heap_FindForPointer` (#1, 4,057 callers) is
+  the core of every free: it takes a pointer and checks the thread's temporary heap range, then
+  the heap list under a read/write lock, then falls back to the default heap. Around it:
+  `Heap_GetDefault`, `MemorySystem_Get` (a 0x440-byte global holding the heap list, its lock and
+  the container allocator), `Heap_AllocAligned`, the per-thread `TemporaryHeap_*`, and the
+  `HeapContainer_*` constructor/destructor behind the ubiquitous "Tried to create container with
+  incompatible heap." assert.
+* **Locks.** `PthreadMutex_InitRecursive` (asserts from `PthreadMutex.cpp`; mutex type 2 is
+  recursive), `Mutex_IsCreated`, `GlobalInitMutex_Get`, `AtomicDecrement`.
+* **Strings.** The wide-string routines of Sony's Dinkumware C++ library: `WString_Assign`
+  (found twice, identical 477-byte bodies, two template instantiations), `WString_AssignSubstr`,
+  and `WString_FromCStr`, which builds every virtual path such as
+  `L"param:/GameParam/GameParam.parambnd"`. The layout gives them away: an 8-character inline
+  buffer at `+8`, length at `+0x18`, capacity at `+0x20`. Also `String_Format`.
+* **Reference counting.** `RefCounted_Release` and `RefCounted_ReleaseAtomic` (decrement, and at
+  zero call the destructor slot).
+* **Middleware.** Havok's `hkArrayUtil::_reserve`/`_reserveMore` (the capacity word's
+  `0x3FFFFFFF` mask and "don't deallocate" bit are `hkArray`'s), `HavokScript_PrintAssert`, and
+  two Scaleform ActionScript 3 garbage-collector release functions.
+* **Reflection.** `DLRuntimeClass_Register` (asserts from `DLRuntimeClass.cpp`), the call the
+  class-registration initialisers make right after writing `THIS_CLASS`.
+
+Reading also corrected an earlier name. The function `NameFromStrings` had called
+`FD4_SingletonAssert` is the engine-wide assert handler: the lock, mutex and heap code call it
+with their own file names. It is now `AssertFailed`, in the hand list and in the script.
+
+### Recording names: `tools/names/*.tsv` and `ApplyNames.java`
+
+Unlike rule-made names, these are judgments, so each one is kept in a committed file with its
+evidence and a confidence level:
+
+| Confidence | Meaning | Count |
+|---|---|---:|
+| certain | the code does exactly this, or a source-file assert names it | 7 |
+| likely | the behaviour is clear; the exact name is ours | 18 |
+| probable | attributing it to a particular library is an inference | 4 |
+
+```
+address   kind      name                   confidence  evidence
+0247b720  function  Heap_FindForPointer    likely      rank 1, 4,057 callers: given a pointer, checks ...
+02483fe0  function  PthreadMutex_InitRecursive  certain  rank 4: scePthreadMutexattrSettype(attr, 2 = recursive) ...
+```
+
+`ApplyNames.java <names.tsv>` applies a list as **user-defined** names, which outrank both
+analysis and `NameFromStrings`. Each item gets a comment like `[mensis:hand/likely] rank 1, …`,
+so the evidence is visible right in the listing.
+
+### Carrying names to the other build: `tools/port_names.py`
+
+The list is written against 1.09 addresses. `port_names.py` aligns the two builds' function lists
+the same way `build_diff.py` does. It moves a function name across only when the function is
+paired with **identical** code, so a name always lands on the code it was judged on. All 27 moved
+to 1.00. Globals can't be paired that way, so the two were found by hand through the functions
+that read them (`WString_FromCStr` and `HeapContainer_Construct` in 1.00) and added to
+`tools/names/eboot-1.00.hand.tsv`.
+
+The parameter loader, before any naming and after both passes:
+
+```c
+// before
+  if (DAT_0593b118 != (long *)0x0) {
+    FUN_02bc0e00(local_78, L"param:/GameParam/GameParam.parambnd");
+      FUN_024b55b0("E:\\AB\\SPRJ\\...\\FD4DerivedSingleton.h", 0xaa, &DAT_04d3b3bd, "SprjFile");
+// after
+  if (g_SprjFile != (long *)0x0) {
+    WString_FromCStr(local_78, L"param:/GameParam/GameParam.parambnd");
+      AssertFailed("E:\\AB\\SPRJ\\...\\FD4DerivedSingleton.h", 0xaa, &DAT_04d3b3bd, "SprjFile");
+```
 
 ## Where to go from here
 
@@ -432,9 +539,9 @@ Ordered by payoff for effort:
    `SingletonLifetimePolicies.inl` ones, `DLReferenceCountObject`, container heap checks) and the
    `THIS_CLASS` registrations (which tie a class name to its runtime class record) are the next
    candidates.
-2. **Name the hot helpers by hand.** The wide-string constructor
-   (`FUN_02bc0e00`), the heap allocators and the singleton getters are each called thousands of
-   times.
+2. **Keep going down the most-called list.** [Naming the hot helpers by
+   hand](#naming-the-hot-helpers-by-hand) covered the top 40; ranks 40–200 are still called
+   hundreds of times each.
 3. **Bring in Havok and FMOD.** Their code makes up much of the binary and their headers are
    documented. Ghidra *Function ID* databases or BSim signatures built from matching SDK versions
    (Havok 2014.1, FMOD Ex 4.44.50) would name them in bulk.

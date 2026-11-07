@@ -1,0 +1,37 @@
+# Hand-assigned names for eboot 1.09 (addresses as loaded at 0x400000 by orbis_prep.py).
+# Applied with tools/ghidra/ApplyNames.java. Confidence:
+#   certain   the code does exactly this, or a source-file assert names it
+#   likely    the behaviour is clear; the exact name is ours
+#   probable  attribution to a particular library is an inference
+# Rank = position among the most-called unnamed functions (MostCalled.java), where relevant.
+# Ported by tools/port_names.py from eboot-1.09.hand.tsv; only functions paired with identical code are carried across.
+address	kind	name	confidence	evidence
+024b69a0	function	AssertFailed	certain	(file, line, message, ...) handler called by ~5,700 asserts: singleton checks, DLReadWriteLock.cpp, PthreadMutex.cpp, DLTemporaryHeap.cpp, container heap checks; does not return [ported from eboot-1.09.hand.tsv 024b55b0]
+0247cb10	function	Heap_FindForPointer	likely	rank 1, 4,057 callers: given a pointer, checks the thread's temporary heap range, then searches the heap list under the read/write lock (DLReadWriteLock.cpp asserts), else returns Heap_GetDefault() [ported from eboot-1.09.hand.tsv 0247b720]
+02480e40	function	Heap_GetDefault	likely	rank 2, 3,827 callers: lazily constructs the default heap under the global init mutex and returns it [ported from eboot-1.09.hand.tsv 0247fa50]
+02480270	function	Mutex_IsCreated	likely	rank 3, 2,744 callers: returns the byte at +0x10 of a mutex object, the flag set after PthreadMutex_InitRecursive succeeds [ported from eboot-1.09.hand.tsv 0247ee80]
+024853d0	function	PthreadMutex_InitRecursive	certain	rank 4: scePthreadMutexattrSettype(attr, 2 = recursive) + scePthreadMutexInit; asserts from PthreadMutex.cpp [ported from eboot-1.09.hand.tsv 02483fe0]
+0247cfe0	function	MemorySystem_Get	likely	rank 5, 2,672 callers: lazily constructs a 0x440-byte global; Heap_FindForPointer uses its heap list (+0x468) and lock (+0x470), containers its allocator (+0x458) [ported from eboot-1.09.hand.tsv 0247bbf0]
+024ef240	function	GlobalInitMutex_Get	likely	rank 6: lazily initialises and returns the static mutex that Heap_GetDefault and MemorySystem_Get lock [ported from eboot-1.09.hand.tsv 024ede50]
+024b80f0	function	HeapContainer_Construct	likely	rank 8: sets vtable 057b3ba0, binds g_ContainerHeap, asserts "Tried to create container with incompatible heap." [ported from eboot-1.09.hand.tsv 024b6d00]
+024b6e50	function	HeapContainer_Destruct	likely	rank 13: resets vtable 057b3ba0 and frees each element through the bound heap [ported from eboot-1.09.hand.tsv 024b5a60]
+0247d8d0	function	Heap_AllocAligned	likely	rank 14: (size, alignment, heap) -> heap->vtable[0x58](heap, size, alignment); callers construct objects in the result (e.g. 0xB0 bytes aligned 16) [ported from eboot-1.09.hand.tsv 0247c4e0]
+0247e640	function	TemporaryHeap_EnsureForThread	certain	rank 15: allocates the calling thread's temporary heap (default 0x20000) into TLS; asserts from DLTemporaryHeap.cpp [ported from eboot-1.09.hand.tsv 0247d250]
+0247eb90	function	TemporaryHeap_GetAllocator	likely	rank 32: TemporaryHeap_EnsureForThread() then returns the thread's temporary heap + 0x28 [ported from eboot-1.09.hand.tsv 0247d7a0]
+0247fff0	function	AtomicDecrement	certain	rank 34: LOCK dec of an int, returns the old value [ported from eboot-1.09.hand.tsv 0247ec00]
+0045a4c0	function	RefCounted_ReleaseAtomic	certain	rank 17: atomic decrement of the count at +8; at zero calls vtable[1] (destroy) [ported from eboot-1.09.hand.tsv 0045a4c0]
+0045a510	function	RefCounted_Release	certain	rank 39: non-atomic version of RefCounted_ReleaseAtomic [ported from eboot-1.09.hand.tsv 0045a510]
+00819040	function	hkArrayUtil::_reserve	probable	rank 12: grows an array whose capacity word uses mask 0x3FFFFFFF and a 'don't deallocate' top bit (hkArray layout), via allocator vtable +0x20/+0x30 [ported from eboot-1.09.hand.tsv 00819040]
+00819100	function	hkArrayUtil::_reserveMore	probable	rank 11: as hkArrayUtil::_reserve, with the new capacity = max(1, 2 * size) [ported from eboot-1.09.hand.tsv 00819100]
+027ee6f0	function	SF_AS3_RefCountGC_Release	probable	rank 9: release of a GC-tracked object whose count is the low 22 bits of a flags word (Scaleform AS3 RefCountBaseGC layout); lives with Scaleform AS3 code ("Error #{0}") [ported from eboot-1.09.hand.tsv 027ee1e0]
+007102d0	function	SF_AS3_Value_Release	probable	rank 10: switch on a 5-bit kind tag, decrementing the referenced object's count (kinds 10-14) and calling SF_AS3_RefCountGC_Release [ported from eboot-1.09.hand.tsv 007102d0]
+02b63210	function	String_Format	likely	rank 18: printf-style formatter into a string object; asserts "format() can not handle oneself as a format string." [ported from eboot-1.09.hand.tsv 02b62d00]
+02a2a820	function	WString_Assign	likely	rank 31: Dinkumware basic_string<wchar_t>::assign(ptr, count): inline buffer of 8 at +8, length +0x18, capacity +0x20, handles a source inside its own buffer [ported from eboot-1.09.hand.tsv 02a2a310]
+02a2ac30	function	WString_Assign_2	likely	rank 19: second instantiation of WString_Assign (identical 477-byte body, different allocator type) [ported from eboot-1.09.hand.tsv 02a2a720]
+02a27eb0	function	WString_AssignSubstr	likely	rank 22: assign(other, pos, count) with the out-of-range check [ported from eboot-1.09.hand.tsv 02a279a0]
+02bc1310	function	WString_FromCStr	likely	constructs a wide string from a NUL-terminated wchar_t* on g_DefaultHeap (wcslen + WString_Assign_2); used for every virtual path such as L"param:/GameParam/GameParam.parambnd" [ported from eboot-1.09.hand.tsv 02bc0e00]
+02d77360	function	WString_FromCStr_TempHeap	likely	rank 40: as WString_FromCStr, on the thread's temporary heap [ported from eboot-1.09.hand.tsv 02d67040]
+024b8f00	function	DLRuntimeClass_Register	likely	rank 25: called by class registration initialisers after writing THIS_CLASS; asserts from DLRuntimeClass.cpp ("Given runtime class is NULL") [ported from eboot-1.09.hand.tsv 024b7b10]
+00e73a60	function	HavokScript_PrintAssert	certain	rank 33: printf("Havok Script Assertion [r $build] 0x%08X failed: ...") [ported from eboot-1.09.hand.tsv 00e73a60]
+05940640	global	g_DefaultHeap	likely	cache of Heap_GetDefault(), read by WString_FromCStr (02bc1310) [found by hand in 1.00; 05940670 in 1.09]
+05940638	global	g_ContainerHeap	likely	cache of MemorySystem_Get() + 0x458, read by HeapContainer_Construct (024b80f0) [found by hand in 1.00; 05940668 in 1.09]

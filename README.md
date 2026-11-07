@@ -26,7 +26,8 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
   built from, and what decompiling it involves.
 * [Loading it into Ghidra](docs/ghidra.md): the step-by-step procedure from `eboot.bin` to an
   analysed Ghidra project, why each step is needed, what the result looks like, how the 1.00
-  and 1.09 builds were compared, and how functions get named from the strings around them.
+  and 1.09 builds were compared, and how functions get named: by rule from the strings around
+  them, and by hand for the most-called helpers.
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -60,6 +61,7 @@ python -I tools/souls.py dcx|bnd|fmg|param <file> …                  # DCX/BND
 python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → Ghidra-ready
 pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
 python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
+python -I tools/port_names.py <names.tsv> <from.tsv> <to.tsv> <out.tsv>  # carry names across builds
 ```
 
 (`python` meaning the one in `.venv`, e.g. `.venv/Scripts/python` on Windows.)
@@ -68,7 +70,12 @@ python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare
 starts before analysis), `OrbisReport.java` (summary and landmark decompilations),
 `ExportFunctionHashes.java` (per-function hashes for `build_diff.py`), `FindStringUses.java`
 (who uses which strings), `NameFromStrings.java` (names functions and globals from step tables,
-profiler markers and singleton asserts) and `DeleteProjectFile.java`.
+profiler markers and singleton asserts), `MostCalled.java` (the most-called unnamed functions,
+decompiled), `Decompile.java` (decompile any addresses, optionally with callers),
+`ApplyNames.java` (apply a hand-written name list) and `DeleteProjectFile.java`.
+
+`tools/names/` holds the hand-assigned names for each build, one per line with a confidence
+level and the evidence for it.
 `tools/pkgkeys.py` holds the public fake-package RSA keys.
 
 ## Working files (`work/`, ~30 GiB, not source)
