@@ -14,7 +14,7 @@ share of players experienced it. The Chalice Dungeons make the split clear:
 
 * The 100/200 pre-built layouts ship on the disc. The ritual's set-up step
   (`CSDungeonRitualHelper::STEP_Exec_forSetupHolygrail`) runs on the console and writes its
-  result into the save's event flags ([the Chalice Dungeons](the-chalice-dungeons.md#glyphs)). So
+  result into the save's event flags ([the Chalice Dungeons](the-chalice-dungeons.md#how-a-ritual-picks-its-layout)). So
   Root dungeons are created and played with no server.
 * The step names that involve a server are all about *sharing*: `WaitUpload_forPresentOffering`,
   `Exec_forChangeShareLevel`, `Exec_forJoin`, `Exec_forRandomJoin`.
@@ -127,7 +127,7 @@ and values. The builder adds:
 
 * `MessageId`: the request's name from the table, e.g. `"ChannelWordSearchRequest"`;
 * `SessionId` and `UserId`, and `?user_id=<id>` on the URL, to every request except `Login` (0)
-  and `UserAgreementGet` (5), the two made before there is a session.
+  and `UserAgreementGet` (5), which the builder special-cases as needing no session.
 
 The JSON text goes to the HTTP request as is. No further encryption step appears on this path,
 and the transport is HTTPS.
@@ -247,7 +247,7 @@ Past that, a replacement needs none of FromSoftware's original data:
 * For glyphs it only has to remember "this glyph means this dungeon" for dungeons uploaded to
   *that* server. A dungeon record is the `FormData` blob the console uploads, the same record it
   saves per slot: the chalice, a packed map ID (which fixes the layout), the sub-feature picks, a
-  16-byte glyph field and the name ([how a ritual picks its layout](the-chalice-dungeons.md#how-a-ritual-picks-its-layout)).
+  16-byte glyph field and the creator's name ([how a ritual picks its layout](the-chalice-dungeons.md#how-a-ritual-picks-its-layout)).
   Glyphs only have to be consistent within that server.
 * For blood messages, bloodstains, ghosts and summons, the server is a store-and-forward of the
   versioned blobs players upload, filtered by `AreaId`/`ChannelId` and matching level, with the
@@ -261,9 +261,9 @@ need to be.
 
 * **Replies.** The requests are mapped to field names. What the server sends back, and how each
   reply is parsed, is not.
-* **Value types and the blobs.** The table gives keys, not each value's type, and the contents of
-  the versioned `…Data` blobs (how a bloodstain or a ghost recording is laid out) haven't been
-  read.
+* **Value types and the blobs.** The table gives keys, not each value's type. Apart from
+  `FormData`, the saved dungeon record, the versioned `…Data` blobs (how a bloodstain or a ghost
+  recording is laid out) haven't been read.
 * **`ServerTimeGet` and `UserAgreementGet`**, which aren't built by the shared sender.
 * **The PSN `NpMatching2` room and signaling flow**, which is Sony middleware rather than game code.
 

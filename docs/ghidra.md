@@ -501,7 +501,7 @@ evidence and a confidence level:
 | Confidence | Meaning | Count |
 |---|---|---:|
 | certain | the code does exactly this, or a source-file assert names it | 7 |
-| likely | the behaviour is clear; the exact name is ours | 19 |
+| likely | the behaviour is clear; the exact name is ours | 18 |
 | probable | attributing it to a particular library is an inference | 4 |
 
 ```

@@ -70,8 +70,9 @@ Spot checks against well-known locations:
 | Simon's Bowblade | given by event `秘密を探るもの_死亡時アイテム入手` ("the seeker of secrets: obtain item on death") in the Hunter's Nightmare or the Research Hall, depending on where Simon dies |
 | Rakuyo | given by event `漁村_魚人大兄弟_撃破` ("Fishing Hamlet: big fishman brother defeated"), and listed as that enemy's own drop |
 
-Across the 16 main layouts: **659 treasure spots** and **1,774 placed enemies**. The event scripts
-give items in **181** places.
+Across the 16 maps, counting each map's first layout: **659 treasure spots** and **1,774 placed
+enemies** (all 24 layout files, with the later-night variants below: 1,058 and 2,890). The event
+scripts give items in **181** places.
 
 ### Layouts that change over the night
 
@@ -143,7 +144,9 @@ layout; it is found first in the Chalice Dungeons (below). Flag 6680 isn't one o
 Each Root chalice is 100 or 200 pre-built layouts, each placing its own treasure
 ([the Chalice Dungeons](the-chalice-dungeons.md)). The index reads all 2,685 Chalice layouts,
 attributes each layout folder to its chalice through the ritual table, and counts how many of a
-chalice's layouts place each item: how likely a given dungeon from that chalice is to hold it.
+chalice's layouts place each item. That is the share of layouts, not the chance of meeting the
+item: a ritual is steered towards unique items not yet picked up
+([how a ritual picks its layout](the-chalice-dungeons.md#how-a-ritual-picks-its-layout)).
 The 152,959 treasure lot references give 166 distinct items:
 
 | Item | Chalice | Layouts with it |

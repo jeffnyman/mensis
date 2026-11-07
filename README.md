@@ -28,7 +28,7 @@ scripts, and map layouts.
 * [The Chalice Dungeons](docs/the-chalice-dungeons.md): "random" Root Chalice dungeons are one of
   100 or 200 layouts that ship with the game, and [their event scripts](docs/the-chalice-events.md)
   show what the rites do inside them: every variant is already placed, and the script removes
-  all but one.
+  all but one. A ritual's roll is steered towards unique items you haven't picked up yet.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -45,7 +45,8 @@ scripts, and map layouts.
    and text, and the readers for them.
 5. [Where the items are](docs/the-items.md): the readers joined into one answer.
 6. [The Chalice Dungeons](docs/the-chalice-dungeons.md): rituals, their 100 or 200 pre-built
-   layouts, the rites, and the deeper chalices the tables define but the game doesn't contain.
+   layouts, the rites, the deeper chalices the tables define but the game doesn't contain,
+   glyphs, and how a ritual rolls and saves its layout.
 7. [The Chalice Dungeons' event scripts](docs/the-chalice-events.md): one template library run
    by 2,641 layouts, the special enemies and characters, the bell-ringing women, and the bosses'
    working names.

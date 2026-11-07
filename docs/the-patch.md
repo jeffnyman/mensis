@@ -23,7 +23,7 @@ repository, so it doubles as a worked example of the whole pipeline.
 * **Online play:** the SOS-sign request limit is read live, and several co-op and session
   functions changed ([code](#2-sos-sign-requests-a-limit-read-live)).
 
-Of the executable's 158,451 functions, 99.6% are unchanged.
+Of the executable's 158,451 non-thunk functions, 99.6% are unchanged.
 
 ## The code
 

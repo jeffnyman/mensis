@@ -25,7 +25,9 @@ layout's constructor makes about 440 starts: 42 of `寡婦死亡でザコ死亡_
 `扉アクション削除_XX`, 14 treasure chests, and so on, each pointing the template at particular
 doors, levers and enemies in that layout's map. So a layout is its map file plus a list of
 template calls, and the behaviour itself lives once, in `m29.emevd`. (The 7 exceptions, in the
-`m29_00`–`m29_04` folders, define events of their own.)
+`m29_00`–`m29_04` folders, define events of their own. The counts differ from the 2,685 layout
+files because 48 layouts have no script, mostly one `_90_` layout per Root base and 20 in
+`m29_01_11`, and 4 scripts have no layout.)
 
 Usage across all layouts shows what every dungeon has and what is rare:
 
@@ -195,8 +197,8 @@ The Patches events' names say what he does: he turns hostile after a count of at
 The library has two kinds of "widow" (`寡婦`, model c1050), each with a bell-control template
 (`寡婦_鐘制御`):
 
-* **Appearing widows** (`出現寡婦`, rows 1059x0) are in **2,302 layouts across all 25 Root
-  folders**. Each stays hidden until the game is **online** and either the host (level ≥ 30) has
+* **Appearing widows** (`出現寡婦`, rows 1059x0) are in **2,302 layouts**, in all 23 Root
+  folders and two others (`m29_01_00_00`, `m29_01_99_00`). Each stays hidden until the game is **online** and either the host (level ≥ 30) has
   at least one cooperator, or the player has the effect of the **Sinister Resonant Bell**
   (effect 9025, which the item applies: `EquipParamGoods` 225). (In some layouts a further flag
   waives the cooperator requirement.) Ten seconds later a message appears (109000), the widow
@@ -206,8 +208,8 @@ The library has two kinds of "widow" (`寡婦`, model c1050), each with a bell-c
   `m29_53_20/21_00`) plus two test folders. They stand inert unless flag **92905340** is set,
   the flag of feature 40, the **Sinister Bell** rite.
 
-That settles what the Sinister Bell rite does, which [the Chalice Dungeons](the-chalice-dungeons.md#rites)
-left open. Its rite menus (30240, 31240, 50240, 52240, 53240) exist for exactly the depths and
+That settles what the Sinister Bell rite does, which earlier versions of
+[the Chalice Dungeons](the-chalice-dungeons.md#rites) left open. Its rite menus (30240, 31240, 50240, 52240, 53240) exist for exactly the depths and
 bases that have a Sinister chalice, and its flag is what wakes the widows placed in those
 chalices' layouts. The ringing itself is multiplayer logic: while a widow is up,
 `マルチ侵入管理` ("multiplayer invasion management") gives the host effect 9020 and shows message

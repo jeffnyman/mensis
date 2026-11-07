@@ -2,8 +2,9 @@
 
 How Bloodborne's Chalice Dungeons are put together, read from the game's own tables and layouts.
 The short version: **a "random" Root Chalice dungeon is one of 100 or 200 pre-built layouts**,
-chosen by number, and the rites (Fetid, Rotted, Cursed, Sinister) change which enemy and gem
-tables those layouts draw on.
+chosen by number (steered towards unique items you haven't picked up yet), and the rites
+(Fetid, Rotted, Cursed, Sinister) change which enemy and gem tables those layouts draw on, or set
+event flags that decide which of the variants already placed in the layout survive.
 
 ```
 python -I tools/chalice.py work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/chalice/chalice-1.09.md
@@ -21,7 +22,8 @@ chalice item (EquipParamGoods id) == HolygrailExParam row id
     ├── mapBaseId ──► layout folder(s) map/mapstudio/m29_AB_C?_00/, one MSB per variation
     ├── requiredMaterialId ──► RitualRequiredMatParam: echoes + up to five materials
     └── dungeonNameBaseId ──► place-name table (地名)
-rites: DungeonFeatureParam ──► NPC row offset, gem-generation offset, enemy-wide special effect
+rites: DungeonFeatureParam ──► NPC row offset, gem-generation offset, enemy-wide special effect,
+       and an event flag (92905300 + N) the event scripts use to keep or remove placed variants
 ```
 
 Every link was checked against the data. The ritual row's ID **is** the chalice's item ID (6100
@@ -42,7 +44,7 @@ layouts each. Matching them to the rituals' `mapBaseId` settles what they are:
 | Sinister Lower Pthumeru Root Chalice (6302) | 3 | 100 | `m29_30_20_00` (100) |
 | Cursed and Defiled Root Chalice (6401) | 4 | 200 | `m29_40_10_00` + `m29_40_11_00` (100 + 100) |
 | Pthumeru Ihyll Root Chalice (6500) | 5 | 200 | `m29_50_00_00` + `m29_50_01_00` (100 + 100) |
-| … | | | (all 14 Root chalices in `work/chalice/chalice-1.09.md`) |
+| … | | | (all 15 Root chalices in `work/chalice/chalice-1.09.md`) |
 
 `mapBaseId` *ABC* names folder `m29_AB_C…`: 100 → `m29_10_00_00`, 302 → `m29_30_20_00`. Depths 1–3
 have 100 variations in one folder, depths 4–5 have 200 split across two. The variations are
@@ -50,8 +52,9 @@ genuinely different dungeons. Five of the Pthumeru Root's 100 have 760–969 map
 enemies and 38–57 treasures.
 
 So a Root Chalice ritual picks one layout out of a fixed, finite set that ships with the game.
-How the game picks the number, and how that number relates to the dungeon "glyph" players share,
-isn't established yet.
+How it picks the number is [below](#how-a-ritual-picks-its-layout). The dungeon "glyph" players
+share isn't derived from that number: glyphs are assigned and resolved by the server
+([below](#glyphs)).
 
 **Story chalices** (the `xx09` IDs, e.g. 6109 Pthumeru Chalice) have `variationNum` 1, and a
 `…_90_00` folder each: the one fixed layout. Most of these folders hold a second, near-identical
@@ -113,7 +116,9 @@ Checked against the data:
 ### Rite menus and costs
 
 The rites offered for a chalice are rows of `DungeonSubFeatLotParam`, numbered depth × 10000 +
-base × 1000 + rite (010 Fetid, 020 Rotted, 070 Curse, 240 Sinister). Each has its own row in
+base × 1000 + variant × 100 + rite (10 Fetid, 20 Rotted, 40 Sinister Bell, 70 Curse), where the
+variant is the chalice's own (2 for the Sinister chalices, 1 for Cursed and Defiled, matching
+their `mapBaseId`s). Each has its own row in
 `RitualRequiredMatParam`, its cost, and picks a feature by weight:
 
 | Row | Rite | Cost | Picks |
@@ -151,8 +156,9 @@ Four kinds of special enemy, singly or in every possible pair: 4 + 6 = 10 varian
 layout's two special-enemy placements (event names `サブ特徴_特殊敵_1配置_…` / `_2配置_…`,
 "sub-feature: special enemy, placement 1 / 2"). *An earlier version of this table left placement
 2 empty for 20–23; the event templates show a single variant fills both placements.* What each
-kind is and does, and how the layouts carry every variant at once, is in
-[the Chalice Dungeons' event scripts](the-chalice-events.md#special-enemies-what-rotted-offering-adds).
+kind is and does is in [the Chalice Dungeons' event scripts](the-chalice-events.md#special-enemies-what-rotted-offering-adds),
+and how the layouts carry every variant at once in
+[rites are templates that remove things](the-chalice-events.md#rites-are-templates-that-remove-things).
 
 **The undying enemy can't be reached.** Across all 150 rows, the Rotted Offerings at the depths
 the game has (1–5) only ever pick 20, 21, 22, 24, 25 or 27. Every variant involving the undying
@@ -182,7 +188,9 @@ Pthumeru Root Chalice's costs. Their purpose isn't evident from the data.
 Each layout places its own treasure. The item index counts, per chalice, how many of its layouts
 hold each item ([where the items are](the-items.md#the-chalice-dungeons)). For example, the
 Uncanny Beast Claw is in 107 of the Ailing Loran Root Chalice's 200 layouts, and the plain Beast
-Claw only in the Ailing Loran story chalice.
+Claw only in the Ailing Loran story chalice. That share of layouts isn't the chance of meeting an
+item, because a ritual is steered towards unique items not yet picked up
+([how a ritual picks its layout](#how-a-ritual-picks-its-layout)).
 
 ## Glyphs
 
@@ -227,10 +235,11 @@ The helper's other steps (`ExecGet` / `WaitUpload_forPresentOffering`,
 creating, sharing and joining a dungeon are server operations.
 
 **What follows.** Nothing in the executable builds a glyph from dungeon data: the entry screen is
-the only code that touches the alphabet. Together with "cannot be used in offline mode", that
-points to glyphs being **assigned and resolved by the server**, not computed from the layout
-number on the console. If so, how a glyph encodes a dungeon can't be read from the game files
-at all.
+the only code that touches the alphabet. Glyphs are **assigned and resolved by the server**, not
+computed from the layout number on the console. The glyph search request, `ChannelWordSearch`,
+sends nothing but the eight characters (`SearchWord`) and a data version
+([the online boundary](the-online-boundary.md#each-requests-fields)), and the server answers with
+a dungeon. So how a glyph maps to a dungeon can't be read from the game files at all.
 
 ## How a ritual picks its layout
 
@@ -295,9 +304,12 @@ the game started and on everything drawn from it since. It can't be predicted fr
 
 **What's saved.** The dungeon is stored as a record that is the same whether it was made locally
 or fetched from the server. The server's version is the `FormData` blob from
-[the online boundary](the-online-boundary.md#each-requests-fields), versions 4 (0x7c bytes) and 5
-(0x8c, which adds the dungeon's name). The set-up step writes it into the save slot's event
-flags at 94000000 + slot × 100000:
+[the online boundary](the-online-boundary.md#each-requests-fields). Its parser accepts two
+versions, checked by a size field (4: 0x7c bytes, 5: 0x8c). Both carry the packed map ID, the
+chalice, the sub-feature picks and the 16-byte glyph field. Version 5 also carries a name; for
+version 4 the parser fills the name in from the local character, so the name is evidently the
+dungeon's creator. The set-up step writes the record into the save slot's event flags at
+94000000 + slot × 100000:
 
 | Flags (+ slot × 100000) | Holds |
 |---|---|
@@ -306,7 +318,7 @@ flags at 94000000 + slot × 100000:
 | 94000128 (32 bits) | the chalice: its `HolygrailExParam` row (the value the parser looks up there) |
 | 94000160 … | nine pairs of 32-bit values (the sub-feature picks) |
 | 94000736 (16 bytes) | the glyph |
-| 94000992 (48 bytes) | the dungeon's name, as text |
+| 94000992 (48 bytes) | the creator's name, as text |
 
 The engine's packed map IDs are four bytes, and three functions turn an `m29` one back into its
 chalice row as `6000 + block × 10 + sub-block / 10`. For example `m29_30_20_xx` gives 6302,
@@ -337,4 +349,4 @@ questions in earlier versions of this page, are answered in
 
 | Path | |
 |---|---|
-| `work/chalice/chalice-1.09.md` | every ritual with its depth, base, name, variations, layout folders and costs; the unused rituals; the rites; every rite menu with its cost and weights |
+| `work/chalice/chalice-1.09.md` | every ritual with its depth, base, name, variations, layout folders and costs; the unused rituals; the rites; every rite menu with its cost and weights; every unique item with its range and how many layouts inside and outside the range place it |
