@@ -203,11 +203,39 @@ The pattern for the weapon variants is visible here: the plain weapon in the sto
 *Uncanny* in a depth-4 Root chalice, *Lost* in a depth-5 one. With the Chalice layouts included,
 `world` takes about 25 seconds.
 
+## Items handed over by characters, and one award that never happens
+
+Characters' gifts mostly don't come from the talk script itself. The talk script sets a flag,
+and a `common` template,
+`NPCアイテム入手_XX` ("NPC item obtain", event 9040), awards an item lot once that flag is set.
+It is started 30 times, one per gift: flag 9042 gives lot 17000, 9075 gives lot 35010, and
+so on. Patches' talk script, for one, sets 9077 in its `アイテム取得` ("obtain item") state.
+
+**Event 9440 is the same thing with nothing feeding it.** `誓約ボディジェム入手_XX` ("obtain
+covenant body gem") awards lot 10500, 11500 or 12500 once flag 9440, 9441 or 9442 is set. Those
+lots don't exist: `ItemLotParam` jumps from 10050 to 14000, and the only rows with those numbers
+are in unrelated tables. Nothing sets the three flags either. No event script, talk script or
+gameplay table names them, and the executable never uses 9440–9442 as a constant. So the three
+awards can't happen. An earlier version of this page assumed they "must resolve some other way";
+they don't resolve at all.
+
+"Body gem" (`ボディジェム`) is the game's internal name for **runes**. The neighbouring template
+`誓約BJ固有効果_XX` ("covenant BJ unique effect") gives the player a second effect while a
+covenant rune's effect is active, and those effects are `GemeffectParam` rows of the fixed rune
+generators `GemGenParam` 200000–200030:
+
+| Rune generator | Effect | Awarded by |
+|---:|---|---|
+| 200000 | Vial HP recovery UP | lots 34020, 34040 (not awarded directly by any script found) |
+| 200010 | Cont. heal near death +1 | lot 17000, via `NPCアイテム入手` flag 9042 |
+| 200020 | Stamina recovery speed UP | lot 35010, via flag 9075 |
+| 200030 | Boosts max HP during co-op +2% | lot 43120, via a Yahar'gul event and talk flag 72700321 |
+
+So the covenant runes reach the player the ordinary way, through character gifts. Event 9440 is
+a second, dormant route to "covenant body gems" that nothing in the shipped game uses.
+
 ## What it doesn't cover yet
 
-* **Three event awards** (event 9440, `誓約ボディジェム入手`, "obtain covenant body gem", lots
-  10500/11500/12500) point at lots that don't exist in `ItemLotParam`, so they must resolve some
-  other way.
 * **Blood gems have no fixed name, by design.** A treasure's gem is a `GemGenParam` row, a recipe
   for a *random* gem: up to six effect slots, each drawn from an effect table with a chance to
   appear and a chance to turn negative, plus slot-shape rates. None of the 1,337 generators is
