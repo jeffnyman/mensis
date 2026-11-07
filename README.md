@@ -133,8 +133,9 @@ python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # t
 **The artwork** (see [Textures and item pictures](docs/the-textures.md))
 
 ```
-python -I tools/textures.py tpf <tpf> <out dir>                                # any menu TPF -> PNG
+python -I tools/textures.py tpf <file> <out dir>                               # a TPF, or the TPFs in an archive -> PNG
 python -I tools/textures.py items <base dvdroot> <update dvdroot> <out dir>    # item pictures, named
+python -I tools/textures.py models <base> <update> <out dir> [chr,parts,obj,map] # model and map textures
 ```
 
 ## Working files (`work/`, ~34 GiB, not source)
@@ -151,7 +152,7 @@ own data, or derived from it.
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index and chalice catalogue |
-| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures and their index) |
+| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures) and `models/` (character, equipment, object and map textures), each with an index |
 
 ## Not looked at yet
 

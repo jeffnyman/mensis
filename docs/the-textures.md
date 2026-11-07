@@ -1,12 +1,14 @@
 # Textures and item pictures
 
-Can the game's artwork be pulled out as ordinary image files? For 2D textures, yes. This page
-covers the item pictures (the large artwork on the item-description screen) and, with the same
-tool, any texture in a menu TPF: the container, the PS4 GPU's tiled layout, and the compression.
+Can the game's artwork be pulled out as ordinary image files? For 2D textures, yes, all of it.
+This page covers the item pictures (the large artwork on the item-description screen) and the
+textures of characters, equipment, objects and maps: the containers, the PS4 GPU's tiled layout,
+and the compression.
 
 ```
-python -I tools/textures.py items work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/items
-python -I tools/textures.py tpf   work/base/dvdroot_ps4/menu/title.tpf.dcx work/pictures/title
+python -I tools/textures.py items  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/items
+python -I tools/textures.py models work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/models [chr,parts,obj,map] [--colour] [--low]
+python -I tools/textures.py tpf    <a .tpf, .chrbnd/.partsbnd/.objbnd or .tpfbhd> <out dir>
 ```
 
 The output is the game's own artwork, so like everything else the tools produce it goes under
@@ -93,14 +95,66 @@ The **30 other unnamed pictures** belong to item rows with no name in the text, 
 (2116–2131), a ring (2142), a chest of vials (2) and a lantern (33). Whether they're cut
 content or simply unnamed hasn't been checked.
 
+## Characters, equipment, objects and maps
+
+Everything else with a texture keeps it in a TPF one layer down, inside an archive:
+
+| Where | Container | Holds |
+|---|---|---|
+| `chr/cNNNN.chrbnd.dcx` (245), `chr/cNNNN_N.tpf.dcx` (24) | BND4 | a character's TPF, its model (`.flver`), Havok physics and cloth data |
+| `parts/xx_y_NNNN.partsbnd.dcx` | BND4 | one piece of player equipment: a TPF and a model |
+| `obj/oNNNNNN.objbnd.dcx` (1,880) | BND4 | an object's TPF, model and animations |
+| `map/mNN/mNN_NNNN.tpfbhd` + `.tpfbdt` (56 pairs) | split BXF4 | a map area's texture packs: one DCX-compressed TPF per file, 493 in `m21_0000` |
+
+A **split archive** keeps the directory and the data apart. The `.tpfbhd` header (`BHF4`) has
+exactly BND4's header and entry layout, and its offsets point into the `.tpfbdt` (`BDF4`).
+`souls.py`'s BND4 reader reads both, given the data file as a second argument.
+
+The formats are the same block-compressed family, with sRGB variants and one-channel BC4 added:
+
+| DXGI | Format | Textures (characters, equipment, a tenth of the objects) |
+|---:|---|---:|
+| 72 | BC1, sRGB | 3,942 |
+| 80 | BC4 (one channel) | 2,123 |
+| 71 | BC1 | 1,808 |
+| 99 | BC7, sRGB | 348 |
+| 98 | BC7 | 213 |
+| 77, 78 | BC3 | 27 |
+
+Unlike the menu pictures, nearly all have **mip levels**, smaller copies for distance. The full-
+size level is stored first and the same tiling rule holds, so taking the start of the data and
+untiling it works. 2048×2048 textures, BC4 and every format above decode cleanly.
+
+A character's textures come in sets of four per part, by name suffix. `c2010`, for example, has
+`Body`, `Hook`, `Lantern`, `Pickel`, `Robe` and a weapon, each with:
+
+| Suffix | Looks like |
+|---|---|
+| `_a` | the colour of the surface (the character's face and hands are recognisable in `c2010_Body_a`) |
+| `_n` | a normal map, the familiar lilac-blue image of surface bumps |
+| `_r`, `_s` | greyscale maps, probably reflectance and shininess or roughness; the letters are the game's, the reading is a guess from how they look |
+
+These are **texture sheets**: the surfaces of a 3D model, cut apart and laid flat. They aren't
+pictures of the character, which would need the model itself (below).
+
+**Names.** Equipment folders are named from the item tables, which give each weapon and armour
+piece an `equipModelId`. A weapon's parts file is `wp_a_<model>` (Chikage is `wp_a_1063`, shared
+with Uncanny and Lost Chikage). Armour is `hd`/`bd`/`am`/`lg` (head, body, arms, legs), then `m`,
+`f` or `a` (male, female, both), then the set's model number, so `hd_m_1100` is the Gray Wolf Cap.
+Each piece also has an `_l` twin, almost certainly a lower-detail version, skipped unless `--low`
+is given. Character folders are named by model only. The index lists the names the game shows
+for characters placed with that model, but that isn't the model's identity. `c0000` is the human
+model every hunter uses, and the bell-ringers in The One Reborn's arena carry the boss's name.
+
+**Sizes.** Characters are 3,734 textures (2.2 GB as PNG, about 3 minutes) and equipment 2,184
+(3.2 GB). One map pack is 137 MB, so all 56 come to roughly 7–8 GB. `--colour` keeps only the
+`_a` textures.
+
 ## What this doesn't cover
 
-* **Textures inside other containers.** Characters, maps and objects keep their textures in TPFs
-  packed inside BND4 archives (`chr/*.chrbnd`, `map/…`). The decoder handles the textures; the
-  tool doesn't yet open those archives. They also hold flattened texture sheets (skin, normal
-  maps), not pictures of the character.
-* **Mip levels beyond the first, cube maps and arrays**, and formats other than BC1–BC5 and BC7.
-  None occur in `menu/`.
+* **Cube maps, texture arrays and formats outside BC1–BC5 and BC7.** None turned up in the
+  containers surveyed; the tool reports any it skips.
+* **Mip levels beyond the first**, which are smaller copies of the same image.
 * **The blood gem picture rule** beyond the `gemIconIdOffset` cases.
 * **Pictures of 3D models.** That needs the model format (FLVER) and a renderer, a project of
   its own.
@@ -110,3 +164,4 @@ content or simply unnamed hasn't been checked.
 | Path | |
 |---|---|
 | `work/pictures/items/` | the 1,056 item pictures as PNG, and `index.md` (generated; not in the repository) |
+| `work/pictures/models/` | `chr/`, `parts/` (and `obj/`, `map/` when asked for), one folder per model or map pack, and `index.md` |

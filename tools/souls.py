@@ -53,9 +53,15 @@ def _rev8(b: int) -> int:
     return int(f"{b:08b}"[::-1], 2)
 
 
-def bnd4_read(data: bytes) -> list[BndFile]:
-    if data[:4] != b"BND4":
-        raise ValueError("not BND4")
+def bnd4_read(data: bytes, blob: bytes | None = None) -> list[BndFile]:
+    """A BND4, or a split BXF4: pass the BHF4 header as `data` and its BDF4 data file as `blob`.
+
+    BHF4 has the same header and entry layout as BND4; only the files' bytes live in the
+    separate .bdt, at the offsets the entries give (the maps' .tpfbhd/.tpfbdt pairs).
+    """
+    if data[:4] not in (b"BND4", b"BHF4"):
+        raise ValueError("not BND4 or BHF4")
+    body = blob if blob is not None else data
     big = data[9] == 1
     bit_big = data[10] == 1
     e = ">" if big else "<"
@@ -103,7 +109,7 @@ def bnd4_read(data: bytes) -> list[BndFile]:
                 name = data[noff:end].decode("utf-16-be" if big else "utf-16-le")
             else:
                 name = data[noff:data.index(b"\0", noff)].decode("shift_jis")
-        out.append(BndFile(flags, fid, name, dcx_decompress(data[off:off + csize])))
+        out.append(BndFile(flags, fid, name, dcx_decompress(body[off:off + csize])))
     return out
 
 
