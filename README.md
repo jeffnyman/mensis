@@ -54,20 +54,22 @@ scripts, and map layouts.
    explained.
 9. [The online boundary](docs/the-online-boundary.md): which features need a server, which server
    each uses, and what an emulator or replacement server faces.
+10. [Textures and item pictures](docs/the-textures.md): getting the game's 2D artwork out as PNG
+    files, through the TPF container, the PS4's tiled layout and block compression.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked.
 
 ## Setup
 
-The tools are Python scripts; their dependencies (`cryptography`, `pyelftools`, `capstone`) are in
-`pyproject.toml`:
+The tools are Python scripts; their dependencies (`cryptography`, `pyelftools`, `capstone`,
+`pillow`) are in `pyproject.toml`:
 
 ```
 uv venv .venv && uv pip install --python .venv -r pyproject.toml
 ```
 
-or the equivalent with `python -m venv .venv` and `pip install cryptography pyelftools capstone`.
+or the equivalent with `python -m venv .venv` and `pip install cryptography pyelftools capstone pillow`.
 `python` below means the one in `.venv` (`.venv/Scripts/python` on Windows).
 
 For the Ghidra work you also need Ghidra 12.2 and a JDK 25, located through two environment
@@ -128,6 +130,13 @@ python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the C
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 ```
 
+**The artwork** (see [Textures and item pictures](docs/the-textures.md))
+
+```
+python -I tools/textures.py tpf <tpf> <out dir>                                # any menu TPF -> PNG
+python -I tools/textures.py items <base dvdroot> <update dvdroot> <out dir>    # item pictures, named
+```
+
 ## Working files (`work/`, ~34 GiB, not source)
 
 Everything the tools produce goes under `work/`, which `.gitignore` excludes: it is the game's
@@ -142,6 +151,7 @@ own data, or derived from it.
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index and chalice catalogue |
+| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures and their index) |
 
 ## Not looked at yet
 
