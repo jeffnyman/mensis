@@ -34,6 +34,8 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
   event-script fixes (elevators, missing DLC, NPCs, bosses), the AI changes (NPC hunters on
   ladders, Lady Maria), the talk-script changes, and the map-layout changes that tie them
   together.
+* [Where the items are](docs/the-items.md): every treasure spot, enemy drop and event-given item,
+  traced from the map layouts through the item tables to their names.
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -69,6 +71,7 @@ python -I tools/events.py check|dump|diff <emedf> <emevd> …           # event 
 python -I tools/lua50.py dis|diff <luabnd> …                            # AI scripts (Lua 5.0), disassembled
 python -I tools/esd.py check|dump|diff <talkesdbnd> …                   # talk scripts (ESD), decoded
 python -I tools/msb.py check|dump|diff <msb> …                          # map layouts (MSB)
+python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
 python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → Ghidra-ready
 pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
 python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
