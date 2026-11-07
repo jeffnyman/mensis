@@ -513,7 +513,8 @@ address   kind      name                   confidence  evidence
 (The list has grown since this reading, for 1.09 only: `ChaliceGlyphEntry_OnInput`, found while
 working out [Chalice Glyphs](the-chalice-dungeons.md#glyphs), and 44 network functions (the HTTP
 client, the `ss.info` fetch and one builder per game-service request) from
-[the online boundary](the-online-boundary.md#the-requests).)
+[the online boundary](the-online-boundary.md#the-requests), and 12 for the Chalice ritual roll from
+[how a ritual picks its layout](the-chalice-dungeons.md#how-a-ritual-picks-its-layout).)
 
 `ApplyNames.java <names.tsv>` applies a list as **user-defined** names, which outrank both
 analysis and `NameFromStrings`. Each item gets a comment like `[mensis:hand/likely] rank 1, …`,

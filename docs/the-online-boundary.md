@@ -245,9 +245,10 @@ things stand between that and a working server:
 Past that, a replacement needs none of FromSoftware's original data:
 
 * For glyphs it only has to remember "this glyph means this dungeon" for dungeons uploaded to
-  *that* server. A dungeon record is close to what the console already saves per slot: a 32-bit
-  value, a 16-byte field (eight characters, a glyph's size) and a 48-byte string. Glyphs only have
-  to be consistent within that server.
+  *that* server. A dungeon record is the `FormData` blob the console uploads, the same record it
+  saves per slot: the chalice, a packed map ID (which fixes the layout), the sub-feature picks, a
+  16-byte glyph field and the name ([how a ritual picks its layout](the-chalice-dungeons.md#how-a-ritual-picks-its-layout)).
+  Glyphs only have to be consistent within that server.
 * For blood messages, bloodstains, ghosts and summons, the server is a store-and-forward of the
   versioned blobs players upload, filtered by `AreaId`/`ChannelId` and matching level, with the
   polling intervals and ranges it chooses to publish in `ss.info`.

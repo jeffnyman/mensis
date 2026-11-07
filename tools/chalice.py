@@ -30,6 +30,61 @@ import souls  # noqa: E402
 BASES = {0: "Pthumeru", 1: "Hintertomb", 2: "Loran", 3: "Isz"}
 
 
+def layout_name(map_base: int, variation: int) -> str:
+    """Variation v of the ritual with mapBaseId ABC is layout m29_AB_<C*10 + v//100>_<v%100>.
+
+    (200-variation rituals span two folders: 401 -> m29_40_10_xx for 0-99, m29_40_11_xx for 100-199.)
+    """
+    ab, c = map_base // 10, map_base % 10
+    return f"m29_{ab:02d}_{c * 10 + variation // 100:02d}_{variation % 100:02d}"
+
+
+def unique_items(w, rituals, goods) -> list[str]:
+    """Each Root ritual's unique items: HolygrailExParam uniqueItemNN_head/tail is a range of
+    variations, and the item is the treasure whose pickup flag (ItemLotParam.getItemFlagId) is
+    uniqueBaseFlagId + NN. When a ritual is rolled, the game picks among the ranges of the unique
+    items whose flags are not yet set (weighted by range size), then a variation inside that range
+    (docs/the-chalice-dungeons.md#how-a-ritual-picks-its-layout). This checks the layouts: how many
+    in the range, and how many outside it, place that item."""
+    import msb as msblib  # noqa: E402  (only needed here; reading every layout takes ~25 s)
+
+    by_flag = {}
+    for lid, lot in w.lots.items():
+        f = lot.get("getItemFlagId", -1)
+        if f > 0:
+            by_flag.setdefault(f, []).append(lid)
+    out = ["", "## Unique items and the ranges a ritual is steered to", "",
+           "For each unique item: its range of variations, its pickup flag, the item, and how many layouts "
+           "inside / outside the range place it. A ritual is rolled inside the range of an item not yet "
+           "picked up, so a range whose layouts all hold the item guarantees it.", "",
+           "| Chalice | # | Variations | Flag | Item | In range | Outside |", "|---|---:|---|---:|---|---:|---:|"]
+    for rid, r in sorted(rituals.items()):
+        if rid == 0 or r["ritualLv"] > 5 or r["uniqueItem00_head"] == 255:
+            continue
+        flag_lots = {}
+        for i in range(15):
+            for lid in by_flag.get(r["uniqueBaseFlagId"] + i, []):
+                flag_lots[lid] = r["uniqueBaseFlagId"] + i
+        has = {}
+        for v in range(r["variationNum"]):
+            name = layout_name(r["mapBaseId"], v)
+            p = w.path(f"map/mapstudio/{name[:10]}00/{name}.msb.dcx")
+            if os.path.exists(p):
+                lots = {lot for e in msblib.Msb(souls.load(p)).events for lot in e.get("item_lots", [])}
+                has[v] = {flag_lots[lot] for lot in lots if lot in flag_lots}
+        for i in range(15):
+            h, t = r[f"uniqueItem{i:02d}_head"], r[f"uniqueItem{i:02d}_tail"]
+            if h == 255:
+                continue
+            flag = r["uniqueBaseFlagId"] + i
+            item = ", ".join(sorted({it for lid in by_flag.get(flag, []) for it, _, _ in w.lot(lid)})) or "—"
+            inside = sum(flag in has.get(v, ()) for v in range(h, t + 1))
+            outside = sum(flag in s for v, s in has.items() if not h <= v <= t)
+            out.append(f"| {goods.get(rid, '').strip()} ({rid}) | {i} | {h}–{t} | {flag} | {item} | "
+                       f"{inside} / {t - h + 1} | {outside} |")
+    return out
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) != 4:
@@ -103,6 +158,7 @@ def main():
                          for k in range(1, 6) if m and m[f"materialItemId_{k}"] > 0)
         picks = ", ".join(f"{s[f'subFeatureId_{i}']}: {s[f'rate_{i}']:g}" for i in range(1, 11) if s[f"rate_{i}"] > 0)
         out.append(f"| {sid} | {sid // 10000} | {BASES.get((sid // 1000) % 10, '?')} | {name} | {cost} | {picks} |")
+    out += unique_items(w, rituals, goods)
     with open(sys.argv[3], "w", encoding="utf-8") as fo:
         fo.write("\n".join(out) + "\n")
     print("\n".join(out[:6]))

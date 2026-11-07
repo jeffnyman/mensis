@@ -79,3 +79,15 @@ address	kind	name	confidence	evidence
 022a37c0	function	GameService_TombMessRemove	certain	calls GameService_SendRequest with request number 34 (TombMessRemoveRequest in the MessageId table)
 02299590	function	GameService_WanderingGhostCreate	certain	calls GameService_SendRequest with request number 35 (WanderingGhostCreateRequest in the MessageId table)
 0229a0e0	function	GameService_WanderingGhostGet	certain	calls GameService_SendRequest with request number 36 (WanderingGhostGetRequest in the MessageId table)
+01eaeec0	function	ChaliceRitual_PickDungeon	certain	reads HolygrailExParam variationNum (+5), uniqueBaseFlagId (+0xc) and uniqueItemNN_head/tail (offset tables 04b359c0/04b35a40): rolls rng % variationNum, then, if any unique item's flag is unset, picks one such item's range by weight (range size) and a variation inside it; also rolls the fixedSf/freeSf/groupSf sub-feature lots
+01e9c490	function	ChaliceDungeon_ReadFormData	likely	parses a dungeon record of version 4 (0x7c bytes) or 5 (0x8c, adds the name): 64-bit id, 32-bit packed map id, HolygrailExParam row (via 0231f720), 18 dwords of sub-feature picks, 16 bytes, name
+01ea1c10	function	ChaliceDungeon_ComposeName	certain	dungeonNameBaseId (HolygrailExParam +8) plus each picked DungeonFeatureParam's dungeonNameModifierId (+0x1c), ordered by dungeonNamePriority (+6)
+0231f720	function	Param_GetHolygrailEx	likely	binary search of the SoloParamRepository table at +0xf10/+0xf18 by row id; its rows are read at HolygrailExParam offsets (variationNum +5, dungeonNameBaseId +8)
+023167f0	function	Param_GetDungeonFeature	likely	as Param_GetHolygrailEx for the table at +0xf58/+0xf60; read at DungeonFeatureParam offsets (+6, +0x1c)
+02316c70	function	Param_GetDungeonSubFeatLot	probable	looks up a sub-feature lot row whose float weights at +0x14..+0x38 are DungeonSubFeatLotParam rate_1..10
+01e8b830	function	MapId_ToNumber	certain	packed map id {area, block, sub, variant}: for area 0x1d (m29) returns the HolygrailExParam row 6000 + block*10 + sub/10, else area*1000000 + block*10000 + sub*100 + variant
+0231fdf0	function	MapId_ToNumber_2	certain	identical copy of MapId_ToNumber
+01f00530	function	RitualScreen_Setup	likely	builds the ritual menu (SubCost, ChannelInfo, PlayerAsset, TotalCost, ItemIcon) for a chalice and calls ChaliceRitual_PickDungeon with the shared generator
+01eb9270	function	DebugChaliceMenu_OnInput	likely	menu item 0 picks any HolygrailExParam row and calls ChaliceRitual_PickDungeon; item 400 sets the variation directly; items 300-312 toggle and choose sub-feature picks
+01eb2b40	function	ChaliceSlot_WriteMapId	likely	writes the 4 bytes of a packed map id into 8-bit flag groups at 94000096 + slot*100000
+01966290	function	GameData_Construct	probable	constructs the 0x1780-byte global at 05956678; seeds the SFMT-19937 generator at +0x70 from gettimeofday (init multiplier 0x6c078965, 624 words, parity word 0x13c9e684)

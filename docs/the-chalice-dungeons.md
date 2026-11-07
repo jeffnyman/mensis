@@ -220,7 +220,8 @@ the text to the network.
 (`CSDungeonRitualHelper::STEP_Exec_forSetupHolygrail`) saves each dungeon slot (0–6) into the
 save's event flags, using flag-manager helpers that store *data* rather than single flags: a
 32-bit value at flag 94000128 + slot × 100000, 16 bytes at 94000736 + …, and 48 bytes of a wide
-string at 94000992 + …. Sixteen bytes is exactly eight UTF-16 characters, the size of a glyph.
+string at 94000992 + …. Sixteen bytes is exactly eight UTF-16 characters, the size of a glyph. (What
+the 32-bit value is, and the rest of the record, is in [how a ritual picks its layout](#how-a-ritual-picks-its-layout).)
 The helper's other steps (`ExecGet` / `WaitUpload_forPresentOffering`,
 `…_forChangeShareLevel`, `Exec_forJoin`, `Exec_forQuickJoin`, `Exec_forRandomJoin`) show that
 creating, sharing and joining a dungeon are server operations.
@@ -231,11 +232,101 @@ points to glyphs being **assigned and resolved by the server**, not computed fro
 number on the console. If so, how a glyph encodes a dungeon can't be read from the game files
 at all.
 
+## How a ritual picks its layout
+
+**When.** The ritual screen (the menu that shows a chalice's `SubCost`, `TotalCost` and
+`ChannelInfo`) rolls the dungeon as soon as it is given a chalice. One function does the roll
+(`ChaliceRitual_PickDungeon` in the hand names, `01eaeec0`). Every caller passes it the same
+random-number generator.
+
+**The roll**, in the order the code does it:
+
+1. **A plain roll.** `variation = rng() % variationNum`.
+2. **Unclaimed unique items.** For each of the chalice's up to 15 unique items, if its range is
+   defined (`uniqueItemNN_head` ≠ 255) and its flag (`uniqueBaseFlagId` + *NN*) is **not yet
+   set**, the item's range `[head, tail]` joins a list, weighted by the range's size.
+3. **If the list isn't empty, the plain roll is replaced.** A uniform float in [0, 1)
+   (`(rng() >> 9 | 0x3f800000)` read as a float, minus 1.0) picks an item from the list by
+   weight, and a second roll picks a variation inside that item's range:
+   `variation = head + rng() % (tail − head + 1)`.
+4. **Sub-features.** The same function rolls the chalice's sub-feature lots: five "fixed"
+   (`fixedSf_1..5_subFeatureLotId`), three "free" (`freeSf_1..3`) and five "group"
+   (`groupSf_1..5`). Each picks one feature by weight (`DungeonSubFeatLotParam` `rate_1..10`).
+   These are the hidden rows that pick the special character and the gem-drop correction
+   ([the event scripts](the-chalice-events.md#special-characters)). Lot 994500000 (feature 45),
+   if present, gets special handling.
+
+So a ritual only rolls a fully random layout once every unique item of that chalice has been
+picked up. Until then it **lands in the range of a unique item you don't have yet**.
+
+**The ranges guarantee the item.** A unique item is a treasure whose pickup flag
+(`getItemFlagId`) is `uniqueBaseFlagId` + *NN*. Checking every layout (`tools/chalice.py`, the
+"Unique items" table in its output): for every Root chalice except Isz, **every layout inside
+item *NN*'s range places item *NN***. The one exception is Pthumeru Root's Bone Marrow Ash, in
+19 of its 20 (`m29_10_00_48` lacks it). The same items also turn up in many layouts outside
+their range, so the range is a guarantee, not the only place to find them:
+
+| Chalice | Unique items (range of variations) |
+|---|---|
+| Pthumeru Root (6100) | Uncanny Saw Cleaver (0–19), Frenzied Coldblood (7) (20–39), Bone Marrow Ash (40–59), Fire Paper (60–79), a blood gem (80–99) |
+| Ailing Loran Root (6420) | Uncanny Beast Claw (0–29), Lost Hunter Axe (30–59), Uncanny Tonitrus (60–87), Lost Rifle Spear (88–115), three blood gems (116–199) |
+
+(all of them in `work/chalice/chalice-1.09.md`). A Sinister chalice shares its plain twin's
+`uniqueBaseFlagId` (6300 and 6302 both use 5160), so picking up an item in one counts for both.
+
+**Isz is the exception.** For the Isz Root chalices (6530, 6532), only the first ranges
+guarantee their item. Lost Kirkhammer is in 16 of 18 layouts, and the blood gems and **Blood
+Rock** (range 136–151) in as few as 5 of 16. The last two "unique items", 10 and 11, are both
+**Great One's Wisdom** on flags 5290 and 5291 (lots 200530100 and 200530110). **No layout
+places those lots, and nothing else sets those flags.** By the code above, they can never be
+claimed:
+
+* their ranges (168–183 and 184–199, 32 of the 200 variations) are always on the list;
+* once every other Isz unique item is picked up, **every new Isz Root ritual lands in variations
+  168–199**, and never on a fully random layout.
+
+**The generator.** The random-number generator belongs to a large global game object, created
+at start-up. Its constructor seeds it from the clock (`gettimeofday`: seconds × 1,000,000 +
+microseconds, cut to 32 bits) and fills a 624-word state with the Mersenne Twister's
+initialisation (`x' = (x ^ x >> 30) × 0x6c078965 + i`). It then applies a period check whose
+constant, `0x13c9e684`, is the SFMT-19937 parity word: **SIMD-oriented Fast Mersenne Twister**.
+The same generator serves other game systems too, so which layout a ritual gives depends on when
+the game started and on everything drawn from it since. It can't be predicted from the save.
+
+**What's saved.** The dungeon is stored as a record that is the same whether it was made locally
+or fetched from the server. The server's version is the `FormData` blob from
+[the online boundary](the-online-boundary.md#each-requests-fields), versions 4 (0x7c bytes) and 5
+(0x8c, which adds the dungeon's name). The set-up step writes it into the save slot's event
+flags at 94000000 + slot × 100000:
+
+| Flags (+ slot × 100000) | Holds |
+|---|---|
+| 94000032, 94000064 | a 64-bit ID, in two halves |
+| 94000096 (4 × 8 bits) | a packed map ID: one byte each for area (29), block, sub-block, variant |
+| 94000128 (32 bits) | the chalice: its `HolygrailExParam` row (the value the parser looks up there) |
+| 94000160 … | nine pairs of 32-bit values (the sub-feature picks) |
+| 94000736 (16 bytes) | the glyph |
+| 94000992 (48 bytes) | the dungeon's name, as text |
+
+The engine's packed map IDs are four bytes, and three functions turn an `m29` one back into its
+chalice row as `6000 + block × 10 + sub-block / 10`. For example `m29_30_20_xx` gives 6302,
+Sinister Lower Pthumeru. Variation *v* of the ritual with `mapBaseId` *ABC* is the layout
+`m29_AB_(C×10 + v / 100)_(v mod 100)`. A 200-variation ritual spans two folders:
+`m29_40_10_xx` for 0–99, `m29_40_11_xx` for 100–199.
+
+**The name** is composed in code just as [above](#dungeon-names-are-composed) describes: the
+chalice's `dungeonNameBaseId`, plus each picked feature's `dungeonNameModifierId`, taken in
+`dungeonNamePriority` order.
+
+**A developer menu.** One more caller (`01eb9270`) is a menu handler. Its item 0 picks *any*
+`HolygrailExParam` row, item 400 sets the variation directly (0 to `variationNum` − 1), and items
+300–312 toggle and choose each sub-feature pick. No ritual a player can perform offers that, so
+it is a tool for building a specific dungeon on demand. Whether it can be reached on a retail
+console hasn't been examined.
+
 ## Not yet established
 
-* How a Root ritual picks its variation number when a dungeon is created (glyphs, it turns out,
-  are resolved by the server, [above](#glyphs)), and what the 32-bit value saved per dungeon slot
-  holds.
+* What the nine sub-feature pairs in a saved dungeon hold exactly, and what the 64-bit ID is.
 * How the `m29_0x` tile library relates to the pre-built layouts.
 
 (The Sinister Bell's feature, the four kinds of special enemy and the m29 event script, open
