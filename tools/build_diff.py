@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Compare two builds of a program function by function, from ExportFunctionHashes.java output.
 
-    python -I tools/build_diff.py <old.functions.tsv> <new.functions.tsv> <out.md> [--top N]
+    python -I tools/build_diff.py <old.functions.tsv> <new.functions.tsv> <out.md> [--top N] [--pairs out.tsv]
 
 How functions are paired. A linker lays functions out in the order of the object files and of
 the functions within them, and a patch build of the same game keeps that order. So both lists,
@@ -51,6 +51,7 @@ def main():
     ap.add_argument("new")
     ap.add_argument("out")
     ap.add_argument("--top", type=int, default=40)
+    ap.add_argument("--pairs", help="also write every pairing as TSV: bucket, old address, new address")
     a = ap.parse_args()
     old, new = read(a.old), read(a.new)
 
@@ -125,6 +126,17 @@ def main():
     table("Constant-only changes", pairs["constants"] + pairs["moved+constants"], lambda p: -int(p[1]["size"]))
     table("Removed functions", pairs["removed"], lambda p: -int(p[0]["size"]))
     table("Added functions", pairs["added"], lambda p: -int(p[1]["size"]))
+
+    if a.pairs:
+        with open(a.pairs, "w", encoding="utf-8", newline="\n") as f:
+            f.write("bucket\told\tnew\n")
+            for b, ps in pairs.items():
+                if b == "identical":
+                    continue
+                for o, n in ps:
+                    old = o["address"] if o else ""
+                    new = n["address"] if n else ""
+                    f.write(f"{b}\t{old}\t{new}\n")
 
     with open(a.out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")

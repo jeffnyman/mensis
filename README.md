@@ -28,6 +28,9 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
   analysed Ghidra project, why each step is needed, what the result looks like, how the 1.00
   and 1.09 builds were compared, and how functions get named: by rule from the strings around
   them, and by hand for the most-called helpers.
+* [What the 1.09 patch changed](docs/the-patch.md): the code side of the last update, read
+  function by function: developer tooling switched off, an SOS-sign limit read live, and how the
+  decompiled diffs were made readable.
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -62,6 +65,7 @@ python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → G
 pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
 python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
 python -I tools/port_names.py <names.tsv> <from.tsv> <to.tsv> <out.tsv>  # carry names across builds
+python -I tools/c_diff.py <pairs.tsv> <old.tsv> <new.tsv> <old-c> <new-c> <out.md>  # diff decompiled C
 ```
 
 (`python` meaning the one in `.venv`, e.g. `.venv/Scripts/python` on Windows.)

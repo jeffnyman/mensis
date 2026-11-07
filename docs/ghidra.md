@@ -298,8 +298,9 @@ happens outside Ghidra.
 touches about a hundred functions. Their referenced strings and class names (taken from the
 singleton asserts) show where the changes are:
 
-* **Developer tooling switched off.** The clearest pattern in the patch. Four functions that read
-  the `Game.IsUseLuaConsole` property shrink to a 3-byte stub, and one is removed. Functions
+* **Developer tooling switched off.** The clearest pattern in the patch. Of the functions that
+  read the `Game.IsUseLuaConsole` property, the console's constructor shrinks from 431 to 79
+  bytes, two shrink to 3-byte stubs, one from 199 to 61 bytes, and one is removed. Functions
   touching `SprjSystemProperties`/`FsrmiWrapper.Port` (a remote debugging connection) shrink from
   1,139 to 750 and from 165 to 3 bytes. The `DbgRemote` singleton user drops from 143 to 47
   bytes. Three remote-probe functions (`TestRemoteProbe`, `ClientSendWithReply_ReqPos`, …) are
@@ -548,9 +549,9 @@ Ordered by payoff for effort:
 4. **Port names from better-mapped relatives.** Dark Souls III (PC) runs on the same FD4 and
    dantelion2 engine, and community work has mapped a great deal of it. BSim similarity search
    can carry those names across.
-5. **Read the patch.** The 82 functions the 1.09 update changed (see
-   [Comparing two builds](#comparing-two-builds)) are a small, self-contained place to start
-   naming: each one has an older twin to compare it with.
+5. **Name the managers' methods.** [What the 1.09 patch changed](the-patch.md) shows where
+   reading stops: changes inside `FrpgNetMan`, `SprjGaitem`, `WorldChrMan` and friends are clear
+   as code but not yet as meaning.
 6. **Map the data interpreters.** The EMEVD event VM, the ESD state machines, the Lua AI bindings
    (`SprjAiLua`) and the param readers are the places where code and data meet, and the community
    documentation of the data formats tells you what each one should be doing.
