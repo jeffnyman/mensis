@@ -155,6 +155,14 @@ python -I tools/events.py dump  <emedf> <emevd> [--eld <emeld>] [--event ID]
 python -I tools/events.py diff  <emedf> <old.emevd> <new.emevd> <out.md> [--eld <emeld>]
 ```
 
+`tools/lua50.py` disassembles the AI scripts (Lua 5.0 bytecode) in `script/*.luabnd.dcx`, with
+constants and globals resolved, and diffs two banks function by function:
+
+```
+python -I tools/lua50.py dis  <luabnd | .lua> [name-filter]
+python -I tools/lua50.py diff <old.luabnd> <new.luabnd> <out.md>
+```
+
 For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
 tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4
 holds GNF-tiled data that has to be de-tiled before it becomes a viewable DDS.

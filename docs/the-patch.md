@@ -393,6 +393,76 @@ like the game's handling of a save that is in the DLC when the DLC is no longer 
 * The gravestone messengers' animations (`墓石メッセンジャーアニメ可否判定`) now check the DLC
   flags on gravestone 4, not 3, and the Doll's position check follows.
 
+## The AI scripts
+
+The update replaces the AI script banks (`script/*.luabnd.dcx`) of seven maps. Each bank holds
+the compiled Lua of the enemies and NPCs placed there: one `NNNNNN_battle.lua` (and sometimes
+`_logic.lua`) per AI, named after its `NpcThinkParam` row.
+
+### Reading them: `tools/lua50.py`
+
+The scripts are Lua 5.0 bytecode (`\x1bLuaP`). There is no source, but the 5.0 chunk format is
+small and documented, so `lua50.py` disassembles it directly. All 846 AI chunks in the base game
+parse exactly to their last byte. A script's top level computes each attack's distance window
+and binds those values into the action functions:
+
+```
+  LOADK     r0 0.3
+  SUB       r2 2.6 r0                       attack 1 reach: 2.6 - 0.3
+  ...
+  CLOSURE   r16 = function #2
+  MOVE      0 2 0                           (binds r2 as an upvalue)
+  SETGLOBAL r16 'Shousitai_Fist104000_Act01'
+```
+
+For diffing, each function is matched by the global it is assigned to and rendered with constants
+and globals resolved. Line numbers, instruction numbers and absolute jump targets are dropped,
+because an inserted block would otherwise renumber everything after it, as the first attempt
+showed. Whole numbers print exactly, since event flags and region IDs are stored as doubles
+(`3.5029e+06` hid that two different regions were involved).
+
+```
+python -I tools/lua50.py diff work/base/dvdroot_ps4/script/m35_00_00_00.luabnd.dcx \
+       work/update/dvdroot_ps4/script/m35_00_00_00.luabnd.dcx work/ai/m35_00_00_00.md
+```
+
+### What changed
+
+Every changed AI belongs to an **NPC hunter or a boss**, not to an ordinary enemy. The script
+names are the developers'; the characters were identified through `NpcParam`'s `nameId`.
+
+* **Ladders.** Six NPC hunter AIs get a new first check in their battle function,
+  `if self:IsLadderAct(TARGET_SELF) then act[N] = 100`, and a new action for it. On a ladder they
+  now just close in on the player (`GOAL_COMMON_ApproachTarget`, to 0.8) instead of picking a
+  combat move:
+
+  ```diff
+  +function Wasou_6531_Act26 (3 params)
+  +  SELF      r5 r1['AddSubGoal']
+  +  GETGLOBAL r7 'GOAL_COMMON_ApproachTarget'
+  +  ...
+  +  LOADK     r10 0.8
+  ```
+
+  The six: **Yamamura the Wanderer** (`Wasou_6531`, 和装 "Japanese dress", in five maps),
+  **Henriett** (`TophatHunter_6600`), **Valtr** (`TheHead6501`), and three Chalice Dungeon hunters
+  (`DungeonNPC05A_7041`, `Nokomuchi7300`, `Ijousya7310`, 異常者 "lunatic").
+* **Lady Maria of the Astral Clocktower** (`WomanHumter452000`; the typo is theirs). Two actions
+  fire once each as a value, presumably her HP ratio, drops past 0.6 and 0.3. In 1.00 an AI-local
+  counter (`GetNumber(1)`) recorded that they had fired. In 1.09 special effects 5402/5403 on her
+  record it. That state belongs to the character, not the AI, which is the likely point of the
+  change. A rule that cut action 23's weight to 1 when it had just been used is removed.
+* **`KillerOfChurch6520`** ("killer of the church", no name in the text tables): three attacks
+  in one action switch from `NPC_ATK_L1` to `NPC_ATK_SwitchGim`, which by its name is the
+  trick-weapon transform attack.
+* **`Koibito6620`** (恋人 "lover", no name in the text tables) now checks whether its target is
+  inside *either* of two regions where 1.00 checked one (3502905 or 3502906, 3502910 or 3502908,
+  depending on flag 13500100). The area it reacts to grows.
+
+Together with the event scripts' fixes for Yamamura and the League executioner, and the param
+changes to Valtr and Lady Maria's area, the update spends much of its effort on The Old Hunters'
+NPCs.
+
 ## Files
 
 | Path | |
