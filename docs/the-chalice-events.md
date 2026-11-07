@@ -24,7 +24,7 @@ The `_XX` suffix in a template's name marks one that takes arguments. A typical 
 layout's constructor makes about 440 starts: 42 of `寡婦死亡でザコ死亡_XX`, 28 of
 `扉アクション削除_XX`, 14 treasure chests, and so on, each pointing the template at particular
 doors, levers and enemies in that layout's map. So a layout is its map file plus a list of
-template calls, and the behaviour itself lives once, in `m29.emevd`. (The 7 exceptions, in the
+template calls, and the behavior itself lives once, in `m29.emevd`. (The 7 exceptions, in the
 `m29_00`–`m29_04` folders, define events of their own. The counts differ from the 2,685 layout
 files because 48 layouts have no script, mostly one `_90_` layout per Root base and 20 in
 `m29_01_11`, and 4 scripts have no layout.)
@@ -129,7 +129,7 @@ Two mechanisms appear, in different layouts:
   strengthener has gone into the enemy.
 * **Infection** (`感染_周囲強化`, 242 layouts). When the strengthener signals, every target
   within 25 m that is alive is ordered (AI command 200) to respond, and then gains effect
-  5645 for 20 seconds: HP ×1.5, physical attack ×1.4, every defence ×0.8. A variant
+  5645 for 20 seconds: HP ×1.5, physical attack ×1.4, every defense ×0.8. A variant
   (`…_強化時毒化`, "poisoned while strengthened") adds a second effect for as long as 5645 lasts.
 
 ### The undying
@@ -240,7 +240,7 @@ chalices' layouts. The ringing itself is multiplayer logic: while a widow is up,
 `マルチ侵入管理` ("multiplayer invasion management") gives the host effect 9020 and shows message
 100002 as long as there is room for another client of type 1 (fewer than two with both widows
 up, fewer than one with one): by the context, room for an invader. The bell-control template
-switches the widow's behaviour (effect 9100) for as long as the host has 9020.
+switches the widow's behavior (effect 9100) for as long as the host has 9020.
 
 The flag is also read by `サブ特徴_マルチ召喚敵_…` ("sub-feature: multiplayer summon enemy",
 strong and weak versions, kept only when online). Those templates are started only in the test

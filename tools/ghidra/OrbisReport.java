@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Summarise an analysed PS4 executable and decompile a few landmark functions.
+// Summarize an analyzed PS4 executable and decompile a few landmark functions.
 //
 // Headless: -process <program> -noanalysis -postScript OrbisReport.java <out-dir>
 //

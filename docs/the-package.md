@@ -64,7 +64,7 @@ steps:
    outer image is XTS-AES-128 with tweak *n*.
 
 The encrypted `sce_sys` entries (license, NP title/bind) use the same `sha256(entry ‖ dk3)` trick
-with their own entry header. `license.dat` decrypts to an `RIF\0` licence and `nptitle.dat` to
+with their own entry header. `license.dat` decrypts to an `RIF\0` license and `nptitle.dat` to
 `NPTD`, which shows the derivation is right.
 
 This only works because the package is a fake one. The same code on a retail PKG fails at step 1

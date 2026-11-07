@@ -52,7 +52,7 @@ against the item tables:
 | Category | Is | Evidence |
 |---:|---|---|
 | 0 | weapon | IDs found in `EquipParamWeapon` with names |
-| 1 | armour | all 93 distinct IDs in `EquipParamProtector` |
+| 1 | armor | all 93 distinct IDs in `EquipParamProtector` |
 | 4 | goods | consumables and key items, `EquipParamGoods` |
 | 8 | **blood gem** | 463 of 485 IDs are `GemGenParam` rows. Gems are *generated* from effect tables, so they have no fixed name |
 | 15 | **level-dependent** | all 16 IDs are rows of `ItemLotLvdepParam`, each holding the real `{category, item id}` |
@@ -186,7 +186,7 @@ Each Root chalice is 100 or 200 pre-built layouts, each placing its own treasure
 ([the Chalice Dungeons](the-chalice-dungeons.md)). The index reads all 2,685 Chalice layouts,
 attributes each layout folder to its chalice through the ritual table, and counts how many of a
 chalice's layouts place each item. That is the share of layouts, not the chance of meeting the
-item: a ritual is steered towards unique items not yet picked up
+item: a ritual is steered toward unique items not yet picked up
 ([how a ritual picks its layout](the-chalice-dungeons.md#how-a-ritual-picks-its-layout)).
 The 152,959 treasure lot references give 166 distinct items:
 
@@ -219,7 +219,7 @@ gameplay table names them, and the executable never uses 9440–9442 as a consta
 awards can't happen. An earlier version of this page assumed they "must resolve some other way";
 they don't resolve at all.
 
-"Body gem" (`ボディジェム`) is the game's internal name for **runes**. The neighbouring template
+"Body gem" (`ボディジェム`) is the game's internal name for **runes**. The neighboring template
 `誓約BJ固有効果_XX` ("covenant BJ unique effect") gives the player a second effect while a
 covenant rune's effect is active, and those effects are `GemeffectParam` rows of the fixed rune
 generators `GemGenParam` 200000–200030:

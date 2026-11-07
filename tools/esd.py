@@ -29,15 +29,28 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import io
 import os
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import souls  # noqa: E402
+import souls
 
-OPS = {0x8C: "+", 0x8E: "-", 0x8F: "*", 0x90: "/", 0x91: "<=", 0x92: ">=", 0x93: "<", 0x94: ">",
-       0x95: "==", 0x96: "!=", 0x98: "&&", 0x99: "||"}
+OPS = {
+    0x8C: "+",
+    0x8E: "-",
+    0x8F: "*",
+    0x90: "/",
+    0x91: "<=",
+    0x92: ">=",
+    0x93: "<",
+    0x94: ">",
+    0x95: "==",
+    0x96: "!=",
+    0x98: "&&",
+    0x99: "||",
+}
 UNARY = {0x8D: "-", 0x9A: "!"}
 
 
@@ -48,7 +61,7 @@ def expr(b: bytes, talk: dict[int, str] | None = None) -> str:
     are folded here and only the folded values are looked up in the talk text: a raw literal such
     as 10000000 would otherwise be "annotated" with whatever line happens to have that ID.
     """
-    st: list[tuple[str, object]] = []   # (text, constant value or None)
+    st: list[tuple[str, object]] = []  # (text, constant value or None)
 
     def push_int(v):
         st.append((str(v), v))
@@ -71,22 +84,28 @@ def expr(b: bytes, talk: dict[int, str] | None = None) -> str:
             i += 4
         elif x == 0xA5:
             j = i + 1
-            while b[j:j + 2] != b"\0\0":
+            while b[j : j + 2] != b"\0\0":
                 j += 2
-            st.append(('"' + b[i + 1:j].decode("utf-16-le") + '"', None))
+            st.append(('"' + b[i + 1 : j].decode("utf-16-le") + '"', None))
             i = j + 1
         elif 0x84 <= x <= 0x8A:
             n = x - 0x84
-            args = st[len(st) - n:] if n else []
-            del st[len(st) - n:]
+            args = st[len(st) - n :] if n else []
+            del st[len(st) - n :]
             fid = st.pop()[0]
-            st.append((f"f{fid}(" + ", ".join(_show(t, v, talk) for t, v in args) + ")", None))
+            st.append(
+                (f"f{fid}(" + ", ".join(_show(t, v, talk) for t, v in args) + ")", None)
+            )
         elif x in OPS:
             (rt, rv), (lt, lv) = st.pop(), st.pop()
             if isinstance(lv, int) and isinstance(rv, int) and OPS[x] in "+-*":
-                push_int(lv + rv if OPS[x] == "+" else lv - rv if OPS[x] == "-" else lv * rv)
+                push_int(
+                    lv + rv if OPS[x] == "+" else lv - rv if OPS[x] == "-" else lv * rv
+                )
             else:
-                st.append((f"({_show(lt, lv, talk)} {OPS[x]} {_show(rt, rv, talk)})", None))
+                st.append(
+                    (f"({_show(lt, lv, talk)} {OPS[x]} {_show(rt, rv, talk)})", None)
+                )
         elif x in UNARY:
             t, v = st.pop()
             if isinstance(v, int) and UNARY[x] == "-":
@@ -134,12 +153,26 @@ class Esd:
     def __init__(self, data: bytes):
         if data[:4] != b"fsSL":
             raise ValueError("not a 64-bit ESD")
-        (nsg_size, nsg, st_size, nst, _cs, ncond, _cc, ncmd, _ca, narg, _coo, _coc,
-         name_off, name_len) = struct.unpack_from("<14i", data, 0x24)
+        (
+            _nsg_size,
+            nsg,
+            st_size,
+            _nst,
+            _cs,
+            _ncond,
+            _cc,
+            _ncmd,
+            _ca,
+            _narg,
+            _coo,
+            _coc,
+            _name_off,
+            _name_len,
+        ) = struct.unpack_from("<14i", data, 0x24)
         ds = 0x6C
         self.d, self.ds = data, ds
         p = ds + 0x18  # past i32 1, Unk70..7C, i32 0
-        sg_off, _, nm_off, nm_len, _, _ = struct.unpack_from("<6q", data, p)
+        _sg_off, _, _nm_off, _nm_len, _, _ = struct.unpack_from("<6q", data, p)
         p += 48
         groups = []
         for _ in range(nsg):
@@ -166,24 +199,34 @@ class Esd:
     def _cmds(self, off, n):
         out = []
         for k in range(n):
-            bank, cid, aoff, acnt = struct.unpack_from("<iiqq", self.d, self.ds + off + k * 24)
+            bank, cid, aoff, acnt = struct.unpack_from(
+                "<iiqq", self.d, self.ds + off + k * 24
+            )
             args = []
             for a in range(acnt):
                 bo, bl = self._q(aoff + a * 16, 2)
-                args.append(self.d[self.ds + bo:self.ds + bo + bl])
+                args.append(self.d[self.ds + bo : self.ds + bo + bl])
             out.append((bank, cid, args))
         return out
 
     def _cond(self, off):
         target, pco, pcc, sco, scc, eo, el = self._q(off, 7)
-        return {"target": target, "pass": self._cmds(pco, pcc),
-                "subs": [self._cond(o) for o in (self._q(sco, scc) if scc else ())],
-                "eval": self.d[self.ds + eo:self.ds + eo + el]}
+        return {
+            "target": target,
+            "pass": self._cmds(pco, pcc),
+            "subs": [self._cond(o) for o in (self._q(sco, scc) if scc else ())],
+            "eval": self.d[self.ds + eo : self.ds + eo + el],
+        }
 
     def _state(self, off):
         sid, co, cc, eo, ec, xo, xc, wo, wc = self._q(off, 9)
-        return {"id": sid, "conds": [self._cond(o) for o in (self._q(co, cc) if cc else ())],
-                "entry": self._cmds(eo, ec), "exit": self._cmds(xo, xc), "while": self._cmds(wo, wc)}
+        return {
+            "id": sid,
+            "conds": [self._cond(o) for o in (self._q(co, cc) if cc else ())],
+            "entry": self._cmds(eo, ec),
+            "exit": self._cmds(xo, xc),
+            "while": self._cmds(wo, wc),
+        }
 
     def _resolve(self, c, offs):
         c["target"] = offs.get(c["target"], None) if c["target"] != -1 else None
@@ -195,7 +238,11 @@ class Esd:
 
         def cmds(label, cs, ind):
             for bank, cid, args in cs:
-                out.append(f"{ind}{label} c{bank}_{cid}(" + ", ".join(expr(a, talk) for a in args) + ")")
+                out.append(
+                    f"{ind}{label} c{bank}_{cid}("
+                    + ", ".join(expr(a, talk) for a in args)
+                    + ")"
+                )
 
         def cond(c, ind):
             tgt = f"-> state {c['target']}" if c["target"] is not None else "(nested)"
@@ -220,7 +267,10 @@ class Esd:
 def scripts(path: str) -> dict[str, bytes]:
     data = souls.load(path)
     if data[:4] == b"BND4":
-        return {os.path.basename(b.name.replace("\\", "/")): b.data for b in souls.bnd4_read(data)}
+        return {
+            os.path.basename(b.name.replace("\\", "/")): b.data
+            for b in souls.bnd4_read(data)
+        }
     return {os.path.basename(path): data}
 
 
@@ -230,17 +280,28 @@ def talk_text(msgbnd: str | None) -> dict[int, str]:
         return {}
     for b in souls.bnd4_read(souls.load(msgbnd)):
         if "会話" in b.name:
-            return {k: v.replace("\n", " ") for k, v in souls.fmg_read(b.data).items() if v}
+            return {
+                k: v.replace("\n", " ") for k, v in souls.fmg_read(b.data).items() if v
+            }
     return {}
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("check"); c.add_argument("bnd", nargs="+")
-    d = sub.add_parser("dump"); d.add_argument("bnd"); d.add_argument("filter", nargs="?"); d.add_argument("--talk")
-    f = sub.add_parser("diff"); f.add_argument("old"); f.add_argument("new"); f.add_argument("out"); f.add_argument("--talk")
+    c = sub.add_parser("check")
+    c.add_argument("bnd", nargs="+")
+    d = sub.add_parser("dump")
+    d.add_argument("bnd")
+    d.add_argument("filter", nargs="?")
+    d.add_argument("--talk")
+    f = sub.add_parser("diff")
+    f.add_argument("old")
+    f.add_argument("new")
+    f.add_argument("out")
+    f.add_argument("--talk")
     a = ap.parse_args()
 
     if a.cmd == "check":
@@ -251,7 +312,9 @@ def main():
                 n += 1
                 states += sum(len(g) for g in e.groups.values())
                 exprs += sum(1 for line in e.render())
-        print(f"{n} scripts, {states} states, {exprs} rendered lines; every expression reduced to one value")
+        print(
+            f"{n} scripts, {states} states, {exprs} rendered lines; every expression reduced to one value"
+        )
         return 0
 
     talk = talk_text(a.talk)
@@ -264,7 +327,11 @@ def main():
         return 0
 
     old, new = scripts(a.old), scripts(a.new)
-    out = [f"# Talk script diff: {os.path.basename(a.old)}\n", "| Script | Status | Changed lines |", "|---|---|---:|"]
+    out = [
+        f"# Talk script diff: {os.path.basename(a.old)}\n",
+        "| Script | Status | Changed lines |",
+        "|---|---|---:|",
+    ]
     body = []
     for name in sorted(set(old) | set(new)):
         if name not in old or name not in new:
@@ -277,7 +344,9 @@ def main():
             out.append(f"| {name} | rebuilt, same logic | 0 |")
             continue
         dl = list(difflib.unified_diff(lo, ln, "1.00", "1.09", lineterm="", n=3))
-        out.append(f"| {name} | changed | {sum(1 for x in dl if x[:1] in '+-' and x[:3] not in ('+++', '---'))} |")
+        out.append(
+            f"| {name} | changed | {sum(1 for x in dl if x[:1] in '+-' and x[:3] not in ('+++', '---'))} |"
+        )
         body += ["", f"## {name}", "```diff", *dl, "```"]
     with open(a.out, "w", encoding="utf-8") as fo:
         fo.write("\n".join(out + body) + "\n")

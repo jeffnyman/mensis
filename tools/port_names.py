@@ -13,22 +13,26 @@ as skipped, so they can be ported by hand.
 from __future__ import annotations
 
 import difflib
+import io
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_diff import read, token  # noqa: E402
+from build_diff import read, token
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) != 5:
         print(__doc__)
         return 2
     names_path, src_path, dst_path, out_path = sys.argv[1:]
     src, dst = read(src_path), read(dst_path)
 
-    sm = difflib.SequenceMatcher(None, [token(r) for r in src], [token(r) for r in dst], autojunk=False)
+    sm = difflib.SequenceMatcher(
+        None, [token(r) for r in src], [token(r) for r in dst], autojunk=False
+    )
     mapping = {}
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
@@ -58,8 +62,10 @@ def main():
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(header) + "\n")
-        f.write(f"# Ported by tools/port_names.py from {os.path.basename(names_path)}; "
-                f"only functions paired with identical code are carried across.\n")
+        f.write(
+            f"# Ported by tools/port_names.py from {os.path.basename(names_path)}; "
+            f"only functions paired with identical code are carried across.\n"
+        )
         f.write("\n".join(rows) + "\n")
     print(f"ported {ported}, skipped {len(skipped)}")
     for s in skipped:

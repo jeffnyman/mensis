@@ -15,7 +15,7 @@ repository, so it doubles as a worked example of the whole pipeline.
   Whirligig Saw attacks are toned down, Valtr takes more damage, several Old Hunters enemies are
   adjusted, and Blood Rock can be bought ([tables](#the-balance-changes-in-the-data-not-the-code)).
 * **Fixes in the event scripts:** elevators that keep their position, a safe exit for saves
-  left in the DLC areas without the DLC, NPC and boss behaviour ([events](#the-event-scripts)).
+  left in the DLC areas without the DLC, NPC and boss behavior ([events](#the-event-scripts)).
 * **NPC hunters on ladders** and Lady Maria's phase tracking in the AI ([AI](#the-ai-scripts)),
   a dialogue held back during the NPC assassin's sequence ([talk](#the-talk-scripts)), and new
   regions in the Research Hall's layout that tie an AI fix, a layout change and an event change
@@ -38,7 +38,7 @@ Of the executable's 158,451 non-thunk functions, 99.6% are unchanged.
    ([Comparing two builds](ghidra.md#comparing-two-builds)).
 4. **Decompile both sides.** `Decompile.java <dir>/ @list` on each build, for every function the
    alignment did not find identical.
-5. **Diff the C.** `tools/c_diff.py` normalises the decompiled text and writes unified diffs,
+5. **Diff the C.** `tools/c_diff.py` normalizes the decompiled text and writes unified diffs,
    largest first.
 
 ```
@@ -53,7 +53,7 @@ python -I tools/c_diff.py work/ghidra/diff/pairs-1.00-to-1.09.tsv work/ghidra/di
 (The output directory ends in `/`, not `\`: through `cmd.exe`, a trailing backslash escapes the
 closing quote.)
 
-#### Normalising decompiled C
+#### Normalizing decompiled C
 
 Two decompilations of the same function from different builds differ in many ways that mean
 nothing, and `c_diff.py` removes each of them before diffing:
@@ -65,7 +65,7 @@ nothing, and `c_diff.py` removes each of them before diffing:
 | Raw data addresses as numbers | `if (0x5946477 < p)` vs `0x59464a7` | hex literals inside the data segment (`0x54dc000–0x5ae1000`) become `0xDATA` |
 | Variable numbering | `local_38`, `iVar3`, `uStack_c4` | declarations dropped; names renumbered `v1, v2, …` by first use |
 
-What normalisation can't remove is worth knowing too, because it shows up in the diffs:
+What normalization can't remove is worth knowing too, because it shows up in the diffs:
 
 * **Inlining.** A helper inlined in one build and called in the other looks like a big change:
   the call disappears and its body appears. Most of the 8 "removed" functions in the build diff
@@ -123,7 +123,7 @@ In 1.09 the constructor only builds the object. That shrinks it from 0x40 to 0x3
 boot step that creates it (`SprjSystemStep::STEP_Init_forBootPhase4`) now inlines it. Along with
 it:
 
-* the graphics system's initialisation (`02377250`) no longer reads `FsrmiWrapper.Port`;
+* the graphics system's initialization (`02377250`) no longer reads `FsrmiWrapper.Port`;
 * the AI Lua debug menu (`016d7f60`) no longer checks `Game.IsUseLuaConsole`;
 * of the other functions that read `Game.IsUseLuaConsole`, two shrink to 3-byte stubs, one from
   199 to 61 bytes, and one is removed. A function reading `FsrmiWrapper.Port` through the system
@@ -212,7 +212,7 @@ PARAMDEF, and the game ships all 63 of them in `paramdef/paramdef.paramdefbnd.dc
 has a Japanese display name, a storage type and an internal name:
 
 ```
-behaviorVariationId   s32   行動バリエーションID   (behaviour variation ID)
+behaviorVariationId   s32   行動バリエーションID   (behavior variation ID)
 isEnableDropSoulCapture:1   u8   ドロップソウル所持可   (can hold dropped souls)
 ```
 
@@ -228,7 +228,7 @@ decoded:
   natural alignment (`breakSfxId`, an `s32`, at offset 12).
 
 `params.py check` confirms every table's row stride matches its PARAMDEF: **65/65** in both
-builds. `params.py diff … --msg item.msgbnd.dcx` compares two builds and labels weapons, armour
+builds. `params.py diff … --msg item.msgbnd.dcx` compares two builds and labels weapons, armor
 and goods with their English names.
 
 ```
@@ -242,7 +242,7 @@ python -I tools/params.py diff work/base/dvdroot_ps4/param/gameparam/gameparam.p
 
 13 of the 65 tables changed. IDs were traced to names through the tables themselves: weapons
 through `behaviorVariationId`, enemy attacks through `BehaviorParam` to the `NpcParam` rows of
-the same behaviour variation, and characters through `nameId` and the `NPC名` text table. Where
+the same behavior variation, and characters through `nameId` and the `NPC名` text table. Where
 no name exists, the enemy model was located by searching the map layouts (`map/mapstudio/*.msb`)
 for its model ID.
 
@@ -252,7 +252,7 @@ for its model ID.
 |---|---|
 | **Boom Hammer**: cheaper to use | stamina cost of 17 moves (`BehaviorParam_PC` 1028xxxxx) cut by 17–29%: 30→25, 40→30, 50→40, 60→50, 70→50, 80→60, 90→70, 100→75, 120→90 |
 | **Whirligig Saw**: three attacks toned down | attacks 3100930–3100932: poise damage (`atkSuperArmorCorrection`) 80/65 → 30, HP regained on hit (`wepRegainHpScale`) 65 → 30, damage 65 → 60 |
-| one more attack (3800932) toned down | all damage corrections 350 → 320; its owner wasn't traced (no player behaviour references it) |
+| one more attack (3800932) toned down | all damage corrections 350 → 320; its owner wasn't traced (no player behavior references it) |
 
 **Enemies: all in The Old Hunters' areas**
 
@@ -388,7 +388,7 @@ like the game's handling of a save that is in the DLC when the DLC is no longer 
 * Common event 9480, an NPC-kill event (`血族BJを付けてNPC殺害2_XX`), takes one more argument
   and is started for more NPCs (flags 1710–1713, 1730, 1790, 12700909). Flag 1790 is also one
   of the executioner event's conditions.
-* `時計塔の女医_初期化` ("Clocktower woman doctor: initialise") starts her in a different idle
+* `時計塔の女医_初期化` ("Clocktower woman doctor: initialize") starts her in a different idle
   animation (2250 → 7011).
 
 ### Bosses and enemies
@@ -521,7 +521,7 @@ Two details make the output readable:
 **The limit:** Bloodborne's command and function *names* aren't public, so they print as
 numbers (`c1_1`, `f15`). From context, `c1_1` speaks a line and `f15(flag)` reads an event
 flag, but most others can only be described by what their arguments are. Also, an inserted state
-renumbers the states after it, which inflates the diffs. `esd.py` doesn't renormalise this yet.
+renumbers the states after it, which inflates the diffs. `esd.py` doesn't renormalize this yet.
 
 ### What changed
 
@@ -575,7 +575,7 @@ ties into a script change already described above:
 |---|---|---|---|
 | m35 | 3502905 `敵対：恋人NPC通常行動範囲` ("hostile: lover NPC's normal activity range") | **added** | `Koibito6620`'s AI now tests 3502905 |
 | m35 | 3502910, the same `_ギミック起動後` ("after the gimmick is activated") | **added** | ...and 3502910 |
-| m35 | 3502908 `敵対：恋人NPC守備範囲_ギミック起動後` ("defence range after the gimmick") | moved 2 m up (y 1596.06 → 1598.06) | the `柱上昇ギミック` ("rising pillar") event also changed |
+| m35 | 3502908 `敵対：恋人NPC守備範囲_ギミック起動後` ("defense range after the gimmick") | moved 2 m up (y 1596.06 → 1598.06) | the `柱上昇ギミック` ("rising pillar") event also changed |
 | m35 | 3502124 `祭壇エレベーター：ポリ劇PCワープ位置_ゲスト` ("altar elevator: cutscene warp position, guest") | **replaced by four candidates** 3502124–3502127, spaced 1.4–3.6 m apart | the elevator's first-run event now warps players to them by a random flag |
 | m36 | 3602941 `漁村の司祭　独り言範囲` ("Fishing Hamlet priest: monologue range") | moved 1.5 m (x −579.42 → −577.92) | |
 
@@ -594,7 +594,7 @@ All generated under `work/` (not in the repository):
 | `work/ghidra/diff/diff-1.00-to-1.09.md` | the function-level build diff (buckets, sizes, strings) |
 | `work/ghidra/diff/pairs-1.00-to-1.09.tsv` | every non-identical pairing: bucket, old address, new address |
 | `work/ghidra/diff/c-1.00/`, `c-1.09/` | one decompiled `.c` per changed function |
-| `work/ghidra/diff/c-diff-1.00-to-1.09.md` | the normalised decompiled diffs, largest first |
+| `work/ghidra/diff/c-diff-1.00-to-1.09.md` | the normalized decompiled diffs, largest first |
 | `work/params/gameparam-1.00-to-1.09.md` | every changed table row and field |
 | `work/events/<map>.md` | event-script diffs per map |
 | `work/ai/<map>.md` | AI-script diffs per map |

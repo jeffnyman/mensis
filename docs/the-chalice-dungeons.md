@@ -2,7 +2,7 @@
 
 How Bloodborne's Chalice Dungeons are put together, read from the game's own tables and layouts.
 The short version: **a "random" Root Chalice dungeon is one of 100 or 200 pre-built layouts**,
-chosen by number (steered towards unique items you haven't picked up yet), and the rites
+chosen by number (steered toward unique items you haven't picked up yet), and the rites
 (Fetid, Rotted, Cursed, Sinister) change which enemy and gem tables those layouts draw on, or set
 event flags that decide which of the variants already placed in the layout survive.
 
@@ -189,7 +189,7 @@ Each layout places its own treasure. The item index counts, per chalice, how man
 hold each item ([where the items are](the-items.md#the-chalice-dungeons)). For example, the
 Uncanny Beast Claw is in 107 of the Ailing Loran Root Chalice's 200 layouts, and the plain Beast
 Claw only in the Ailing Loran story chalice. That share of layouts isn't the chance of meeting an
-item, because a ritual is steered towards unique items not yet picked up
+item, because a ritual is steered toward unique items not yet picked up
 ([how a ritual picks its layout](#how-a-ritual-picks-its-layout)).
 
 ## Glyphs
@@ -297,7 +297,7 @@ claimed:
 **The generator.** The random-number generator belongs to a large global game object, created
 at start-up. Its constructor seeds it from the clock (`gettimeofday`: seconds × 1,000,000 +
 microseconds, cut to 32 bits) and fills a 624-word state with the Mersenne Twister's
-initialisation (`x' = (x ^ x >> 30) × 0x6c078965 + i`). It then applies a period check whose
+initialization (`x' = (x ^ x >> 30) × 0x6c078965 + i`). It then applies a period check whose
 constant, `0x13c9e684`, is the SFMT-19937 parity word: **SIMD-oriented Fast Mersenne Twister**.
 The same generator serves other game systems too, so which layout a ritual gives depends on when
 the game started and on everything drawn from it since. It can't be predicted from the save.

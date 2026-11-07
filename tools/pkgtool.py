@@ -27,6 +27,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import hmac
+import io
 import os
 import struct
 import sys
@@ -37,7 +38,7 @@ from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pkgkeys  # noqa: E402
+import pkgkeys
 
 SECTOR = 0x1000
 
@@ -47,7 +48,7 @@ def rsa_decrypt(cipher: bytes, n: int, d: int) -> bytes:
     m = pow(int.from_bytes(cipher, "big"), d, n).to_bytes(256, "big")
     if m[0:2] != b"\x00\x02":
         raise ValueError("bad PKCS#1 padding - not a fake-signed package?")
-    return m[m.index(b"\x00", 2) + 1:]
+    return m[m.index(b"\x00", 2) + 1 :]
 
 
 @dataclass
@@ -69,20 +70,45 @@ class Entry:
 class Pkg:
     def __init__(self, path: str):
         self.path = path
-        self.f = open(path, "rb")
+        self.f = open(path, "rb")  # noqa: SIM115  (kept open: entries are read on demand)
         h = self.f.read(0x1000)
         self.header = h
         if h[:4] != b"\x7fCNT":
             raise ValueError("not a PS4 PKG")
-        (self.pkg_type, _, self.file_count, self.entry_count, self.sc_entry_count, _,
-         self.entry_table_offset, self.sc_data_size, self.body_offset, self.body_size,
-         self.content_offset, self.content_size) = struct.unpack_from(">IIIIHHIIQQQQ", h, 4)
+        (
+            self.pkg_type,
+            _,
+            self.file_count,
+            self.entry_count,
+            self.sc_entry_count,
+            _,
+            self.entry_table_offset,
+            self.sc_data_size,
+            self.body_offset,
+            self.body_size,
+            self.content_offset,
+            self.content_size,
+        ) = struct.unpack_from(">IIIIHHIIQQQQ", h, 4)
         self.content_id = h[0x40:0x64].decode()
-        (self.drm_type, self.content_type, self.content_flags, self.promote_size,
-         self.version_date, self.version_hash) = struct.unpack_from(">IIIIII", h, 0x70)
-        (self.pfs_image_count, self.pfs_flags, self.pfs_offset, self.pfs_size,
-         self.mount_offset, self.mount_size, self.pkg_size, self.pfs_signed_size,
-         self.pfs_cache_size) = struct.unpack_from(">IQQQQQQII", h, 0x404)
+        (
+            self.drm_type,
+            self.content_type,
+            self.content_flags,
+            self.promote_size,
+            self.version_date,
+            self.version_hash,
+        ) = struct.unpack_from(">IIIIII", h, 0x70)
+        (
+            self.pfs_image_count,
+            self.pfs_flags,
+            self.pfs_offset,
+            self.pfs_size,
+            self.mount_offset,
+            self.mount_size,
+            self.pkg_size,
+            self.pfs_signed_size,
+            self.pfs_cache_size,
+        ) = struct.unpack_from(">IQQQQQQII", h, 0x404)
         self.entries: list[Entry] = []
         self.f.seek(self.entry_table_offset)
         for _ in range(self.entry_count):
@@ -92,15 +118,25 @@ class Pkg:
         names = self.entry_data(0x200)
         for e in self.entries:
             if names is not None and e.name_off:
-                e.name = names[e.name_off:names.index(b"\0", e.name_off)].decode()
+                e.name = names[e.name_off : names.index(b"\0", e.name_off)].decode()
             else:
-                e.name = {0x1: ".digests", 0x10: ".entry_keys", 0x20: ".image_key",
-                          0x80: ".general_digests", 0x100: ".metas", 0x200: ".entry_names",
-                          0x400: "license.dat", 0x401: "license.info", 0x402: "nptitle.dat",
-                          0x403: "npbind.dat", 0x404: "selfinfo.dat", 0x406: "imageinfo.dat",
-                          0x407: "target-deltainfo.dat", 0x408: "origin-deltainfo.dat",
-                          0x409: "psreserved.dat"
-                          }.get(e.id, f"entry_{e.id:04x}")
+                e.name = {
+                    0x1: ".digests",
+                    0x10: ".entry_keys",
+                    0x20: ".image_key",
+                    0x80: ".general_digests",
+                    0x100: ".metas",
+                    0x200: ".entry_names",
+                    0x400: "license.dat",
+                    0x401: "license.info",
+                    0x402: "nptitle.dat",
+                    0x403: "npbind.dat",
+                    0x404: "selfinfo.dat",
+                    0x406: "imageinfo.dat",
+                    0x407: "target-deltainfo.dat",
+                    0x408: "origin-deltainfo.dat",
+                    0x409: "psreserved.dat",
+                }.get(e.id, f"entry_{e.id:04x}")
         self._keys_ready = False
 
     def entry(self, eid: int) -> Entry | None:
@@ -118,18 +154,27 @@ class Pkg:
         if self._keys_ready:
             return
         ek = self.entry_data(0x10)
-        key1 = [ek[0x20 + 7 * 32 + i * 256:][:256] for i in range(7)]
-        self.dk3 = rsa_decrypt(key1[3], pkgkeys.PKGDERIVEDKEY3KEYSET_MODULUS,
-                               pkgkeys.PKGDERIVEDKEY3KEYSET_PRIVATEEXPONENT)[:32]
         ie = self.entry(0x20)
+        ie_data = self.entry_data(0x20)
+        if ek is None or ie is None or ie_data is None:
+            raise ValueError("package has no key entries (0x10, 0x20)")
+        key1 = [ek[0x20 + 7 * 32 + i * 256 :][:256] for i in range(7)]
+        self.dk3 = rsa_decrypt(
+            key1[3],
+            pkgkeys.PKGDERIVEDKEY3KEYSET_MODULUS,
+            pkgkeys.PKGDERIVEDKEY3KEYSET_PRIVATEEXPONENT,
+        )[:32]
         ivkey = hashlib.sha256(ie.raw + self.dk3).digest()
         dec = Cipher(algorithms.AES(ivkey[16:]), modes.CBC(ivkey[:16])).decryptor()
-        img_key = dec.update(self.entry_data(0x20)[:256]) + dec.finalize()
-        self.ekpfs = rsa_decrypt(img_key, pkgkeys.FAKEKEYSET_MODULUS,
-                                 pkgkeys.FAKEKEYSET_PRIVATEEXPONENT)[:32]
+        img_key = dec.update(ie_data[:256]) + dec.finalize()
+        self.ekpfs = rsa_decrypt(
+            img_key, pkgkeys.FAKEKEYSET_MODULUS, pkgkeys.FAKEKEYSET_PRIVATEEXPONENT
+        )[:32]
         self.f.seek(self.pfs_offset + 0x370)
         self.seed = self.f.read(16)
-        dt = hmac.new(self.ekpfs, struct.pack("<I", 1) + self.seed, hashlib.sha256).digest()
+        dt = hmac.new(
+            self.ekpfs, struct.pack("<I", 1) + self.seed, hashlib.sha256
+        ).digest()
         self.tweak_key, self.data_key = dt[:16], dt[16:]
         self._xts_key = self.data_key + self.tweak_key
         self._keys_ready = True
@@ -141,7 +186,7 @@ class Pkg:
         self.f.seek(e.offset)
         data = self.f.read((e.size + 15) & ~15)
         dec = Cipher(algorithms.AES(ivkey[16:]), modes.CBC(ivkey[:16])).decryptor()
-        return (dec.update(data) + dec.finalize())[:e.size]
+        return (dec.update(data) + dec.finalize())[: e.size]
 
     # --- outer PFS (encrypted) -------------------------------------------------------
     def outer_read(self, off: int, n: int) -> bytes:
@@ -154,11 +199,12 @@ class Pkg:
         out = bytearray()
         for i in range(0, len(enc), SECTOR):
             sector = (start + i) // SECTOR
-            d = Cipher(algorithms.AES(self._xts_key),
-                       modes.XTS(sector.to_bytes(16, "little"))).decryptor()
-            out += d.update(enc[i:i + SECTOR])
+            d = Cipher(
+                algorithms.AES(self._xts_key), modes.XTS(sector.to_bytes(16, "little"))
+            ).decryptor()
+            out += d.update(enc[i : i + SECTOR])
         rel = off - start
-        return bytes(out[rel:rel + n])
+        return bytes(out[rel : rel + n])
 
     def open_pfsc(self):
         if hasattr(self, "pfsc_off"):
@@ -170,8 +216,16 @@ class Pkg:
         else:
             raise ValueError("PFSC container not found in outer PFS")
         hdr = self.outer_read(self.pfsc_off, 0x30)
-        (_, _, _, self.pfsc_block, self.pfsc_block2, map_off, self.pfsc_data_start,
-         self.inner_size) = struct.unpack_from("<4sIIIQQQQ", hdr)
+        (
+            _,
+            _,
+            _,
+            self.pfsc_block,
+            self.pfsc_block2,
+            map_off,
+            self.pfsc_data_start,
+            self.inner_size,
+        ) = struct.unpack_from("<4sIIIQQQQ", hdr)
         nblocks = (self.inner_size + self.pfsc_block2 - 1) // self.pfsc_block2
         m = self.outer_read(self.pfsc_off + map_off, (nblocks + 1) * 8)
         self.sector_map = struct.unpack(f"<{nblocks + 1}Q", m)
@@ -218,14 +272,30 @@ class InnerFs:
     def __init__(self, pkg: Pkg):
         self.pkg = pkg
         sb = pkg.inner_read_blocks(0, 1)
-        (self.version, self.magic, self.id, self.fmode, self.clean, self.readonly, _,
-         self.mode, _, self.block_size, self.nbackup, self.nblock, self.dinode_count,
-         self.ndblock, self.dinode_block_count, self.superroot_ino) = struct.unpack_from(
-            "<QQQBBBBHHIIQQQQQ", sb)
+        (
+            self.version,
+            self.magic,
+            self.id,
+            self.fmode,
+            self.clean,
+            self.readonly,
+            _,
+            self.mode,
+            _,
+            self.block_size,
+            self.nbackup,
+            self.nblock,
+            self.dinode_count,
+            self.ndblock,
+            self.dinode_block_count,
+            self.superroot_ino,
+        ) = struct.unpack_from("<QQQBBBBHHIIQQQQQ", sb)
         if self.magic != 20130315:
             raise ValueError(f"inner PFS magic {self.magic} unexpected")
         if self.mode & 0x3:
-            raise ValueError(f"inner PFS mode {self.mode:#x}: signed/64-bit inodes unsupported")
+            raise ValueError(
+                f"inner PFS mode {self.mode:#x}: signed/64-bit inodes unsupported"
+            )
         per_block = self.block_size // INODE_SIZE
         self.inodes: list[Inode] = []
         for bi, blk in enumerate(pkg.inner_blocks(1, self.dinode_block_count)):
@@ -251,12 +321,20 @@ class InnerFs:
                     break
                 p = nxt
                 continue
-            yield d_ino, d_type, data[p + 16:p + 16 + namelen].decode("utf-8", "replace")
+            yield (
+                d_ino,
+                d_type,
+                data[p + 16 : p + 16 + namelen].decode("utf-8", "replace"),
+            )
             p += entsize
 
     def walk(self):
         """Yield (path, Inode, is_dir) for everything under uroot."""
-        root = next(i for i, t, n in self.dirents(self.superroot_ino) if n == "uroot" and t == DT_DIR)
+        root = next(
+            i
+            for i, t, n in self.dirents(self.superroot_ino)
+            if n == "uroot" and t == DT_DIR
+        )
         stack = [("", root)]
         while stack:
             prefix, ino = stack.pop()
@@ -292,28 +370,38 @@ def human(n: float) -> str:
 
 def cmd_info(pkg: Pkg):
     print(f"content id      {pkg.content_id}")
-    print(f"pkg type        {pkg.pkg_type:#x}   drm {pkg.drm_type:#x}   content type {pkg.content_type:#x}"
-          f"   content flags {pkg.content_flags:#010x}")
+    print(
+        f"pkg type        {pkg.pkg_type:#x}   drm {pkg.drm_type:#x}   content type {pkg.content_type:#x}"
+        f"   content flags {pkg.content_flags:#010x}"
+    )
     print(f"version date    {pkg.version_date:#x}  hash {pkg.version_hash:#x}")
     print(f"entries         {pkg.entry_count} at {pkg.entry_table_offset:#x}")
-    print(f"pfs image       offset {pkg.pfs_offset:#x}  size {pkg.pfs_size:#x} ({human(pkg.pfs_size)})"
-          f"  flags {pkg.pfs_flags:#x}")
+    print(
+        f"pfs image       offset {pkg.pfs_offset:#x}  size {pkg.pfs_size:#x} ({human(pkg.pfs_size)})"
+        f"  flags {pkg.pfs_flags:#x}"
+    )
     print(f"pkg size        {pkg.pkg_size:#x} ({human(pkg.pkg_size)})")
     print()
     print("  id     flags1     flags2     offset     size  name")
     for e in pkg.entries:
-        print(f"  {e.id:04x}  {e.flags1:08x}  {e.flags2:08x}  {e.offset:9x}  {e.size:7x}  {e.name}"
-              + ("  [enc]" if e.encrypted else ""))
+        print(
+            f"  {e.id:04x}  {e.flags1:08x}  {e.flags2:08x}  {e.offset:9x}  {e.size:7x}  {e.name}"
+            + ("  [enc]" if e.encrypted else "")
+        )
     pkg.derive_keys()
     print()
     print(f"EKPFS           {pkg.ekpfs.hex()}")
     print(f"seed            {pkg.seed.hex()}")
     pkg.open_pfsc()
-    print(f"PFSC            at outer+{pkg.pfsc_off:#x}, block {pkg.pfsc_block2:#x}, "
-          f"inner image {pkg.inner_size:#x} ({human(pkg.inner_size)}), {len(pkg.sector_map) - 1} blocks")
+    print(
+        f"PFSC            at outer+{pkg.pfsc_off:#x}, block {pkg.pfsc_block2:#x}, "
+        f"inner image {pkg.inner_size:#x} ({human(pkg.inner_size)}), {len(pkg.sector_map) - 1} blocks"
+    )
     fs = InnerFs(pkg)
-    print(f"inner PFS       mode {fs.mode:#x}, block {fs.block_size:#x}, {fs.dinode_count} inodes, "
-          f"superroot ino {fs.superroot_ino}")
+    print(
+        f"inner PFS       mode {fs.mode:#x}, block {fs.block_size:#x}, {fs.dinode_count} inodes, "
+        f"superroot ino {fs.superroot_ino}"
+    )
 
 
 def cmd_list(pkg: Pkg, patterns):
@@ -336,6 +424,8 @@ def cmd_extract(pkg: Pkg, out_dir, patterns):
         if e.id < 0x400:
             continue  # key material and tables, not files
         data = pkg.decrypt_entry(e) if e.encrypted else pkg.entry_data(e.id)
+        if data is None:
+            continue
         p = os.path.join(out_dir, "sce_sys", e.name)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "wb") as fo:
@@ -363,7 +453,8 @@ def cmd_extract(pkg: Pkg, out_dir, patterns):
 
 
 def main(argv):
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     if len(argv) < 3:
         print(__doc__)
         return 2

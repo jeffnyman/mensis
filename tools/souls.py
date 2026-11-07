@@ -12,6 +12,7 @@ Layouts follow SoulsFormats (JKAnderson et al.); only the Bloodborne/DS3-era var
 
 from __future__ import annotations
 
+import io
 import os
 import struct
 import sys
@@ -29,7 +30,7 @@ def dcx_decompress(data: bytes) -> bytes:
     if fmt != b"DFLT":
         raise ValueError(f"DCX compressor {fmt!r} not handled")
     start = 0x4C
-    out = zlib.decompress(data[start:start + csize])
+    out = zlib.decompress(data[start : start + csize])
     if len(out) != usize:
         raise ValueError("DCX size mismatch")
     return out
@@ -63,7 +64,9 @@ def bnd4_read(data: bytes, blob: bytes | None = None) -> list[BndFile]:
         raise ValueError("not BND4 or BHF4")
     body = blob if blob is not None else data
     big = data[9] == 1
-    bit_big = data[10] == 1
+    _bit_big = (
+        data[10] == 1
+    )  # bit order of the format byte; handled below by trying both
     e = ">" if big else "<"
     count = struct.unpack_from(e + "i", data, 0x0C)[0]
     unicode = data[0x30] == 1
@@ -74,11 +77,19 @@ def bnd4_read(data: bytes, blob: bytes | None = None) -> list[BndFile]:
     for fmt in (_rev8(raw_fmt), raw_fmt):
         has_ids, has_names = bool(fmt & 2), bool(fmt & 0xC)
         long_off, compressed = bool(fmt & 0x10), bool(fmt & 0x20)
-        size = 16 + (8 if compressed else 0) + (8 if long_off else 4) + 4 * has_ids + 4 * has_names
+        size = (
+            16
+            + (8 if compressed else 0)
+            + (8 if long_off else 4)
+            + 4 * has_ids
+            + 4 * has_names
+        )
         if size == entry_size:
             break
     else:
-        raise ValueError(f"BND4 format {raw_fmt:#x} does not match entry size {entry_size:#x}")
+        raise ValueError(
+            f"BND4 format {raw_fmt:#x} does not match entry size {entry_size:#x}"
+        )
     out = []
     for i in range(count):
         p = 0x40 + i * entry_size
@@ -104,12 +115,12 @@ def bnd4_read(data: bytes, blob: bytes | None = None) -> list[BndFile]:
             p += 4
             if unicode:
                 end = noff
-                while data[end:end + 2] != b"\0\0":
+                while data[end : end + 2] != b"\0\0":
                     end += 2
                 name = data[noff:end].decode("utf-16-be" if big else "utf-16-le")
             else:
-                name = data[noff:data.index(b"\0", noff)].decode("shift_jis")
-        out.append(BndFile(flags, fid, name, dcx_decompress(body[off:off + csize])))
+                name = data[noff : data.index(b"\0", noff)].decode("shift_jis")
+        out.append(BndFile(flags, fid, name, dcx_decompress(body[off : off + csize])))
     return out
 
 
@@ -118,7 +129,7 @@ def fmg_read(data: bytes) -> dict[int, str]:
     big = data[1] == 0xFF
     e = ">" if big else "<"
     version = data[2]
-    groups, strings = struct.unpack_from(e + "ii", data, 0x0C)
+    groups, _strings = struct.unpack_from(e + "ii", data, 0x0C)
     if version == 2:
         str_off = struct.unpack_from(e + "q", data, 0x18)[0]
         p, gsz, osz = 0x28, 16, 8
@@ -134,7 +145,7 @@ def fmg_read(data: bytes) -> dict[int, str]:
             if so <= 0:
                 continue
             end = so
-            while data[end:end + 2] != b"\0\0":
+            while data[end : end + 2] != b"\0\0":
                 end += 2
             out[first + k] = data[so:end].decode("utf-16-be" if big else "utf-16-le")
     return out
@@ -144,17 +155,18 @@ def fmg_read(data: bytes) -> dict[int, str]:
 def param_info(data: bytes) -> tuple[str, int, int]:
     """Return (param type, row count, format flags) for a DS3/BB-era PARAM."""
     rows = struct.unpack_from("<H", data, 0x0A)[0]
-    f2d, f2e = data[0x2D], data[0x2E]
+    f2d, _f2e = data[0x2D], data[0x2E]
     if f2d & 0x80:  # OffsetParamType: name stored elsewhere
         off = struct.unpack_from("<q", data, 0x10)[0]
-        ptype = data[off:data.index(b"\0", off)].decode("ascii")
+        ptype = data[off : data.index(b"\0", off)].decode("ascii")
     else:
         ptype = data[0x0C:0x2C].split(b"\0")[0].decode("ascii", "replace").strip()
     return ptype, rows, f2d
 
 
 def main(argv):
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     if len(argv) < 3:
         print(__doc__)
         return 2
@@ -169,14 +181,23 @@ def main(argv):
             print(f"{bf.id:>10} {len(bf.data):>10}  {bf.data[:4]!r:12} {bf.name}")
         if len(argv) > 3:
             for bf in files:
-                rel = bf.name.replace("\\", "/").lstrip("/").split(":", 1)[-1].lstrip("/")
+                rel = (
+                    bf.name.replace("\\", "/").lstrip("/").split(":", 1)[-1].lstrip("/")
+                )
                 dst = os.path.join(argv[3], *rel.split("/"))
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 with open(dst, "wb") as f:
                     f.write(bf.data)
     elif cmd == "fmg":
-        sources = [(path, data)] if data[:4] != b"BND4" else [
-            (bf.name, bf.data) for bf in bnd4_read(data) if bf.name.lower().endswith(".fmg")]
+        sources = (
+            [(path, data)]
+            if data[:4] != b"BND4"
+            else [
+                (bf.name, bf.data)
+                for bf in bnd4_read(data)
+                if bf.name.lower().endswith(".fmg")
+            ]
+        )
         for name, d in sources:
             texts = fmg_read(d)
             if len(argv) > 3:
@@ -189,8 +210,10 @@ def main(argv):
                 print(f"  {k}: {v[:100]!r}")
     elif cmd == "param":
         for bf in bnd4_read(data):
-            ptype, rows, flags = param_info(bf.data)
-            print(f"{rows:6} rows  {ptype:32} {os.path.basename(bf.name.replace(chr(92), '/'))}")
+            ptype, rows, _flags = param_info(bf.data)
+            print(
+                f"{rows:6} rows  {ptype:32} {os.path.basename(bf.name.replace(chr(92), '/'))}"
+            )
     else:
         print(__doc__)
         return 2

@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 <#
-Load a PS4 eboot into a Ghidra project, from fake SELF to analysed program, in one go.
+Load a PS4 eboot into a Ghidra project, from fake SELF to analyzed program, in one go.
 
     pwsh tools/ghidra/analyze.ps1 -Self work/update/eboot.bin -Name eboot-1.09
 
 Steps (each is a separate tool, see docs/ghidra.md):
   1. tools/unfself.py     fake SELF  -> plain ELF                   work/elf/<Name>.elf
   2. tools/orbis_prep.py  ELF        -> Ghidra-ready ELF + symbols  work/ghidra/<Name>.ghidra.elf / .symbols.tsv
-  3. analyzeHeadless      import, run ApplyOrbisSymbols.java before analysis, auto-analyse, save
+  3. analyzeHeadless      import, run ApplyOrbisSymbols.java before analysis, auto-analyze, save
                           into the Ghidra project work/ghidra/project/Bloodborne
   4. analyzeHeadless      run OrbisReport.java over the saved program  work/ghidra/report-<Name>/
 
@@ -16,7 +16,7 @@ Configuration comes from parameters or, failing those, environment variables:
   -Jdk      / JAVA_HOME            a JDK that Ghidra accepts (Ghidra 12.2 needs JDK 25)
   -Python   / MENSIS_PYTHON        Python with the project's dependencies; defaults to .venv,
                                    then to python on PATH
-  -MaxMem   / GHIDRA_HEADLESS_MAXMEM   heap for the headless analyser (default 20G)
+  -MaxMem   / GHIDRA_HEADLESS_MAXMEM   heap for the headless analyzer (default 20G)
 #>
 param(
     [Parameter(Mandatory)] [string] $Self,

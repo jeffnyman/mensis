@@ -33,7 +33,7 @@ project.
 | about 50 GB of disk | | about 34 GB for the extracted game and analysis, the rest for pictures |
 
 The Ghidra steps need Windows (`analyze.ps1` runs Ghidra's `analyzeHeadless.bat` and the JDK's
-`java.exe`) and plenty of memory: the analyser uses up to 20 GB of heap. Steps 5–7 don't need
+`java.exe`) and plenty of memory: the analyzer uses up to 20 GB of heap. Steps 5–7 don't need
 Ghidra at all.
 
 ## 1. Extract the packages ([the package](the-package.md))
@@ -76,7 +76,7 @@ Each run:
 2. converts the SELF to an ELF (`work/elf/`);
 3. prepares it for Ghidra and writes its symbols (`work/ghidra/<name>.ghidra.elf` and
    `.symbols.tsv`, whose `IMPORT` rows are the 701 resolved system imports);
-4. imports and analyses the program into the project `work/ghidra/project/Bloodborne.gpr`;
+4. imports and analyzes the program into the project `work/ghidra/project/Bloodborne.gpr`;
 5. writes a report.
 
 About 24 minutes each.
@@ -179,7 +179,7 @@ GB. Like everything in `work/`, the pictures stay out of the repository.
 
 Several pages give numbers to compare against:
 - 28,808 files in the game;
-- 167,054 functions in each analysed build, and 701 resolved imports;
+- 167,054 functions in each analyzed build, and 701 resolved imports;
 - 1,056 item pictures, 217 character renders and 568 equipment renders;
 - 2,685 Chalice layouts.
 

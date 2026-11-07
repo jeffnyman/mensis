@@ -1,7 +1,7 @@
 # Hand-assigned names for eboot 1.09 (addresses as loaded at 0x400000 by orbis_prep.py).
 # Applied with tools/ghidra/ApplyNames.java. Confidence:
 #   certain   the code does exactly this, or a source-file assert names it
-#   likely    the behaviour is clear; the exact name is ours
+#   likely    the behavior is clear; the exact name is ours
 #   probable  attribution to a particular library is an inference
 # Rank = position among the most-called unnamed functions (MostCalled.java), where relevant.
 address	kind	name	confidence	evidence
@@ -11,7 +11,7 @@ address	kind	name	confidence	evidence
 0247ee80	function	Mutex_IsCreated	likely	rank 3, 2,744 callers: returns the byte at +0x10 of a mutex object, the flag set after PthreadMutex_InitRecursive succeeds
 02483fe0	function	PthreadMutex_InitRecursive	certain	rank 4: scePthreadMutexattrSettype(attr, 2 = recursive) + scePthreadMutexInit; asserts from PthreadMutex.cpp
 0247bbf0	function	MemorySystem_Get	likely	rank 5, 2,672 callers: lazily constructs a 0x440-byte global; Heap_FindForPointer uses its heap list (+0x468) and lock (+0x470), containers its allocator (+0x458)
-024ede50	function	GlobalInitMutex_Get	likely	rank 6: lazily initialises and returns the static mutex that Heap_GetDefault and MemorySystem_Get lock
+024ede50	function	GlobalInitMutex_Get	likely	rank 6: lazily initializes and returns the static mutex that Heap_GetDefault and MemorySystem_Get lock
 024b6d00	function	HeapContainer_Construct	likely	rank 8: sets vtable 057b3ba0, binds g_ContainerHeap, asserts "Tried to create container with incompatible heap."
 024b5a60	function	HeapContainer_Destruct	likely	rank 13: resets vtable 057b3ba0 and frees each element through the bound heap
 0247c4e0	function	Heap_AllocAligned	likely	rank 14: (size, alignment, heap) -> heap->vtable[0x58](heap, size, alignment); callers construct objects in the result (e.g. 0xB0 bytes aligned 16)
@@ -30,7 +30,7 @@ address	kind	name	confidence	evidence
 02a279a0	function	WString_AssignSubstr	likely	rank 22: assign(other, pos, count) with the out-of-range check
 02bc0e00	function	WString_FromCStr	likely	constructs a wide string from a NUL-terminated wchar_t* on g_DefaultHeap (wcslen + WString_Assign_2); used for every virtual path such as L"param:/GameParam/GameParam.parambnd"
 02d67040	function	WString_FromCStr_TempHeap	likely	rank 40: as WString_FromCStr, on the thread's temporary heap
-024b7b10	function	DLRuntimeClass_Register	likely	rank 25: called by class registration initialisers after writing THIS_CLASS; asserts from DLRuntimeClass.cpp ("Given runtime class is NULL")
+024b7b10	function	DLRuntimeClass_Register	likely	rank 25: called by class registration initializers after writing THIS_CLASS; asserts from DLRuntimeClass.cpp ("Given runtime class is NULL")
 00e73a60	function	HavokScript_PrintAssert	certain	rank 33: printf("Havok Script Assertion [r $build] 0x%08X failed: ...")
 05940670	global	g_DefaultHeap	likely	cache of Heap_GetDefault(), used by WString_FromCStr and others
 05940668	global	g_ContainerHeap	likely	cache of MemorySystem_Get() + 0x458, the allocator HeapContainer_Construct binds
@@ -42,8 +42,8 @@ address	kind	name	confidence	evidence
 0227e6b0	function	ServerStatus_LoadLocal	likely	reads testdata:/server/ss.info.xml (not shipped) and parses it as the server status
 01c2d5c0	function	ServerStatus_UseLocal	likely	true if Game.IsBetatestMode, Game.IsTgsMode or Game.IsGamescomMode, else Game.Network.UseLocalSsInfo (default 0)
 0228a880	function	GameService_SendRequest	likely	(client, request number 0-36, ...) -> GameService_BuildRequest then HttpClient send; called once per request type
-022b58d0	function	GameService_BuildRequest	likely	adds SessionId, UserId and '?user_id=%lu' (except requests 0 Login and 5 UserAgreementGet), sets MessageId from the name table 05750b70 (LoginRequest ... WanderingGhostGetRequest), serialises the body with JsonValue_Serialize
-02da4cd0	function	JsonValue_Serialize	likely	recursive writer emitting '{', '}', '[', ':' around keys and values; serialises every game-service request body
+022b58d0	function	GameService_BuildRequest	likely	adds SessionId, UserId and '?user_id=%lu' (except requests 0 Login and 5 UserAgreementGet), sets MessageId from the name table 05750b70 (LoginRequest ... WanderingGhostGetRequest), serializes the body with JsonValue_Serialize
+02da4cd0	function	JsonValue_Serialize	likely	recursive writer emitting '{', '}', '[', ':' around keys and values; serializes every game-service request body
 0228b040	function	GameService_Login	certain	calls GameService_SendRequest with request number 0 (LoginRequest in the MessageId table)
 0228be50	function	GameService_SyncCharaId	certain	calls GameService_SendRequest with request number 2 (SyncCharaIdRequest in the MessageId table)
 022a3cd0	function	GameService_NoticeNormalGet	certain	calls GameService_SendRequest with request number 3 (NoticeNormalGetRequest in the MessageId table)

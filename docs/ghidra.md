@@ -24,7 +24,7 @@ $env:JAVA_HOME          = "C:\Tools\jdk-25.0.5+8"
 ```
 
 Then run `%GHIDRA_INSTALL_DIR%\ghidraRun.bat` for the GUI, or `support\analyzeHeadless.bat` for
-scripted use. The headless analyser gets 2 GB of heap by default, which is not enough for an
+scripted use. The headless analyzer gets 2 GB of heap by default, which is not enough for an
 81 MiB program. `analyze.ps1` sets `GHIDRA_HEADLESS_MAXMEM` to 20G unless you set it yourself; for
 the GUI, raise `MAXMEM` in `support\launch.properties`.
 
@@ -34,7 +34,7 @@ the GUI, raise `MAXMEM` in `support\launch.properties`.
 pwsh tools/ghidra/analyze.ps1 -Self work/update/eboot.bin -Name eboot-1.09
 ```
 
-This runs the four steps below and leaves an analysed program `eboot-1.09.ghidra.elf` in the
+This runs the four steps below and leaves an analyzed program `eboot-1.09.ghidra.elf` in the
 Ghidra project `work/ghidra/project/Bloodborne.gpr`, plus a report and sample decompilations in
 `work/ghidra/report-eboot-1.09/`. Open the project in the Ghidra GUI to browse it.
 
@@ -97,7 +97,7 @@ The emulator projects keep databases of tens of thousands of known names. The `#
 NID are the library and module IDs, in the same base64, indexing the `DT_SCE_IMPORT_LIB` and
 `DT_SCE_NEEDED_MODULE` tables.
 
-## Step 3: import and analyse (`analyzeHeadless` + `ApplyOrbisSymbols.java`)
+## Step 3: import and analyze (`analyzeHeadless` + `ApplyOrbisSymbols.java`)
 
 ```
 set GHIDRA_HEADLESS_MAXMEM=20G
@@ -115,7 +115,7 @@ set GHIDRA_HEADLESS_MAXMEM=20G
   * imports become functions in a namespace per library (`libkernel::sceKernelOpen`);
   * each PLT trampoline becomes a **thunk** of its import, so a call shows in the decompiler
     as `sceKernelOpen(...)` and not `FUN_02fbe4b8(...)`;
-  * GOT slots are labelled and typed as pointers;
+  * GOT slots are labeled and typed as pointers;
   * all 162,958 `.eh_frame_hdr` starts are disassembled and made functions.
 * Auto-analysis then runs with Ghidra's defaults. It follows flow, finds references and strings,
   recovers stacks, propagates constants and demangles the C++ names that some imports carry
@@ -254,7 +254,7 @@ lot. Two builds of the same game a patch apart don't need it.
 
 ### The lighter way
 
-Instead, each build is summarised on its own, one program in memory at a time, and the comparison
+Instead, each build is summarized on its own, one program in memory at a time, and the comparison
 happens outside Ghidra.
 
 1. **`ExportFunctionHashes.java`** writes one row per function: address, size, instruction count,
@@ -357,7 +357,7 @@ Three things came out of exploring:
 
 * About **740 UTF-16 strings of the form `Class::STEP_Name`** (`MapRes::STEP_LoTex_Finish`,
   `SprjSystemStep::STEP_Wait_forBootPhase5`, `CSMovieIns::STEP_Init`). FD4 runs much of the game
-  as step-based state machines, and static initialisers register each step as a 24-byte record
+  as step-based state machines, and static initializers register each step as a 24-byte record
   `{ code*, 0, L"Class::STEP_Name" }`:
 
   ```c
@@ -487,7 +487,7 @@ ones fall into a few families:
   `0x3FFFFFFF` mask and "don't deallocate" bit are `hkArray`'s), `HavokScript_PrintAssert`, and
   two Scaleform ActionScript 3 garbage-collector release functions.
 * **Reflection.** `DLRuntimeClass_Register` (asserts from `DLRuntimeClass.cpp`), the call the
-  class-registration initialisers make right after writing `THIS_CLASS`.
+  class-registration initializers make right after writing `THIS_CLASS`.
 
 Reading also corrected an earlier name. The function `NameFromStrings` had called
 `FD4_SingletonAssert` is the engine-wide assert handler: the lock, mutex and heap code call it
@@ -501,7 +501,7 @@ evidence and a confidence level:
 | Confidence | Meaning | Count |
 |---|---|---:|
 | certain | the code does exactly this, or a source-file assert names it | 7 |
-| likely | the behaviour is clear; the exact name is ours | 18 |
+| likely | the behavior is clear; the exact name is ours | 18 |
 | probable | attributing it to a particular library is an inference | 4 |
 
 ```

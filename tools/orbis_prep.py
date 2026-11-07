@@ -42,11 +42,18 @@ PT_GNU_EH_FRAME = 0x6474E550
 PT_SCE_DYNLIBDATA, PT_SCE_PROCPARAM = 0x61000000, 0x61000001
 ET_EXEC, ET_SCE_DYNEXEC = 2, 0xFE10
 
-DT_SCE = dict(
-    NEEDED_MODULE=0x6100000F, IMPORT_LIB=0x61000015, JMPREL=0x61000029, PLTRELSZ=0x6100002D,
-    RELA=0x6100002F, RELASZ=0x61000031, STRTAB=0x61000035, STRSZ=0x61000037,
-    SYMTAB=0x61000039, SYMTABSZ=0x6100003F,
-)
+DT_SCE = {
+    "NEEDED_MODULE": 0x6100000F,
+    "IMPORT_LIB": 0x61000015,
+    "JMPREL": 0x61000029,
+    "PLTRELSZ": 0x6100002D,
+    "RELA": 0x6100002F,
+    "RELASZ": 0x61000031,
+    "STRTAB": 0x61000035,
+    "STRSZ": 0x61000037,
+    "SYMTAB": 0x61000039,
+    "SYMTABSZ": 0x6100003F,
+}
 R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE = 1, 6, 7, 8
 
 NID_ALPHABET = string.ascii_uppercase + string.ascii_lowercase + string.digits + "+-"
@@ -61,8 +68,12 @@ def decode_id(s: str) -> int:
 
 
 def load_nid_db(path: str) -> dict[str, str]:
-    text = open(path, encoding="utf-8", errors="replace").read()
-    return {m.group(1): m.group(2) for m in re.finditer(r'STUB\("([A-Za-z0-9+\-]{11})",\s*([^)\s]+)\)', text)}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    return {
+        m.group(1): m.group(2)
+        for m in re.finditer(r'STUB\("([A-Za-z0-9+\-]{11})",\s*([^)\s]+)\)', text)
+    }
 
 
 def main():
@@ -75,10 +86,11 @@ def main():
     a = ap.parse_args()
     base = a.base
 
-    data = bytearray(open(a.elf, "rb").read())
+    with open(a.elf, "rb") as f:
+        data = bytearray(f.read())
     if data[:4] != b"\x7fELF":
         sys.exit("not an ELF (run unfself.py first)")
-    e_type, = struct.unpack_from("<H", data, 0x10)
+    (e_type,) = struct.unpack_from("<H", data, 0x10)
     e_entry, e_phoff = struct.unpack_from("<QQ", data, 0x18)
     e_phentsize, e_phnum = struct.unpack_from("<HH", data, 0x36)
     if e_type != ET_SCE_DYNEXEC:
@@ -105,23 +117,27 @@ def main():
     dynp, dlp = find(PT_DYNAMIC), find(PT_SCE_DYNLIBDATA)
     dl = dlp[3]
     tags = [struct.unpack_from("<QQ", data, dynp[3] + i) for i in range(0, dynp[6], 16)]
-    T = {}
+    T: dict[int, int] = {}
     for k, v in tags:
         T.setdefault(k, v)
     strtab = dl + T[DT_SCE["STRTAB"]]
 
     def cstr(o):
-        return data[strtab + o:data.index(b"\0", strtab + o)].decode()
+        return data[strtab + o : data.index(b"\0", strtab + o)].decode()
 
     libs = {v >> 48: cstr(v & 0xFFFFFFFF) for k, v in tags if k == DT_SCE["IMPORT_LIB"]}
-    mods = {v >> 48: cstr(v & 0xFFFFFFFF) for k, v in tags if k == DT_SCE["NEEDED_MODULE"]}
+    mods = {
+        v >> 48: cstr(v & 0xFFFFFFFF) for k, v in tags if k == DT_SCE["NEEDED_MODULE"]
+    }
 
     nids = load_nid_db(a.nid_db)
     symtab, nsym = dl + T[DT_SCE["SYMTAB"]], T[DT_SCE["SYMTABSZ"]] // 24
     syms = []  # (name, lib, is_func, defined_value or None)
     unresolved = 0
     for i in range(nsym):
-        st_name, info, _, shndx, value, _ = struct.unpack_from("<IBBHQQ", data, symtab + i * 24)
+        st_name, info, _, shndx, value, _ = struct.unpack_from(
+            "<IBBHQQ", data, symtab + i * 24
+        )
         raw = cstr(st_name)
         lib = ""
         name = raw
@@ -165,7 +181,9 @@ def main():
                     val = base + s[3]
                 elif rsym in stub_addr:
                     val = stub_addr[rsym]
-                    if rtype != R_X86_64_64:  # R_X86_64_64 sites are data pointers, not GOT
+                    if (
+                        rtype != R_X86_64_64
+                    ):  # R_X86_64_64 sites are data pointers, not GOT
                         got[base + r_off] = rsym
                     else:
                         counts["R_X86_64_64 to an import"] += 1
@@ -178,15 +196,17 @@ def main():
                 counts[f"type {rtype} skipped"] += 1
                 continue
             struct.pack_into("<Q", data, fo, val & 0xFFFFFFFFFFFFFFFF)
-            counts[{1: "R_X86_64_64", 6: "GLOB_DAT", 7: "JUMP_SLOT", 8: "RELATIVE"}[rtype]] += 1
+            counts[
+                {1: "R_X86_64_64", 6: "GLOB_DAT", 7: "JUMP_SLOT", 8: "RELATIVE"}[rtype]
+            ] += 1
 
     # --- PLT trampolines: FF 25 disp32 = jmp qword ptr [rip+disp32] into a GOT slot ------
     plt = {}
     text = next(p for p in loads if p[2] & 1)
-    tbytes = bytes(data[text[3]:text[3] + text[6]])
+    tbytes = bytes(data[text[3] : text[3] + text[6]])
     for m in re.finditer(rb"\xff\x25", tbytes):
         at = text[4] + m.start()
-        disp, = struct.unpack_from("<i", tbytes, m.start() + 2)
+        (disp,) = struct.unpack_from("<i", tbytes, m.start() + 2)
         target = base + at + 6 + disp
         if target in got:
             plt[base + at] = got[target]
@@ -198,14 +218,16 @@ def main():
     eh = next((p for p in ph if p[1] == PT_GNU_EH_FRAME), None)
     if eh is not None:
         h = eh[3]
-        version, ptr_enc, count_enc, table_enc = data[h:h + 4]
+        version, _ptr_enc, count_enc, table_enc = data[h : h + 4]
         if version == 1 and count_enc == 0x03 and table_enc == 0x3B:
-            fde_count, = struct.unpack_from("<I", data, h + 8)
+            (fde_count,) = struct.unpack_from("<I", data, h + 8)
             for k in range(fde_count):
                 loc, _ = struct.unpack_from("<ii", data, h + 12 + k * 8)
                 func_starts.append(base + eh[4] + loc)
         else:
-            print(f"note: unexpected .eh_frame_hdr encoding {bytes(data[h:h + 4]).hex()}")
+            print(
+                f"note: unexpected .eh_frame_hdr encoding {bytes(data[h : h + 4]).hex()}"
+            )
 
     # --- rewrite headers -----------------------------------------------------------------
     struct.pack_into("<H", data, 0x10, ET_EXEC)
@@ -216,12 +238,26 @@ def main():
         if p[1] in (PT_LOAD, PT_TLS, PT_GNU_EH_FRAME):
             struct.pack_into("<QQ", data, hdr + 0x10, base + p[4], base + p[5])
         elif p[1] not in (PT_LOAD,):
-            struct.pack_into("<I", data, hdr, 0)  # PT_NULL: Sony-only or not meaningful here
+            struct.pack_into(
+                "<I", data, hdr, 0
+            )  # PT_NULL: Sony-only or not meaningful here
     hdr = free[0][0]
-    struct.pack_into("<IIQQQQQQ", data, hdr, PT_LOAD, 5, stub_off, base + stub_va, base + stub_va,
-                     stub_size, stub_size, 0x1000)
+    struct.pack_into(
+        "<IIQQQQQQ",
+        data,
+        hdr,
+        PT_LOAD,
+        5,
+        stub_off,
+        base + stub_va,
+        base + stub_va,
+        stub_size,
+        stub_size,
+        0x1000,
+    )
 
-    open(a.out_elf, "wb").write(data)
+    with open(a.out_elf, "wb") as f:
+        f.write(data)
 
     # --- symbols file --------------------------------------------------------------------
     rows = [(base + e_entry, "ENTRY", "_start", "")]
@@ -242,10 +278,14 @@ def main():
             f.write(f"{addr:#x}\t{kind}\t{n}\t{lib}\n")
 
     print(f"base {base:#x}, entry {base + e_entry:#x}")
-    print(f"modules {len(mods)}, libraries {len(libs)}, symbols {nsym}, "
-          f"NIDs unresolved {unresolved}")
-    print(f"import stubs {len(used)} at {base + stub_va:#x}, GOT slots named {len(got)}, "
-          f"PLT trampolines {len(plt)}, function starts from .eh_frame_hdr {len(set(func_starts))}")
+    print(
+        f"modules {len(mods)}, libraries {len(libs)}, symbols {nsym}, "
+        f"NIDs unresolved {unresolved}"
+    )
+    print(
+        f"import stubs {len(used)} at {base + stub_va:#x}, GOT slots named {len(got)}, "
+        f"PLT trampolines {len(plt)}, function starts from .eh_frame_hdr {len(set(func_starts))}"
+    )
     for k, v in sorted(counts.items()):
         print(f"  {v:8}  {k}")
 

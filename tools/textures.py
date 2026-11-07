@@ -7,10 +7,10 @@
     python -I tools/textures.py items <base dvdroot> <update dvdroot> <out dir>
         # the item pictures (menu/menu_knowledge_NNNNN.tpf.dcx), named after the items whose
         # iconId is NNNNN, plus an index.md listing every picture and every item that uses it
-    python -I tools/textures.py models <base dvdroot> <update dvdroot> <out dir> [kinds] [--colour] [--low]
+    python -I tools/textures.py models <base dvdroot> <update dvdroot> <out dir> [kinds] [--color] [--low]
         # characters, equipment, objects and maps: one folder per model or map pack, named where
         # the data names it. kinds: any of chr,parts,obj,map joined by commas (default chr,parts).
-        # --colour keeps only the colour textures (names ending _a); --low adds the _l parts.
+        # --color keeps only the color textures (names ending _a); --low adds the _l parts.
 
 Output belongs under work/ (gitignored): the pictures are the game's own artwork.
 
@@ -37,21 +37,34 @@ Only the first mip level is decoded.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import souls  # noqa: E402
+import souls
 
 DXGI = {  # DXGI format -> (Pillow "bcn" decoder number, bytes per 4x4 block)
-    70: (1, 8), 71: (1, 8), 72: (1, 8),       # BC1
-    73: (2, 16), 74: (2, 16), 75: (2, 16),    # BC2
-    76: (3, 16), 77: (3, 16), 78: (3, 16),    # BC3
-    79: (4, 8), 80: (4, 8), 81: (4, 8),       # BC4
-    82: (5, 16), 83: (5, 16), 84: (5, 16),    # BC5
-    97: (7, 16), 98: (7, 16), 99: (7, 16),    # BC7
+    70: (1, 8),
+    71: (1, 8),
+    72: (1, 8),  # BC1
+    73: (2, 16),
+    74: (2, 16),
+    75: (2, 16),  # BC2
+    76: (3, 16),
+    77: (3, 16),
+    78: (3, 16),  # BC3
+    79: (4, 8),
+    80: (4, 8),
+    81: (4, 8),  # BC4
+    82: (5, 16),
+    83: (5, 16),
+    84: (5, 16),  # BC5
+    97: (7, 16),
+    98: (7, 16),
+    99: (7, 16),  # BC7
 }
 
 
@@ -66,7 +79,9 @@ def _morton8(x: int, y: int) -> int:
 _ORDER = [[_morton8(x, y) for x in range(8)] for y in range(8)]
 
 
-def untile(data: bytes, blocks_w: int, blocks_h: int, block_bytes: int) -> tuple[bytes, int, int]:
+def untile(
+    data: bytes, blocks_w: int, blocks_h: int, block_bytes: int
+) -> tuple[bytes, int, int]:
     """PS4 tiled block data -> row-major block data. Returns (data, padded blocks w, padded blocks h)."""
     pw, ph = (blocks_w + 7) // 8 * 8, (blocks_h + 7) // 8 * 8
     need = pw * ph * block_bytes
@@ -83,7 +98,7 @@ def untile(data: bytes, blocks_w: int, blocks_h: int, block_bytes: int) -> tuple
                 order = _ORDER[y]
                 for x in range(8):
                     src = (tile + order[x]) * b
-                    out[row + x * b: row + (x + 1) * b] = data[src: src + b]
+                    out[row + x * b : row + (x + 1) * b] = data[src : src + b]
     return bytes(out), pw, ph
 
 
@@ -95,6 +110,7 @@ class Texture:
     def image(self):
         """The first mip level as a Pillow RGBA image."""
         from PIL import Image
+
         if self.dxgi not in DXGI:
             raise ValueError(f"DXGI format {self.dxgi} not supported")
         if self.kind != 0:
@@ -102,8 +118,13 @@ class Texture:
         n, b = DXGI[self.dxgi]
         bw, bh = (self.width + 3) // 4, (self.height + 3) // 4
         flat, pw, ph = untile(self.data, bw, bh, b)
-        im = Image.frombytes("RGBA" if n in (1, 2, 3, 7) else "L" if n == 4 else "RGB",
-                             (pw * 4, ph * 4), flat, "bcn", n)
+        im = Image.frombytes(
+            "RGBA" if n in (1, 2, 3, 7) else "L" if n == 4 else "RGB",
+            (pw * 4, ph * 4),
+            flat,
+            "bcn",
+            n,
+        )
         return im.crop((0, 0, self.width, self.height))
 
 
@@ -115,12 +136,13 @@ def read_tpf(data: bytes) -> list[Texture]:
         raise ValueError(f"platform {platform}: only the PS4 layout is handled")
     out = []
     for i in range(count):
-        (off, size, _fmt, kind, mips, _fl, w, h, _one, _unk, name_off, _z,
-         dxgi) = struct.unpack_from("<IIBBBBHHIIIII", data, 0x10 + i * 0x24)
+        (off, size, _fmt, kind, mips, _fl, w, h, _one, _unk, name_off, _z, dxgi) = (
+            struct.unpack_from("<IIBBBBHHIIIII", data, 0x10 + i * 0x24)
+        )
         end = data.index(b"\0\0", name_off)
         end += (end - name_off) % 2  # align to the UTF-16 terminator
         name = data[name_off:end].decode("utf-16-le")
-        out.append(Texture(name, w, h, dxgi, kind, mips, data[off:off + size]))
+        out.append(Texture(name, w, h, dxgi, kind, mips, data[off : off + size]))
     return out
 
 
@@ -131,38 +153,56 @@ def _safe(name: str) -> str:
 def item_pictures(base: str, update: str, outdir: str) -> int:
     """menu_knowledge_NNNNN -> PNG named after the items with iconId NNNNN; writes index.md."""
     import collections
+
     import items as itemlib
+
     w = itemlib.World(base, update)
     users = collections.defaultdict(list)  # icon id -> [(table label, item name)]
-    for table, fields, label in (("EquipParamWeapon", ("iconId",), "weapon"),
-                                 ("EquipParamProtector", ("iconIdM", "iconIdF"), "armour"),
-                                 ("EquipParamAccessory", ("iconId",), "accessory"),
-                                 ("EquipParamGoods", ("iconId",), "item")):
+    for table, fields, label in (
+        ("EquipParamWeapon", ("iconId",), "weapon"),
+        ("EquipParamProtector", ("iconIdM", "iconIdF"), "armor"),
+        ("EquipParamAccessory", ("iconId",), "accessory"),
+        ("EquipParamGoods", ("iconId",), "item"),
+    ):
         names = w.names.get(table, {})
         for rid, r in w.rows(table).items():
             name = (names.get(rid) or "").strip()
             if not name:
                 continue
-            name = re.sub(r" \+\d+$", "", name)  # weapon upgrade levels share one picture
+            name = re.sub(
+                r" \+\d+$", "", name
+            )  # weapon upgrade levels share one picture
             for f in fields:
                 icon = r.get(f, -1)
                 if icon > 0 and (label, name) not in users[icon]:
                     users[icon].append((label, name))
     os.makedirs(outdir, exist_ok=True)
     menu = os.path.join(base, "menu")
-    pics = sorted(f for f in os.listdir(menu) if f.startswith("menu_knowledge_") and f.endswith(".tpf.dcx"))
-    lines = ["# Item pictures\n", f"Generated by `tools/textures.py items`: {len(pics)} pictures.\n",
-             "| Picture | File | Used by |", "|---:|---|---|"]
+    pics = sorted(
+        f
+        for f in os.listdir(menu)
+        if f.startswith("menu_knowledge_") and f.endswith(".tpf.dcx")
+    )
+    lines = [
+        "# Item pictures\n",
+        f"Generated by `tools/textures.py items`: {len(pics)} pictures.\n",
+        "| Picture | File | Used by |",
+        "|---:|---|---|",
+    ]
     written = 0
     for fn in pics:
-        icon = int(fn[len("menu_knowledge_"):-len(".tpf.dcx")])
+        icon = int(fn[len("menu_knowledge_") : -len(".tpf.dcx")])
         path = w.path(f"menu/{fn}")
         tex = read_tpf(souls.load(path))[0]
         who = users.get(icon, [])
         stem = f"{icon:05d}" + (f" {_safe(who[0][1])}" if who else "")
         tex.image().save(os.path.join(outdir, stem + ".png"))
         written += 1
-        lines.append(f"| {icon} | `{stem}.png` | " + (", ".join(f"{n} ({l})" for l, n in who) or "—") + " |")
+        lines.append(
+            f"| {icon} | `{stem}.png` | "
+            + (", ".join(f"{n} ({l})" for l, n in who) or "—")
+            + " |"
+        )
     with open(os.path.join(outdir, "index.md"), "w", encoding="utf-8") as fo:
         fo.write("\n".join(lines) + "\n")
     return written
@@ -171,12 +211,16 @@ def item_pictures(base: str, update: str, outdir: str) -> int:
 def textures_in(path: str) -> list[Texture]:
     """Every texture in a TPF, in the TPFs inside a BND4, or in a split .tpfbhd/.tpfbdt archive."""
     if path.endswith(".tpfbhd"):
-        head = open(path, "rb").read()
-        blob = open(path[:-len(".tpfbhd")] + ".tpfbdt", "rb").read()
+        with open(path, "rb") as f:
+            head = f.read()
+        with open(path[: -len(".tpfbhd")] + ".tpfbdt", "rb") as f:
+            blob = f.read()
         tpfs = [f.data for f in souls.bnd4_read(head, blob)]
     else:
         data = souls.load(path)
-        tpfs = [data] if data[:4] == b"TPF\0" else [f.data for f in souls.bnd4_read(data)]
+        tpfs = (
+            [data] if data[:4] == b"TPF\0" else [f.data for f in souls.bnd4_read(data)]
+        )
     return [t for tpf in tpfs if tpf[:4] == b"TPF\0" for t in read_tpf(tpf)]
 
 
@@ -186,7 +230,9 @@ def _model_names(w) -> dict[str, list[str]]:
     item tables' equipModelId, map texture packs from the place-name table."""
     import collections
     import glob
+
     import msb as msblib
+
     names = collections.defaultdict(collections.Counter)
     layouts = [w.path(f"map/mapstudio/{m}.msb.dcx") for m in w.maps()]
     layouts += glob.glob(os.path.join(w.base, "map", "mapstudio", "m29_*", "*.msb.dcx"))
@@ -208,9 +254,16 @@ def _model_names(w) -> dict[str, list[str]]:
     pn = w.names.get("EquipParamProtector", {})
     for rid, r in w.rows("EquipParamProtector").items():
         n = (pn.get(rid) or "").strip()
-        if not n or n == "NOT NEEDED" or re.fullmatch(r"en\d+", n):  # unnamed rows hold placeholders
+        if (
+            not n or n == "NOT NEEDED" or re.fullmatch(r"en\d+", n)
+        ):  # unnamed rows hold placeholders
             continue
-        for slot, flag in (("hd", "headEquip"), ("bd", "bodyEquip"), ("am", "armEquip"), ("lg", "legEquip")):
+        for slot, flag in (
+            ("hd", "headEquip"),
+            ("bd", "bodyEquip"),
+            ("am", "armEquip"),
+            ("lg", "legEquip"),
+        ):
             if r.get(flag):
                 for sex in "mfa":
                     lst = out.setdefault(f"{slot}_{sex}_{r['equipModelId']:04d}", [])
@@ -219,15 +272,22 @@ def _model_names(w) -> dict[str, list[str]]:
     return out
 
 
-def models(base: str, update: str, outdir: str, kinds: set[str], colour_only: bool, low: bool) -> None:
+def models(
+    base: str, update: str, outdir: str, kinds: set[str], color_only: bool, low: bool
+) -> None:
     import glob
+
     import items as itemlib
+
     w = itemlib.World(base, update)
     labels = _model_names(w)
     jobs = []  # (category, folder label, source path)
-    root = lambda *p: os.path.join(base, *p)  # noqa: E731
+    root = lambda *p: os.path.join(base, *p)
     if "chr" in kinds:
-        for p in sorted(glob.glob(root("chr", "c*.chrbnd.dcx")) + glob.glob(root("chr", "c*_*.tpf.dcx"))):
+        for p in sorted(
+            glob.glob(root("chr", "c*.chrbnd.dcx"))
+            + glob.glob(root("chr", "c*_*.tpf.dcx"))
+        ):
             model = os.path.basename(p).split(".")[0].split("_")[0]
             jobs.append(("chr", model, p))
     if "parts" in kinds:
@@ -242,27 +302,49 @@ def models(base: str, update: str, outdir: str, kinds: set[str], colour_only: bo
     if "map" in kinds:
         for p in sorted(glob.glob(root("map", "m*", "*.tpfbhd"))):
             area = os.path.basename(os.path.dirname(p))
-            place = w.places.get(int(area[1:3]) * 100, "").strip() if area[1:3].isdigit() else ""
-            jobs.append(("map", f"{area}{' ' + place if place else ''}/{os.path.basename(p)[:-7]}", p))
+            place = (
+                w.places.get(int(area[1:3]) * 100, "").strip()
+                if area[1:3].isdigit()
+                else ""
+            )
+            jobs.append(
+                (
+                    "map",
+                    f"{area}{' ' + place if place else ''}/{os.path.basename(p)[:-7]}",
+                    p,
+                )
+            )
     written = skipped = 0
-    lines = ["# Model and map textures\n", "Generated by `tools/textures.py models`.\n",
-             "Character folders are named by model only. *Placed as* lists names the game shows for "
-             "characters placed with that model (map layout part -> NpcParam -> name). That is not the "
-             "model's identity: c0000 is the human model every hunter uses, and the bell-ringers in "
-             "The One Reborn's arena carry that boss's name.\n",
-             "| Folder | Textures | Source | Placed as |", "|---|---:|---|---|"]
+    lines = [
+        "# Model and map textures\n",
+        "Generated by `tools/textures.py models`.\n",
+        (
+            "Character folders are named by model only. *Placed as* lists names the game shows for "
+            "characters placed with that model (map layout part -> NpcParam -> name). That is not the "
+            "model's identity: c0000 is the human model every hunter uses, and the bell-ringers in "
+            "The One Reborn's arena carry that boss's name.\n"
+        ),
+        "| Folder | Textures | Source | Placed as |",
+        "|---|---:|---|---|",
+    ]
     for cat, label, path in jobs:
         key = label.split("/")[0].split(" ")[0]
         extra = ", ".join(labels.get(key, []))
-        named = extra if cat == "parts" else ""  # equipment names come from the item tables
-        folder = os.path.join(outdir, cat, _safe(label.split("/")[0] + (f" {named}" if named else "")),
-                              *([label.split("/")[1]] if "/" in label else []))
+        named = (
+            extra if cat == "parts" else ""
+        )  # equipment names come from the item tables
+        folder = os.path.join(
+            outdir,
+            cat,
+            _safe(label.split("/")[0] + (f" {named}" if named else "")),
+            *([label.split("/")[1]] if "/" in label else []),
+        )
         try:
             texs = textures_in(path)
         except ValueError as e:
             print(f"{path}: {e}")
             continue
-        if colour_only:
+        if color_only:
             texs = [t for t in texs if t.name.lower().endswith("_a")]
         if not texs:
             continue
@@ -275,8 +357,10 @@ def models(base: str, update: str, outdir: str, kinds: set[str], colour_only: bo
             except ValueError:
                 skipped += 1
         written += n
-        lines.append(f"| `{os.path.relpath(folder, outdir)}` | {n} | `{os.path.relpath(path, base)}` | "
-                     f"{extra if cat == 'chr' else ''} |")
+        lines.append(
+            f"| `{os.path.relpath(folder, outdir)}` | {n} | `{os.path.relpath(path, base)}` | "
+            f"{extra if cat == 'chr' else ''} |"
+        )
         print(f"{cat:5} {os.path.relpath(folder, outdir)}: {n}")
     with open(os.path.join(outdir, "index.md"), "w", encoding="utf-8") as fo:
         fo.write("\n".join(lines) + "\n")
@@ -284,14 +368,22 @@ def models(base: str, update: str, outdir: str, kinds: set[str], colour_only: bo
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) < 2 or sys.argv[1] not in ("tpf", "items", "models"):
         print(__doc__)
         return 2
     if sys.argv[1] == "models" and len(sys.argv) >= 5:
         rest = sys.argv[5:]
         kinds = next((a for a in rest if not a.startswith("--")), "chr,parts")
-        models(sys.argv[2], sys.argv[3], sys.argv[4], set(kinds.split(",")), "--colour" in rest, "--low" in rest)
+        models(
+            sys.argv[2],
+            sys.argv[3],
+            sys.argv[4],
+            set(kinds.split(",")),
+            "--color" in rest,
+            "--low" in rest,
+        )
         return 0
     if sys.argv[1] == "tpf" and len(sys.argv) == 4:
         os.makedirs(sys.argv[3], exist_ok=True)

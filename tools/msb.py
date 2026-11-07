@@ -33,19 +33,51 @@ All offsets inside an entry are relative to the entry's start.
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import souls  # noqa: E402
+import souls
 
-PART_TYPES = {0: "MapPiece", 1: "Object", 2: "Enemy", 4: "Player", 5: "Collision", 8: "Navmesh",
-              9: "DummyObject", 10: "DummyEnemy", 11: "ConnectCollision"}
-EVENT_TYPES = {1: "Sound", 2: "SFX", 4: "Treasure", 5: "Generator", 6: "Message", 7: "ObjAct",
-               8: "SpawnPoint", 9: "MapOffset", 10: "Navmesh", 11: "Environment", 13: "WindSFX",
-               14: "PatrolInfo", 15: "DarkLock", 16: "PlatoonInfo", 17: "MultiSummon"}
-SHAPES = {0: "Point", 1: "Circle", 2: "Sphere", 3: "Cylinder", 4: "Square", 5: "Box", 6: "Composite"}
+PART_TYPES = {
+    0: "MapPiece",
+    1: "Object",
+    2: "Enemy",
+    4: "Player",
+    5: "Collision",
+    8: "Navmesh",
+    9: "DummyObject",
+    10: "DummyEnemy",
+    11: "ConnectCollision",
+}
+EVENT_TYPES = {
+    1: "Sound",
+    2: "SFX",
+    4: "Treasure",
+    5: "Generator",
+    6: "Message",
+    7: "ObjAct",
+    8: "SpawnPoint",
+    9: "MapOffset",
+    10: "Navmesh",
+    11: "Environment",
+    13: "WindSFX",
+    14: "PatrolInfo",
+    15: "DarkLock",
+    16: "PlatoonInfo",
+    17: "MultiSummon",
+}
+SHAPES = {
+    0: "Point",
+    1: "Circle",
+    2: "Sphere",
+    3: "Cylinder",
+    4: "Square",
+    5: "Box",
+    6: "Composite",
+}
 LISTS = ["MODEL_PARAM_ST", "EVENT_PARAM_ST", "POINT_PARAM_ST", "PARTS_PARAM_ST"]
 
 
@@ -68,7 +100,7 @@ class Msb:
         p = 0x10  # "MSB " file header: magic, i32 1, i32 0x10, u8 0, u8 0, u8 1, u8 0xFF
         lists = {}
         for expected in LISTS:
-            ver, cnt, name_off = struct.unpack_from("<iiq", data, p)
+            _ver, cnt, name_off = struct.unpack_from("<iiq", data, p)
             entries = struct.unpack_from(f"<{cnt - 1}q", data, p + 16)
             nxt = struct.unpack_from("<q", data, p + 16 + 8 * (cnt - 1))[0]
             name = _wstr(data, name_off)
@@ -83,11 +115,21 @@ class Msb:
         self.regions = [self._region(o) for o in lists["POINT_PARAM_ST"]]
         self.parts = [self._part(o) for o in lists["PARTS_PARAM_ST"]]
         for e in self.events:
-            e["part"] = self.parts[e["part_index"]]["name"] if 0 <= e["part_index"] < len(self.parts) else None
-            e["region"] = self.regions[e["region_index"]]["name"] if 0 <= e["region_index"] < len(self.regions) else None
+            e["part"] = (
+                self.parts[e["part_index"]]["name"]
+                if 0 <= e["part_index"] < len(self.parts)
+                else None
+            )
+            e["region"] = (
+                self.regions[e["region_index"]]["name"]
+                if 0 <= e["region_index"] < len(self.regions)
+                else None
+            )
             if "treasure_part_index" in e:
                 i = e["treasure_part_index"]
-                e["treasure_part"] = self.parts[i]["name"] if 0 <= i < len(self.parts) else None
+                e["treasure_part"] = (
+                    self.parts[i]["name"] if 0 <= i < len(self.parts) else None
+                )
 
     def _model(self, o):
         d = self.d
@@ -96,13 +138,27 @@ class Msb:
 
     def _event(self, o):
         d = self.d
-        name_off, event_id, etype, _id, _z, ent_off, type_off = struct.unpack_from("<qiIiiqq", d, o)
+        name_off, event_id, etype, _id, _z, ent_off, type_off = struct.unpack_from(
+            "<qiIiiqq", d, o
+        )
         part_i, region_i, entity = struct.unpack_from("<iii", d, o + ent_off)
-        e = {"name": _wstr(d, o + name_off), "event_id": event_id, "type": EVENT_TYPES.get(etype, str(etype)),
-             "part_index": part_i, "region_index": region_i, "entity": entity}
+        e = {
+            "name": _wstr(d, o + name_off),
+            "event_id": event_id,
+            "type": EVENT_TYPES.get(etype, str(etype)),
+            "part_index": part_i,
+            "region_index": region_i,
+            "entity": entity,
+        }
         if etype == 4 and type_off:
-            tp, lots = struct.unpack_from("<8xi4x", d, o + type_off)[0], struct.unpack_from("<3i", d, o + type_off + 16)
-            e["treasure_part_index"], e["item_lots"] = tp, [x for x in lots if x not in (0, -1)]
+            tp, lots = (
+                struct.unpack_from("<8xi4x", d, o + type_off)[0],
+                struct.unpack_from("<3i", d, o + type_off + 16),
+            )
+            e["treasure_part_index"], e["item_lots"] = (
+                tp,
+                [x for x in lots if x not in (0, -1)],
+            )
         return e
 
     def _region(self, o):
@@ -110,18 +166,37 @@ class Msb:
         name_off, _z, _id, shape = struct.unpack_from("<qiiI", d, o)
         pos = struct.unpack_from("<3f", d, o + 20)
         rot = struct.unpack_from("<3f", d, o + 32)
-        ent_off = struct.unpack_from("<q", d, o + 0x48)[0]  # 0x40 is the shape data (box size...)
-        return {"name": _wstr(d, o + name_off), "shape": SHAPES.get(shape, str(shape)), "pos": pos, "rot": rot,
-                "entity": struct.unpack_from("<i", d, o + ent_off)[0]}
+        ent_off = struct.unpack_from("<q", d, o + 0x48)[
+            0
+        ]  # 0x40 is the shape data (box size...)
+        return {
+            "name": _wstr(d, o + name_off),
+            "shape": SHAPES.get(shape, str(shape)),
+            "pos": pos,
+            "rot": rot,
+            "entity": struct.unpack_from("<i", d, o + ent_off)[0],
+        }
 
     def _part(self, o):
         d = self.d
-        desc_off, name_off, _inst, ptype, _id, model_i, _sib = struct.unpack_from("<qqiIiiq", d, o)
-        pos, rot, scale = (struct.unpack_from("<3f", d, o + 0x28 + 12 * k) for k in range(3))
+        _desc_off, name_off, _inst, ptype, _id, model_i, _sib = struct.unpack_from(
+            "<qqiIiiq", d, o
+        )
+        pos, rot, scale = (
+            struct.unpack_from("<3f", d, o + 0x28 + 12 * k) for k in range(3)
+        )
         ent_off, type_off = struct.unpack_from("<qq", d, o + 0x4C + 24 * 4 + 4)
-        p = {"name": _wstr(d, o + name_off), "type": PART_TYPES.get(ptype, str(ptype)),
-             "model": self.models[model_i]["name"] if 0 <= model_i < len(self.models) else None,
-             "pos": pos, "rot": rot, "scale": scale, "entity": struct.unpack_from("<i", d, o + ent_off)[0]}
+        p = {
+            "name": _wstr(d, o + name_off),
+            "type": PART_TYPES.get(ptype, str(ptype)),
+            "model": self.models[model_i]["name"]
+            if 0 <= model_i < len(self.models)
+            else None,
+            "pos": pos,
+            "rot": rot,
+            "scale": scale,
+            "entity": struct.unpack_from("<i", d, o + ent_off)[0],
+        }
         if ptype in (2, 10) and type_off:
             think, npc, talk, chara_init = struct.unpack_from("<8x4i", d, o + type_off)
             p.update(think=think, npc=npc, talk=talk, chara_init=chara_init)
@@ -139,7 +214,9 @@ def describe(kind, x):
             s += f"  npc {x['npc']} think {x['think']} talk {x['talk']} init {x['chara_init']}"
         return s
     if kind == "regions":
-        return f"{x['shape']:9} {x['name']:32} pos {fmt3(x['pos'])} entity {x['entity']}"
+        return (
+            f"{x['shape']:9} {x['name']:32} pos {fmt3(x['pos'])} entity {x['entity']}"
+        )
     if kind == "events":
         s = f"{x['type']:12} {x['name']:32} id {x['event_id']} part {x['part']} region {x['region']} entity {x['entity']}"
         if "item_lots" in x:
@@ -149,32 +226,58 @@ def describe(kind, x):
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("check"); c.add_argument("msb", nargs="+")
-    d = sub.add_parser("dump"); d.add_argument("msb"); d.add_argument("what", nargs="?", default="parts")
-    f = sub.add_parser("diff"); f.add_argument("old"); f.add_argument("new"); f.add_argument("out")
+    c = sub.add_parser("check")
+    c.add_argument("msb", nargs="+")
+    d = sub.add_parser("dump")
+    d.add_argument("msb")
+    d.add_argument("what", nargs="?", default="parts")
+    f = sub.add_parser("diff")
+    f.add_argument("old")
+    f.add_argument("new")
+    f.add_argument("out")
     a = ap.parse_args()
 
     if a.cmd == "check":
-        tot = {"models": 0, "events": 0, "regions": 0, "parts": 0, "enemies": 0, "treasure": 0}
+        tot = {
+            "models": 0,
+            "events": 0,
+            "regions": 0,
+            "parts": 0,
+            "enemies": 0,
+            "treasure": 0,
+        }
         for path in a.msb:
             m = Msb(souls.load(path))
-            tot["models"] += len(m.models); tot["events"] += len(m.events)
-            tot["regions"] += len(m.regions); tot["parts"] += len(m.parts)
+            tot["models"] += len(m.models)
+            tot["events"] += len(m.events)
+            tot["regions"] += len(m.regions)
+            tot["parts"] += len(m.parts)
             tot["enemies"] += sum(1 for p in m.parts if p["type"] == "Enemy")
             tot["treasure"] += sum(1 for e in m.events if e["type"] == "Treasure")
-        print(f"{len(a.msb)} maps read: " + ", ".join(f"{v:,} {k}" for k, v in tot.items()))
+        print(
+            f"{len(a.msb)} maps read: "
+            + ", ".join(f"{v:,} {k}" for k, v in tot.items())
+        )
         return 0
 
     if a.cmd == "dump":
         m = Msb(souls.load(a.msb))
         what = a.what
-        items = {"parts": m.parts, "regions": m.regions, "events": m.events, "models": m.models,
-                 "enemies": [p for p in m.parts if p["type"] == "Enemy"],
-                 "treasure": [e for e in m.events if e["type"] == "Treasure"]}[what]
-        kind = "parts" if what == "enemies" else "events" if what == "treasure" else what
+        items = {
+            "parts": m.parts,
+            "regions": m.regions,
+            "events": m.events,
+            "models": m.models,
+            "enemies": [p for p in m.parts if p["type"] == "Enemy"],
+            "treasure": [e for e in m.events if e["type"] == "Treasure"],
+        }[what]
+        kind = (
+            "parts" if what == "enemies" else "events" if what == "treasure" else what
+        )
         for x in items:
             print(describe(kind, x))
         return 0

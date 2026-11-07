@@ -10,7 +10,7 @@
 // Rules, most certain first:
 //
 //   step      FD4 state machines register their steps in tables of 24-byte records
-//             { code*, 0, L"Class::STEP_Name" }, filled in by static initialisers:
+//             { code*, 0, L"Class::STEP_Name" }, filled in by static initializers:
 //                 _DAT_05957950 = FUN_0198c2b0;  _DAT_05957958 = 0;
 //                 _DAT_05957960 = L"MapRes::STEP_Init";
 //             The function stored 0x10 bytes before the name gets that name, in a namespace
@@ -111,7 +111,7 @@ public class NameFromStrings extends GhidraScript {
     // ---- rule: step tables --------------------------------------------------------------------
 
     private void stepRule(Map<Address, String> strings) throws Exception {
-        // Functions that reference any step name are the table initialisers.
+        // Functions that reference any step name are the table initializers.
         Set<Function> inits = new HashSet<>();
         for (Map.Entry<Address, String> e : strings.entrySet()) {
             if (STEP.matcher(e.getValue()).matches()) {
@@ -148,7 +148,7 @@ public class NameFromStrings extends GhidraScript {
 
     /**
      * For one function, map each absolute address written with "MOV [abs], reg" to the address
-     * that reg was last loaded with by "LEA reg, [addr]". This is how static initialisers fill
+     * that reg was last loaded with by "LEA reg, [addr]". This is how static initializers fill
      * tables of pointers.
      */
     private Map<Address, Address> absoluteStores(Function f) {

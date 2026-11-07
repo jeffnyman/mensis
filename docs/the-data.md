@@ -13,7 +13,7 @@ Paramdex, DSMapStudio, Smithbox, Yabber, …).
 |---|---:|---:|---|
 | `map/` | 20.0 GiB | 17,211 | level geometry, textures, collision, navmesh, layouts |
 | `sound/` | 3.5 GiB | 1,014 | FMOD banks (`sprj_<id>.fsb` + `.fev` + `.itl`), voices per language |
-| `parts/` | 2.4 GiB | 1,190 | player equipment models (`am_`/`bd_`/`hd_`/`lg_` armour, `wp_` weapons) |
+| `parts/` | 2.4 GiB | 1,190 | player equipment models (`am_`/`bd_`/`hd_`/`lg_` armor, `wp_` weapons) |
 | `chr/` | 1.8 GiB | 479 | characters: 245 `cXXXX.chrbnd.dcx` (model + texture + skeleton + cloth), `anibnd` (animation), `esd` |
 | `obj/` | 1.1 GiB | 1,880 | map objects `oXXXXXX.objbnd.dcx` |
 | `movie/` | 340 MiB | 4 | `sprj_opening`, `sprj_staffroll`, `sprj_staffroll_dlc`, `sprj_advertise` (`.mp4`) |

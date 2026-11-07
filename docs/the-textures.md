@@ -7,7 +7,7 @@ and the compression.
 
 ```
 python -I tools/textures.py items  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/items
-python -I tools/textures.py models work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/models [chr,parts,obj,map] [--colour] [--low]
+python -I tools/textures.py models work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/models [chr,parts,obj,map] [--color] [--low]
 python -I tools/textures.py tpf    <a .tpf, .chrbnd/.partsbnd/.objbnd or .tpfbhd> <out dir>
 ```
 
@@ -47,7 +47,7 @@ in a fixed 8 or 16 bytes. Decoding them is standard; Pillow does it.
 The first item picture is 400×400 pixels: 100×100 blocks of 16 bytes. That would be 160,000
 bytes, but the file stores **173,056**, which is exactly 104×104 blocks. The extra is padding to
 a multiple of 8 blocks each way, the sign of a **tiled** layout. The PS4's GPU doesn't store
-textures row by row. It stores them in small square tiles, so that neighbouring pixels are close
+textures row by row. It stores them in small square tiles, so that neighboring pixels are close
 together in memory:
 
 1. the image, in blocks, is padded to a multiple of 8 each way;
@@ -56,8 +56,8 @@ together in memory:
    by interleaving the bits of *x* and *y*, *x* first: (1, 0) is 1, (0, 1) is 2, (1, 1) is 3,
    (2, 0) is 4, and so on.
 
-Decoded *without* this step, the picture is unrecognisable: horizontal streaks of the right
-colours, because each 8-block-wide row of the output is really one tile's blocks in Z order.
+Decoded *without* this step, the picture is unrecognizable: horizontal streaks of the right
+colors, because each 8-block-wide row of the output is really one tile's blocks in Z order.
 Untiled, it is the item's artwork. The same rule holds for BC1's 8-byte blocks: the title
 screen's 2048×1024 texture (the hunter in a Yharnam street, with the logo) decodes cleanly.
 
@@ -68,7 +68,7 @@ away the padding.
 
 | Group | Pictures | Named after |
 |---|---:|---|
-| armour | 221 | `EquipParamProtector` |
+| armor | 221 | `EquipParamProtector` |
 | goods (consumables, key items, bells, …) | 219 | `EquipParamGoods` |
 | weapons | 41 | `EquipParamWeapon` |
 | blood gems (3000–4199) | 490 | — |
@@ -84,7 +84,7 @@ effects, not from a fixed item. Looking at the pictures, the numbering is system
 - the hundreds digit is the gem's shape (a radial star at 31xx, a triangle at 32xx, a ring at
   37xx, round "droplets" at 40xx–41xx);
 - the last digit is its size and glow (3100 is plain, 3106 large and glowing);
-- the tens digit is a colour variant (3110 is blue rather than red).
+- the tens digit is a color variant (3110 is blue rather than red).
 
 Part of the mapping is in the data: for 101 pictures, the number is 3000 plus a
 `GemeffectParam` row's `gemIconIdOffset`. That table holds rune effects as well as gem effects,
@@ -132,16 +132,16 @@ A character's textures come in sets of four per part, by name suffix. `c2010`, f
 
 | Suffix | Looks like |
 |---|---|
-| `_a` | the colour of the surface (the character's face and hands are recognisable in `c2010_Body_a`) |
+| `_a` | the color of the surface (the character's face and hands are recognizable in `c2010_Body_a`) |
 | `_n` | a normal map, the familiar lilac-blue image of surface bumps |
-| `_r`, `_s` | greyscale maps, probably reflectance and shininess or roughness; the letters are the game's, the reading is a guess from how they look |
+| `_r`, `_s` | grayscale maps, probably reflectance and shininess or roughness; the letters are the game's, the reading is a guess from how they look |
 
 These are **texture sheets**: the surfaces of a 3D model, cut apart and laid flat. They aren't
 pictures of the character, which would need the model itself (below).
 
-**Names.** Equipment folders are named from the item tables, which give each weapon and armour
+**Names.** Equipment folders are named from the item tables, which give each weapon and armor
 piece an `equipModelId`. A weapon's parts file is `wp_a_<model>` (Chikage is `wp_a_1063`, shared
-with Uncanny and Lost Chikage). Armour is `hd`/`bd`/`am`/`lg` (head, body, arms, legs), then `m`,
+with Uncanny and Lost Chikage). Armor is `hd`/`bd`/`am`/`lg` (head, body, arms, legs), then `m`,
 `f` or `a` (male, female, both), then the set's model number, so `hd_m_1100` is the Gray Wolf Cap.
 Each piece also has an `_l` twin, almost certainly a lower-detail version, skipped unless `--low`
 is given. Character folders are named by model only. The index lists the names the game shows
@@ -149,7 +149,7 @@ for characters placed with that model, but that isn't the model's identity. `c00
 model every hunter uses, and the bell-ringers in The One Reborn's arena carry the boss's name.
 
 **Sizes.** Characters are 3,734 textures (2.2 GB as PNG, about 3 minutes) and equipment 2,184
-(3.2 GB). One map pack is 137 MB, so all 56 come to roughly 7–8 GB. `--colour` keeps only the
+(3.2 GB). One map pack is 137 MB, so all 56 come to roughly 7–8 GB. `--color` keeps only the
 `_a` textures.
 
 ## What this doesn't cover

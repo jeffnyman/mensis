@@ -15,6 +15,24 @@ dependencies = [
     "numpy>=1.24",        # flver.py: the software renderer for model pictures
 ]
 
+[dependency-groups]
+dev = [
+    "ruff>=0.17",         # lint and format: ruff check tools / ruff format tools
+    "pyright>=1.1",       # type check (what Pylance runs): pyright tools
+]
+
 # The tools are run as scripts (python -I tools/<tool>.py ...), not installed as a package.
 [tool.uv]
 package = false
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.pyright]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+# The tools import each other as siblings (sys.path gets tools/ at run time).
+extraPaths = ["tools"]
+include = ["tools"]

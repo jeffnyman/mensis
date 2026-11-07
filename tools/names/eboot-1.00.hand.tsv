@@ -1,7 +1,7 @@
 # Hand-assigned names for eboot 1.09 (addresses as loaded at 0x400000 by orbis_prep.py).
 # Applied with tools/ghidra/ApplyNames.java. Confidence:
 #   certain   the code does exactly this, or a source-file assert names it
-#   likely    the behaviour is clear; the exact name is ours
+#   likely    the behavior is clear; the exact name is ours
 #   probable  attribution to a particular library is an inference
 # Rank = position among the most-called unnamed functions (MostCalled.java), where relevant.
 # Ported by tools/port_names.py from eboot-1.09.hand.tsv; only functions paired with identical code are carried across.
@@ -12,7 +12,7 @@ address	kind	name	confidence	evidence
 02480270	function	Mutex_IsCreated	likely	rank 3, 2,744 callers: returns the byte at +0x10 of a mutex object, the flag set after PthreadMutex_InitRecursive succeeds [ported from eboot-1.09.hand.tsv 0247ee80]
 024853d0	function	PthreadMutex_InitRecursive	certain	rank 4: scePthreadMutexattrSettype(attr, 2 = recursive) + scePthreadMutexInit; asserts from PthreadMutex.cpp [ported from eboot-1.09.hand.tsv 02483fe0]
 0247cfe0	function	MemorySystem_Get	likely	rank 5, 2,672 callers: lazily constructs a 0x440-byte global; Heap_FindForPointer uses its heap list (+0x468) and lock (+0x470), containers its allocator (+0x458) [ported from eboot-1.09.hand.tsv 0247bbf0]
-024ef240	function	GlobalInitMutex_Get	likely	rank 6: lazily initialises and returns the static mutex that Heap_GetDefault and MemorySystem_Get lock [ported from eboot-1.09.hand.tsv 024ede50]
+024ef240	function	GlobalInitMutex_Get	likely	rank 6: lazily initializes and returns the static mutex that Heap_GetDefault and MemorySystem_Get lock [ported from eboot-1.09.hand.tsv 024ede50]
 024b80f0	function	HeapContainer_Construct	likely	rank 8: sets vtable 057b3ba0, binds g_ContainerHeap, asserts "Tried to create container with incompatible heap." [ported from eboot-1.09.hand.tsv 024b6d00]
 024b6e50	function	HeapContainer_Destruct	likely	rank 13: resets vtable 057b3ba0 and frees each element through the bound heap [ported from eboot-1.09.hand.tsv 024b5a60]
 0247d8d0	function	Heap_AllocAligned	likely	rank 14: (size, alignment, heap) -> heap->vtable[0x58](heap, size, alignment); callers construct objects in the result (e.g. 0xB0 bytes aligned 16) [ported from eboot-1.09.hand.tsv 0247c4e0]
@@ -31,7 +31,7 @@ address	kind	name	confidence	evidence
 02a27eb0	function	WString_AssignSubstr	likely	rank 22: assign(other, pos, count) with the out-of-range check [ported from eboot-1.09.hand.tsv 02a279a0]
 02bc1310	function	WString_FromCStr	likely	constructs a wide string from a NUL-terminated wchar_t* on g_DefaultHeap (wcslen + WString_Assign_2); used for every virtual path such as L"param:/GameParam/GameParam.parambnd" [ported from eboot-1.09.hand.tsv 02bc0e00]
 02d77360	function	WString_FromCStr_TempHeap	likely	rank 40: as WString_FromCStr, on the thread's temporary heap [ported from eboot-1.09.hand.tsv 02d67040]
-024b8f00	function	DLRuntimeClass_Register	likely	rank 25: called by class registration initialisers after writing THIS_CLASS; asserts from DLRuntimeClass.cpp ("Given runtime class is NULL") [ported from eboot-1.09.hand.tsv 024b7b10]
+024b8f00	function	DLRuntimeClass_Register	likely	rank 25: called by class registration initializers after writing THIS_CLASS; asserts from DLRuntimeClass.cpp ("Given runtime class is NULL") [ported from eboot-1.09.hand.tsv 024b7b10]
 00e73a60	function	HavokScript_PrintAssert	certain	rank 33: printf("Havok Script Assertion [r $build] 0x%08X failed: ...") [ported from eboot-1.09.hand.tsv 00e73a60]
 05940640	global	g_DefaultHeap	likely	cache of Heap_GetDefault(), read by WString_FromCStr (02bc1310) [found by hand in 1.00; 05940670 in 1.09]
 05940638	global	g_ContainerHeap	likely	cache of MemorySystem_Get() + 0x458, read by HeapContainer_Construct (024b80f0) [found by hand in 1.00; 05940668 in 1.09]

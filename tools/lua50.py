@@ -28,23 +28,62 @@ assigned to.
 from __future__ import annotations
 
 import difflib
+import io
 import os
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import souls  # noqa: E402
+import souls
 
-OPS = ["MOVE", "LOADK", "LOADBOOL", "LOADNIL", "GETUPVAL", "GETGLOBAL", "GETTABLE", "SETGLOBAL",
-       "SETUPVAL", "SETTABLE", "NEWTABLE", "SELF", "ADD", "SUB", "MUL", "DIV", "POW", "UNM", "NOT",
-       "CONCAT", "JMP", "EQ", "LT", "LE", "TEST", "CALL", "TAILCALL", "RETURN", "FORLOOP",
-       "TFORLOOP", "TFORPREP", "SETLIST", "SETLISTO", "CLOSE", "CLOSURE"]
+OPS = [
+    "MOVE",
+    "LOADK",
+    "LOADBOOL",
+    "LOADNIL",
+    "GETUPVAL",
+    "GETGLOBAL",
+    "GETTABLE",
+    "SETGLOBAL",
+    "SETUPVAL",
+    "SETTABLE",
+    "NEWTABLE",
+    "SELF",
+    "ADD",
+    "SUB",
+    "MUL",
+    "DIV",
+    "POW",
+    "UNM",
+    "NOT",
+    "CONCAT",
+    "JMP",
+    "EQ",
+    "LT",
+    "LE",
+    "TEST",
+    "CALL",
+    "TAILCALL",
+    "RETURN",
+    "FORLOOP",
+    "TFORLOOP",
+    "TFORPREP",
+    "SETLIST",
+    "SETLISTO",
+    "CLOSE",
+    "CLOSURE",
+]
 MAXSTACK = 250
 
 
 class Func:
     def __init__(self):
-        self.source = self.locals = self.upvals = self.consts = self.protos = self.code = None
+        self.source: str | None = None
+        self.locals: list[str | None] = []
+        self.upvals: list[str | None] = []
+        self.consts: list[float | str | None] = []
+        self.protos: list[Func] = []
+        self.code: list[int] = []
         self.nparams = self.vararg = 0
 
 
@@ -73,7 +112,7 @@ class Reader:
         self.p += 8
         if n == 0:
             return None
-        s = self.d[self.p:self.p + n - 1].decode("shift_jis", "replace")
+        s = self.d[self.p : self.p + n - 1].decode("shift_jis", "replace")
         self.p += n
         return s
 
@@ -81,15 +120,16 @@ class Reader:
         f = Func()
         f.source = self.string()
         self.i32()  # line defined
-        self.u8()   # nups
+        self.u8()  # nups
         f.nparams, f.vararg = self.u8(), self.u8()
-        self.u8()   # max stack
+        self.u8()  # max stack
         n = self.i32()
         self.p += 4 * n  # line info
         f.locals = []
         for _ in range(self.i32()):
             f.locals.append(self.string())
-            self.i32(); self.i32()
+            self.i32()
+            self.i32()
         f.upvals = [self.string() for _ in range(self.i32())]
         f.consts = []
         for _ in range(self.i32()):
@@ -104,7 +144,10 @@ class Reader:
             else:
                 raise ValueError(f"constant type {t}")
         f.protos = [self.function() for _ in range(self.i32())]
-        f.code = [struct.unpack_from("<I", self.d, self.p + 4 * i)[0] for i in range(self.i32())]
+        f.code = [
+            struct.unpack_from("<I", self.d, self.p + 4 * i)[0]
+            for i in range(self.i32())
+        ]
         self.p += 4 * len(f.code)
         return f
 
@@ -142,7 +185,9 @@ def render(f: Func, name: str = "main", depth: int = 0) -> list[str]:
             arg = f"r{a} {rk(b)} {rk(c)}"
         else:
             arg = f"{a} {b} {c}"
-        out.append(f"{ind}  {op:9} {arg}")  # no pc: an insertion would renumber every later line
+        out.append(
+            f"{ind}  {op:9} {arg}"
+        )  # no pc: an insertion would renumber every later line
     for i, p in enumerate(f.protos):
         out += render(p, f"{name}/#{i}", depth + 1)
     return out
@@ -174,13 +219,17 @@ def _strip(main: Func) -> Func:
 def chunks(path: str) -> dict[str, bytes]:
     data = souls.load(path)
     if data[:4] == b"BND4":
-        return {os.path.basename(b.name.replace("\\", "/")): b.data
-                for b in souls.bnd4_read(data) if b.data[:5] == b"\x1bLuaP"}
+        return {
+            os.path.basename(b.name.replace("\\", "/")): b.data
+            for b in souls.bnd4_read(data)
+            if b.data[:5] == b"\x1bLuaP"
+        }
     return {os.path.basename(path): data}
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
@@ -198,7 +247,9 @@ def main():
         summary = []
         for fname in sorted(set(old) | set(new)):
             if fname not in old or fname not in new:
-                summary.append(f"| {fname} | {'added' if fname in new else 'removed'} | |")
+                summary.append(
+                    f"| {fname} | {'added' if fname in new else 'removed'} | |"
+                )
                 continue
             if old[fname] == new[fname]:
                 continue
@@ -206,16 +257,25 @@ def main():
             fn = named_functions(Reader(new[fname]).function())
             changed = [g for g in sorted(set(fo) | set(fn)) if fo.get(g) != fn.get(g)]
             if not changed:
-                summary.append(f"| {fname} | recompiled only (same code; line numbers differ) | |")
+                summary.append(
+                    f"| {fname} | recompiled only (same code; line numbers differ) | |"
+                )
                 continue
             summary.append(f"| {fname} | changed | {', '.join(changed)} |")
             for g in changed:
-                d = difflib.unified_diff(fo.get(g, []), fn.get(g, []), "1.00", "1.09", lineterm="", n=2)
+                d = difflib.unified_diff(
+                    fo.get(g, []), fn.get(g, []), "1.00", "1.09", lineterm="", n=2
+                )
                 lines += ["", f"## {fname}: {g}", "```diff", *d, "```"]
-        out = lines[:1] + ["| File | Status | Functions changed |", "|---|---|---|"] + summary + lines[1:]
+        out = (
+            lines[:1]
+            + ["| File | Status | Functions changed |", "|---|---|---|"]
+            + summary
+            + lines[1:]
+        )
         with open(sys.argv[4], "w", encoding="utf-8") as f:
             f.write("\n".join(out) + "\n")
-        print("\n".join(out[:len(summary) + 3]))
+        print("\n".join(out[: len(summary) + 3]))
         return 0
     print(__doc__)
     return 2

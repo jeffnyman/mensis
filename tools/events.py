@@ -26,7 +26,7 @@ EMEVD ("EVD\\0", 64-bit):
     0x10 events {count, offset}, 0x20 instructions, 0x40 layers, 0x50 parameters,
          0x60 linked files, 0x70 argument data {length, offset}, 0x80 strings
     event       { i64 id, i64 instruction count, i64 instruction offset, i64 parameter count,
-                  i64 parameter offset, u32 rest behaviour, u32 pad }               48 B
+                  i64 parameter offset, u32 rest behavior, u32 pad }               48 B
     instruction { i32 class, i32 id, i64 argument length, i64 argument offset, i64 layer }  32 B
     parameter   { i64 instruction index, i64 target byte, i64 source byte, i32 length, i32 }  32 B
 EMELD ("ELD\\0"): event names; { i64 event id, i64 name offset } records and a string pool.
@@ -40,24 +40,34 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import io
 import os
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import souls  # noqa: E402
+import souls
 
 # [2000:00] イベント起動 ("start an event") takes any number of extra 32-bit arguments after its
 # declared ones; they are passed to the event it starts. That is how one event definition serves
 # many doors, enemies or items.
 VARIADIC = {(2000, 0)}
 
-ARG_TYPES = {0: ("B", 1), 1: ("H", 2), 2: ("I", 4), 3: ("b", 1), 4: ("h", 2), 5: ("i", 4), 6: ("f", 4), 8: ("I", 4)}
+ARG_TYPES = {
+    0: ("B", 1),
+    1: ("H", 2),
+    2: ("I", 4),
+    3: ("b", 1),
+    4: ("h", 2),
+    5: ("i", 4),
+    6: ("f", 4),
+    8: ("I", 4),
+}
 
 
 def _wstr(d: bytes, off: int) -> str:
     end = off
-    while d[end:end + 2] != b"\0\0":
+    while d[end : end + 2] != b"\0\0":
         end += 2
     return d[off:end].decode("utf-16-le")
 
@@ -65,7 +75,7 @@ def _wstr(d: bytes, off: int) -> str:
 class InstructionSet:
     def __init__(self, data: bytes):
         tabs = [struct.unpack_from("<qq", data, 0x10 + i * 16) for i in range(9)]
-        (ncls, ocls), (nins, oins), (narg, oarg) = tabs[0], tabs[1], tabs[2]
+        (ncls, ocls), (_nins, oins), (_narg, oarg) = tabs[0], tabs[1], tabs[2]
         pool = tabs[8][1] if tabs[8][1] else tabs[7][1]
         # the pool is the last table before the end of the file
         pool = max(o for _, o in tabs)
@@ -75,16 +85,20 @@ class InstructionSet:
             cid, cnt, ioff, cname = struct.unpack_from("<qqqq", data, ocls + c * 32)
             self.classes[cid] = _wstr(data, pool + cname)
             for k in range(cnt):
-                iid, acnt, aoff, iname = struct.unpack_from("<qqqq", data, oins + ioff + k * 32)
+                iid, acnt, aoff, iname = struct.unpack_from(
+                    "<qqqq", data, oins + ioff + k * 32
+                )
                 args = []
                 for a in range(acnt):
                     aname, atype = struct.unpack_from("<qq", data, oarg + aoff + a * 64)
-                    args.append((_wstr(data, pool + aname), atype & 0xFFFFFFFF))  # i32 type, i32 other
+                    args.append(
+                        (_wstr(data, pool + aname), atype & 0xFFFFFFFF)
+                    )  # i32 type, i32 other
                 self.instr[(cid, iid)] = (_wstr(data, pool + iname), args)
 
     def layout(self, key):
         """[(name, struct format, offset)] and total length for an instruction's arguments."""
-        name, args = self.instr[key]
+        _name, args = self.instr[key]
         out, off = [], 0
         for aname, atype in args:
             fmt, size = ARG_TYPES[atype]
@@ -100,16 +114,23 @@ class Event:
 
 
 def read_emevd(data: bytes) -> list[Event]:
-    (nev, oev), (nins, oins) = struct.unpack_from("<qq", data, 0x10), struct.unpack_from("<qq", data, 0x20)
-    npar, opar = struct.unpack_from("<qq", data, 0x50)
-    alen, oargs = struct.unpack_from("<qq", data, 0x70)
+    (nev, oev), (_nins, oins) = (
+        struct.unpack_from("<qq", data, 0x10),
+        struct.unpack_from("<qq", data, 0x20),
+    )
+    _npar, opar = struct.unpack_from("<qq", data, 0x50)
+    _alen, oargs = struct.unpack_from("<qq", data, 0x70)
     events = []
     for e in range(nev):
-        eid, icnt, ioff, pcnt, poff, rest = struct.unpack_from("<qqqqqI", data, oev + e * 48)
+        eid, icnt, ioff, pcnt, poff, rest = struct.unpack_from(
+            "<qqqqqI", data, oev + e * 48
+        )
         ev = Event(eid, rest)
         for k in range(icnt):
-            cls, iid, ln, ao, _layer = struct.unpack_from("<iiqqq", data, oins + ioff + k * 32)
-            ev.instructions.append((cls, iid, data[oargs + ao:oargs + ao + ln]))
+            cls, iid, ln, ao, _layer = struct.unpack_from(
+                "<iiqqq", data, oins + ioff + k * 32
+            )
+            ev.instructions.append((cls, iid, data[oargs + ao : oargs + ao + ln]))
         for k in range(pcnt):
             idx, dst, src, ln = struct.unpack_from("<qqqi", data, opar + poff + k * 32)
             ev.params.append((idx, dst, src, ln))
@@ -125,8 +146,8 @@ def read_emeld(data: bytes) -> dict[int, str]:
         eid, noff = struct.unpack_from("<qq", data, off + i * 16)
         try:
             names[eid] = _wstr(data, pool + noff)
-        except Exception:
-            pass
+        except (ValueError, IndexError):
+            pass  # an unreadable name: leave the event unnamed
     return names
 
 
@@ -134,9 +155,15 @@ def fmt_value(v):
     return f"{v:g}" if isinstance(v, float) else str(v)
 
 
-def render(ev: Event, iset: InstructionSet, names: dict[int, str] | None = None) -> list[str]:
-    """One event as readable text; parameterised arguments show as X<source byte>."""
-    title = f"Event {ev.id}" + (f"  {names[ev.id]}" if names and ev.id in names else "") + f"  (rest {ev.rest})"
+def render(
+    ev: Event, iset: InstructionSet, names: dict[int, str] | None = None
+) -> list[str]:
+    """One event as readable text; parameterized arguments show as X<source byte>."""
+    title = (
+        f"Event {ev.id}"
+        + (f"  {names[ev.id]}" if names and ev.id in names else "")
+        + f"  (rest {ev.rest})"
+    )
     lines = [title]
     subst = {}
     for idx, dst, src, ln in ev.params:
@@ -145,8 +172,13 @@ def render(ev: Event, iset: InstructionSet, names: dict[int, str] | None = None)
         key = (cls, iid)
         if key not in iset.instr:
             # not described by the EMEDF: show the argument block as 32-bit values
-            vals = [subst.get((i, o)) or str(struct.unpack_from("<i", raw, o)[0]) for o in range(0, len(raw) - 3, 4)]
-            lines.append(f"    [{cls}:{iid:02d}] (not in EMEDF)(" + ", ".join(vals) + ")")
+            vals = [
+                subst.get((i, o)) or str(struct.unpack_from("<i", raw, o)[0])
+                for o in range(0, len(raw) - 3, 4)
+            ]
+            lines.append(
+                f"    [{cls}:{iid:02d}] (not in EMEDF)(" + ", ".join(vals) + ")"
+            )
             continue
         name, _ = iset.instr[key]
         layout, length = iset.layout(key)
@@ -154,26 +186,41 @@ def render(ev: Event, iset: InstructionSet, names: dict[int, str] | None = None)
         for aname, fmt, off in layout:
             v = subst.get((i, off))
             if v is None:
-                v = fmt_value(struct.unpack_from("<" + fmt, raw, off)[0]) if off + struct.calcsize(fmt) <= len(raw) else "?"
+                v = (
+                    fmt_value(struct.unpack_from("<" + fmt, raw, off)[0])
+                    if off + struct.calcsize(fmt) <= len(raw)
+                    else "?"
+                )
             args.append(f"{aname}={v}")
         if key in VARIADIC:
             # extra 32-bit arguments, passed on to the started event
             for k, off in enumerate(range(length, len(raw) - 3, 4)):
-                args.append(f"+{k + 1}={subst.get((i, off)) or struct.unpack_from('<i', raw, off)[0]}")
+                args.append(
+                    f"+{k + 1}={subst.get((i, off)) or struct.unpack_from('<i', raw, off)[0]}"
+                )
         lines.append(f"    [{cls}:{iid:02d}] {name}(" + ", ".join(args) + ")")
     return lines
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check")
-    c.add_argument("emedf"); c.add_argument("emevd", nargs="+")
+    c.add_argument("emedf")
+    c.add_argument("emevd", nargs="+")
     d = sub.add_parser("dump")
-    d.add_argument("emedf"); d.add_argument("emevd"); d.add_argument("--eld"); d.add_argument("--event", type=int)
+    d.add_argument("emedf")
+    d.add_argument("emevd")
+    d.add_argument("--eld")
+    d.add_argument("--event", type=int)
     f = sub.add_parser("diff")
-    f.add_argument("emedf"); f.add_argument("old"); f.add_argument("new"); f.add_argument("out"); f.add_argument("--eld")
+    f.add_argument("emedf")
+    f.add_argument("old")
+    f.add_argument("new")
+    f.add_argument("out")
+    f.add_argument("--eld")
     a = ap.parse_args()
     iset = InstructionSet(souls.load(a.emedf))
 
@@ -187,11 +234,19 @@ def main():
                         unknown += 1
                         continue
                     want = iset.layout((cls, iid))[1]
-                    ok = want == len(raw) or ((cls, iid) in VARIADIC and len(raw) > want and (len(raw) - want) % 4 == 0)
+                    ok = want == len(raw) or (
+                        (cls, iid) in VARIADIC
+                        and len(raw) > want
+                        and (len(raw) - want) % 4 == 0
+                    )
                     if not ok:
                         bad += 1
-        print(f"{total} instructions: {unknown} not in the EMEDF, {bad} with argument length not matching")
-        print(f"instruction set: {len(iset.classes)} classes, {len(iset.instr)} instructions")
+        print(
+            f"{total} instructions: {unknown} not in the EMEDF, {bad} with argument length not matching"
+        )
+        print(
+            f"instruction set: {len(iset.classes)} classes, {len(iset.instr)} instructions"
+        )
         return 0 if bad == 0 and unknown == 0 else 1
 
     if a.cmd == "dump":
@@ -210,15 +265,43 @@ def main():
     for eid in sorted(set(old) & set(new)):
         lo, ln = render(old[eid], iset, names), render(new[eid], iset, names)
         if lo != ln:
-            changed.append((eid, list(difflib.unified_diff(lo, ln, "1.00", "1.09", lineterm="", n=2))))
-    out = [f"# Event diff: {os.path.basename(a.old)} → {os.path.basename(a.new)}\n",
-           f"{len(old)} → {len(new)} events: {len(changed)} changed, {len(added)} added, {len(removed)} removed\n"]
+            changed.append(
+                (
+                    eid,
+                    list(
+                        difflib.unified_diff(lo, ln, "1.00", "1.09", lineterm="", n=2)
+                    ),
+                )
+            )
+    out = [
+        f"# Event diff: {os.path.basename(a.old)} → {os.path.basename(a.new)}\n",
+        f"{len(old)} → {len(new)} events: {len(changed)} changed, {len(added)} added, {len(removed)} removed\n",
+    ]
     for eid in added:
-        out += ["", f"## Added: event {eid}", "```", *render(new[eid], iset, names), "```"]
+        out += [
+            "",
+            f"## Added: event {eid}",
+            "```",
+            *render(new[eid], iset, names),
+            "```",
+        ]
     for eid in removed:
-        out += ["", f"## Removed: event {eid}", "```", *render(old[eid], iset, names), "```"]
+        out += [
+            "",
+            f"## Removed: event {eid}",
+            "```",
+            *render(old[eid], iset, names),
+            "```",
+        ]
     for eid, d in changed:
-        out += ["", f"## Changed: event {eid}" + (f" {names[eid]}" if names and eid in names else ""), "```diff", *d, "```"]
+        out += [
+            "",
+            f"## Changed: event {eid}"
+            + (f" {names[eid]}" if names and eid in names else ""),
+            "```diff",
+            *d,
+            "```",
+        ]
     with open(a.out, "w", encoding="utf-8") as fo:
         fo.write("\n".join(out) + "\n")
     print(out[1].strip())

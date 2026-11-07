@@ -122,7 +122,7 @@ name table with one entry per request, in the same order, from `LoginRequest` (0
 ### The envelope
 
 Every request is built by one function (`GameService_BuildRequest` in the hand names) and sent by
-another. The body is **JSON**: the serialiser behind it writes `{`, `}`, `[` and `:` around keys
+another. The body is **JSON**: the serializer behind it writes `{`, `}`, `[` and `:` around keys
 and values. The builder adds:
 
 * `MessageId`: the request's name from the table, e.g. `"ChannelWordSearchRequest"`;

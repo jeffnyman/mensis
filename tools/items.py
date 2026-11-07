@@ -13,7 +13,7 @@ The chain, every link read from the game (1.09 files laid over 1.00):
     Chalice layouts   map/mapstudio/m29_*/, attributed to their chalice through HolygrailExParam
 
 Item lot categories, established by matching IDs against the tables:
-    0 weapon (EquipParamWeapon)   1 armour (EquipParamProtector)   4 goods (EquipParamGoods)
+    0 weapon (EquipParamWeapon)   1 armor (EquipParamProtector)   4 goods (EquipParamGoods)
     8 blood gem (GemGenParam: gems are generated, so they have no fixed name)
     15 level-dependent: an ItemLotLvdepParam row, which holds the real {category, item id}
 
@@ -25,22 +25,25 @@ Maps are named from the place-name table: mAA_BB -> place id AA*100 + BB*10.
 from __future__ import annotations
 
 import collections
+import io
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import msb as msblib  # noqa: E402
-import params  # noqa: E402
-import souls  # noqa: E402
+import msb as msblib
+import params
+import souls
 
-CATEGORY = {0: "weapon", 1: "armour", 4: "goods", 8: "blood gem", 15: "level-dependent"}
+CATEGORY = {0: "weapon", 1: "armor", 4: "goods", 8: "blood gem", 15: "level-dependent"}
 
 
 class World:
     def __init__(self, base: str, update: str):
         self.base, self.update = base, update
-        P, D = params.load(self.path("param/gameparam/gameparam.parambnd.dcx"),
-                           self.path("paramdef/paramdef.paramdefbnd.dcx"))
+        P, D = params.load(
+            self.path("param/gameparam/gameparam.parambnd.dcx"),
+            self.path("paramdef/paramdef.paramdefbnd.dcx"),
+        )
         self.rows = lambda n: params.rows(P[n], D[P[n].type])
         self.lots = self.rows("ItemLotParam")
         self.lvdep = self.rows("ItemLotLvdepParam")
@@ -61,13 +64,23 @@ class World:
 
     def map_name(self, m: str) -> str:
         aa, bb = int(m[1:3]), int(m[4:6])
-        return (self.places.get(aa * 100 + bb * 10) or self.places.get(aa * 100) or "").strip()
+        return (
+            self.places.get(aa * 100 + bb * 10) or self.places.get(aa * 100) or ""
+        ).strip()
 
     def item_name(self, cat: int, iid: int) -> str:
         if cat == 15:
             r = self.lvdep.get(iid)
-            return self.item_name(r["itemCategory"], r["itemId"]) + " (level-dependent)" if r else f"lvdep {iid}?"
-        table = {0: "EquipParamWeapon", 1: "EquipParamProtector", 4: "EquipParamGoods"}.get(cat)
+            return (
+                self.item_name(r["itemCategory"], r["itemId"]) + " (level-dependent)"
+                if r
+                else f"lvdep {iid}?"
+            )
+        table = {
+            0: "EquipParamWeapon",
+            1: "EquipParamProtector",
+            4: "EquipParamGoods",
+        }.get(cat)
         if cat == 8:
             return f"blood gem (generator {iid})"
         n = self.names.get(table, {}).get(iid) if table else None
@@ -78,13 +91,19 @@ class World:
         r = self.lots.get(lot_id)
         if not r:
             return []
-        slots = [(r[f"lotItemId0{k}"], r[f"lotItemCategory0{k}"], r[f"lotItemNum0{k}"], r[f"lotItemBasePoint0{k}"])
-                 for k in range(1, 9)]
+        slots = [
+            (
+                r[f"lotItemId0{k}"],
+                r[f"lotItemCategory0{k}"],
+                r[f"lotItemNum0{k}"],
+                r[f"lotItemBasePoint0{k}"],
+            )
+            for k in range(1, 9)
+        ]
         total = sum(p for *_, p in slots) or 1
         return [(self.item_name(c, i), n, p / total) for i, c, n, p in slots if i > 0]
 
     def maps(self) -> list[str]:
-        d = self.path("map/mapstudio")
         base = os.path.join(self.base, "map/mapstudio")
         names = sorted(f for f in os.listdir(base) if f.endswith(".msb.dcx"))
         return [n[:12] for n in names]
@@ -121,11 +140,19 @@ def chalice_treasure(w: World):
         for fn in os.listdir(os.path.join(ms, f)):
             lay = msblib.Msb(souls.load(os.path.join(ms, f, fn)))
             layouts[owner] += 1
-            seen = {name for e in lay.events if e["type"] == "Treasure"
-                    for lid in e.get("item_lots", []) for name, n, c in w.lot(lid)}
+            seen = {
+                name
+                for e in lay.events
+                if e["type"] == "Treasure"
+                for lid in e.get("item_lots", [])
+                for name, n, c in w.lot(lid)
+            }
             for name in seen:
                 per_chalice[name][owner] += 1
-    return {name: [(ch, n, layouts[ch]) for ch, n in sorted(c.items())] for name, c in per_chalice.items()}
+    return {
+        name: [(ch, n, layouts[ch]) for ch, n in sorted(c.items())]
+        for name, c in per_chalice.items()
+    }
 
 
 SHOP_EQUIP = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}
@@ -153,8 +180,10 @@ def ownership_flags(w: World) -> dict[int, str]:
     + slot. The Bath Messengers' line-up expansion (event 12101000, one slot per hunter badge) is
     the case that matters: flag 12101007 is "owns the Cainhurst Badge".
     """
-    import events as evlib
     import struct
+
+    import events as evlib
+
     out = {}
     evdir = os.path.join(w.base, "event")
     for fn in sorted(os.listdir(evdir)):
@@ -177,8 +206,16 @@ def ownership_flags(w: World) -> dict[int, str]:
                         args = raw[8:]
                         if src + 4 <= len(args):
                             item = struct.unpack_from("<i", args, src)[0]
-                            table = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}.get(itype)
-                            name = w.names.get(table, {}).get(item, f"item {item}") if table else f"item {item}"
+                            table = {
+                                0: "EquipParamWeapon",
+                                1: "EquipParamProtector",
+                                3: "EquipParamGoods",
+                            }.get(itype)
+                            name = (
+                                w.names.get(table, {}).get(item, f"item {item}")
+                                if table
+                                else f"item {item}"
+                            )
                             out[target + slot] = f"owns {name.strip()}"
         # Second pattern: an event that tests fixed item IDs ([3:04]/[3:16], no parameter) in a
         # condition group and then sets a flag itself ([2003:02], state 1). Event 6680 is the one
@@ -189,20 +226,45 @@ def ownership_flags(w: World) -> dict[int, str]:
             owned, sets = [], []
             for c, i, raw in e.instructions:
                 if (c, i) in ((3, 4), (3, 16)) and len(raw) >= 9:
-                    owned.append((raw[1], struct.unpack_from("<i", raw, 4)[0], raw[8], (c, i) == (3, 16)))
+                    owned.append(
+                        (
+                            raw[1],
+                            struct.unpack_from("<i", raw, 4)[0],
+                            raw[8],
+                            (c, i) == (3, 16),
+                        )
+                    )
                 elif (c, i) == (2003, 2) and len(raw) >= 5 and raw[4] == 1:
                     sets.append(struct.unpack_from("<I", raw, 0)[0])
-            if not owned or len(sets) != 1 or sets[0] in out or any(st != 1 for *_, st, _ in owned):
+            if (
+                not owned
+                or len(sets) != 1
+                or sets[0] in out
+                or any(st != 1 for *_, st, _ in owned)
+            ):
                 continue
-            table = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}
+            table = {
+                0: "EquipParamWeapon",
+                1: "EquipParamProtector",
+                3: "EquipParamGoods",
+            }
             names = []
             for itype, item, _, _ in owned:
-                n = w.names.get(table.get(itype), {}).get(item, f"item {item}").strip()
+                n = (
+                    w.names.get(table.get(itype, ""), {})
+                    .get(item, f"item {item}")
+                    .strip()
+                )
                 base = n.split(" +")[0]
                 if base not in names:
                     names.append(base)
             storage = " (storage counts)" if all(s for *_, s in owned) else ""
-            out[sets[0]] = "owns " + " or ".join(names) + (" at any upgrade level" if len(owned) > len(names) else "") + storage
+            out[sets[0]] = (
+                "owns "
+                + " or ".join(names)
+                + (" at any upgrade level" if len(owned) > len(names) else "")
+                + storage
+            )
     return out
 
 
@@ -231,11 +293,16 @@ def shops(w: World):
     meanings = {**LINEUP_FLAGS, **ownership_flags(w)}
     for rid, r in sorted(w.rows("ShopLineupParam").items()):
         table = SHOP_EQUIP.get(r["equipType"])
-        name = (w.names.get(table, {}).get(r["equipId"]) or f"{table or r['equipType']} {r['equipId']}").strip()
+        name = (
+            w.names.get(table or "", {}).get(r["equipId"])
+            or f"{table or r['equipType']} {r['equipId']}"
+        ).strip()
         flag = r["qwcId"] if r["qwcId"] > 0 else None
         if flag and flag in meanings:
             flag = f"{flag} ({meanings[flag]})"
-        out[name].append((shop_series(rid // 10000, r["shopType"]), r["value"], flag, rid))
+        out[name].append(
+            (shop_series(rid // 10000, r["shopType"]), r["value"], flag, rid)
+        )
     return out
 
 
@@ -249,19 +316,22 @@ def event_awards(w: World):
     [2000:00] イベント起動 ("start an event") calls that start the event with arguments; those
     are followed one level, which covers how the game uses them.
     """
-    import events as evlib
     import struct
-    iset = evlib.InstructionSet(souls.load(w.path("event/common.emedf.dcx")))
+
+    import events as evlib
+
     out = collections.defaultdict(list)
     evdir = os.path.join(w.base, "event")
     for fn in sorted(os.listdir(evdir)):
         if not fn.endswith(".emevd.dcx"):
             continue
-        stem = fn[:-len(".emevd.dcx")]
+        stem = fn[: -len(".emevd.dcx")]
         evs = evlib.read_emevd(souls.load(w.path(f"event/{fn}")))
-        names = evlib.read_emeld(souls.load(w.path(f"event/{stem}.emeld.dcx"))) if os.path.exists(
-            w.path(f"event/{stem}.emeld.dcx")) else {}
-        by_id = {e.id: e for e in evs}
+        names = (
+            evlib.read_emeld(souls.load(w.path(f"event/{stem}.emeld.dcx")))
+            if os.path.exists(w.path(f"event/{stem}.emeld.dcx"))
+            else {}
+        )
         # (event id, parameter source byte) -> argument values passed by every start of that event
         passed = collections.defaultdict(list)
         for e in evs:
@@ -281,13 +351,23 @@ def event_awards(w: World):
                 else:
                     lots = [struct.unpack_from("<i", raw, 0)[0]]
                 for lot in lots:
-                    out[stem].append({"event": e.id, "name": names.get(e.id, ""), "how": AWARD[(c, i)],
-                                      "lot": lot, "items": w.lot(lot)})
+                    out[stem].append(
+                        {
+                            "event": e.id,
+                            "name": names.get(e.id, ""),
+                            "how": AWARD[(c, i)],
+                            "lot": lot,
+                            "items": w.lot(lot),
+                        }
+                    )
     return out
 
 
 def fmt_items(items):
-    return "; ".join(f"{name}{f' x{n}' if n > 1 else ''}{'' if c >= 0.999 else f' ({c:.0%})'}" for name, n, c in items)
+    return "; ".join(
+        f"{name}{f' x{n}' if n > 1 else ''}{'' if c >= 0.999 else f' ({c:.0%})'}"
+        for name, n, c in items
+    )
 
 
 def build(w: World):
@@ -301,22 +381,48 @@ def build(w: World):
                 continue
             items = [it for lid in e.get("item_lots", []) for it in w.lot(lid)]
             obj = parts.get(e.get("treasure_part"))
-            flag = w.lots.get(e["item_lots"][0], {}).get("getItemFlagId") if e.get("item_lots") else None
-            treasure[m].append({"event": e["name"], "object": e.get("treasure_part"),
-                                "pos": obj["pos"] if obj else None, "items": items, "flag": flag})
-        placed = collections.Counter(p["npc"] for p in lay.parts if p["type"] == "Enemy" and p.get("npc", -1) > 0)
+            flag = (
+                w.lots.get(e["item_lots"][0], {}).get("getItemFlagId")
+                if e.get("item_lots")
+                else None
+            )
+            treasure[m].append(
+                {
+                    "event": e["name"],
+                    "object": e.get("treasure_part"),
+                    "pos": obj["pos"] if obj else None,
+                    "items": items,
+                    "flag": flag,
+                }
+            )
+        placed = collections.Counter(
+            p["npc"] for p in lay.parts if p["type"] == "Enemy" and p.get("npc", -1) > 0
+        )
         for npc_id, count in sorted(placed.items()):
             r = w.npcs.get(npc_id)
             if not r:
                 continue
-            drops = [it for k in range(1, 7) if r[f"itemLotId_{k}"] > 0 for it in w.lot(r[f"itemLotId_{k}"])]
-            enemies[m].append({"npc": npc_id, "name": w.npc_names.get(r["nameId"], "").strip(), "count": count,
-                               "echoes": r["getSoul"], "drops": drops})
+            drops = [
+                it
+                for k in range(1, 7)
+                if r[f"itemLotId_{k}"] > 0
+                for it in w.lot(r[f"itemLotId_{k}"])
+            ]
+            enemies[m].append(
+                {
+                    "npc": npc_id,
+                    "name": w.npc_names.get(r["nameId"], "").strip(),
+                    "count": count,
+                    "echoes": r["getSoul"],
+                    "drops": drops,
+                }
+            )
     return treasure, enemies
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     if len(sys.argv) < 5:
         print(__doc__)
         return 2
@@ -329,73 +435,134 @@ def main():
         for name, rows in shops(w).items():
             if q in name.lower():
                 for where, price, flag, rid in rows:
-                    print(f"{'shop':14} {where:38} {name}: price {price}" + (f", unlocked by flag {flag}" if flag else "")
-                          + f"  (row {rid})")
+                    print(
+                        f"{'shop':14} {where:38} {name}: price {price}"
+                        + (f", unlocked by flag {flag}" if flag else "")
+                        + f"  (row {rid})"
+                    )
         for stem, rows in event_awards(w).items():
             for r in rows:
                 for name, n, c in r["items"]:
                     if q in name.lower():
-                        print(f"{stem:14} event {r['event']} {r['name']}: {r['how']}: {name} x{n}")
+                        print(
+                            f"{stem:14} event {r['event']} {r['name']}: {r['how']}: {name} x{n}"
+                        )
         for name, rows in chalice_treasure(w).items():
             if q in name.lower():
                 for chalice, n, total in rows:
-                    print(f"{'chalice':14} {chalice:38} {name}: in {n} of {total} layouts")
+                    print(
+                        f"{'chalice':14} {chalice:38} {name}: in {n} of {total} layouts"
+                    )
         for m in w.maps():
             for t in treasure[m]:
                 for name, n, c in t["items"]:
                     if q in name.lower():
-                        pos = "(" + ", ".join(f"{x:.1f}" for x in t["pos"]) + ")" if t["pos"] else ""
-                        print(f"{m} {w.map_name(m):30} treasure {t['object'] or '':16} {pos:26} {name} x{n}")
+                        pos = (
+                            "(" + ", ".join(f"{x:.1f}" for x in t["pos"]) + ")"
+                            if t["pos"]
+                            else ""
+                        )
+                        print(
+                            f"{m} {w.map_name(m):30} treasure {t['object'] or '':16} {pos:26} {name} x{n}"
+                        )
             for e in enemies[m]:
                 for name, n, c in e["drops"]:
                     if q in name.lower():
                         who = e["name"] or f"NPC {e['npc']}"
-                        print(f"{m} {w.map_name(m):30} dropped by {who} ({e['count']} placed): {name} x{n} ({c:.0%})")
+                        print(
+                            f"{m} {w.map_name(m):30} dropped by {who} ({e['count']} placed): {name} x{n} ({c:.0%})"
+                        )
         return 0
 
-    out = ["# Where the items are\n",
-           "Generated by `tools/items.py world` from the game's own data (1.09 over 1.00). Positions are",
-           "map-local coordinates from the layout. Chances under 100% come from the item lot's weights.\n",
-           "| Map | Place | Treasure spots | Items placed | Enemy types | Enemies placed |", "|---|---|---:|---:|---:|---:|"]
+    out = [
+        "# Where the items are\n",
+        "Generated by `tools/items.py world` from the game's own data (1.09 over 1.00). Positions are",
+        "map-local coordinates from the layout. Chances under 100% come from the item lot's weights.\n",
+        "| Map | Place | Treasure spots | Items placed | Enemy types | Enemies placed |",
+        "|---|---|---:|---:|---:|---:|",
+    ]
     for m in w.maps():
-        out.append(f"| {m} | {w.map_name(m)} | {len(treasure[m])} | {sum(len(t['items']) for t in treasure[m])} | "
-                   f"{len(enemies[m])} | {sum(e['count'] for e in enemies[m])} |")
+        out.append(
+            f"| {m} | {w.map_name(m)} | {len(treasure[m])} | {sum(len(t['items']) for t in treasure[m])} | "
+            f"{len(enemies[m])} | {sum(e['count'] for e in enemies[m])} |"
+        )
     for m in w.maps():
         if not treasure[m] and not enemies[m]:
             continue
-        out += ["", f"## {m} {w.map_name(m)}", "", "### Treasure", "",
-                "| Object | Position | Items | Pickup flag |", "|---|---|---|---:|"]
+        out += [
+            "",
+            f"## {m} {w.map_name(m)}",
+            "",
+            "### Treasure",
+            "",
+            "| Object | Position | Items | Pickup flag |",
+            "|---|---|---|---:|",
+        ]
         for t in treasure[m]:
-            pos = "(" + ", ".join(f"{x:.1f}" for x in t["pos"]) + ")" if t["pos"] else ""
-            out.append(f"| {t['object'] or ''} | {pos} | {fmt_items(t['items'])} | {t['flag'] or ''} |")
-        out += ["", "### Enemies", "", "| NPC param | Name | Placed | Blood echoes | Drops |", "|---:|---|---:|---:|---|"]
+            pos = (
+                "(" + ", ".join(f"{x:.1f}" for x in t["pos"]) + ")" if t["pos"] else ""
+            )
+            out.append(
+                f"| {t['object'] or ''} | {pos} | {fmt_items(t['items'])} | {t['flag'] or ''} |"
+            )
+        out += [
+            "",
+            "### Enemies",
+            "",
+            "| NPC param | Name | Placed | Blood echoes | Drops |",
+            "|---:|---|---:|---:|---|",
+        ]
         for e in enemies[m]:
-            out.append(f"| {e['npc']} | {e['name']} | {e['count']} | {e['echoes']} | {fmt_items(e['drops'])} |")
+            out.append(
+                f"| {e['npc']} | {e['name']} | {e['count']} | {e['echoes']} | {fmt_items(e['drops'])} |"
+            )
     awards = event_awards(w)
-    out += ["", "## Given by event scripts", "",
-            'Items handed over by `[2003:04]` / `[2003:36]` アイテム取得 ("obtain item") in the event scripts.', "",
-            "| Script | Event | Event name | Lot | Items |", "|---|---:|---|---:|---|"]
+    out += [
+        "",
+        "## Given by event scripts",
+        "",
+        'Items handed over by `[2003:04]` / `[2003:36]` アイテム取得 ("obtain item") in the event scripts.',
+        "",
+        "| Script | Event | Event name | Lot | Items |",
+        "|---|---:|---|---:|---|",
+    ]
     for stem in sorted(awards):
         for r in awards[stem]:
-            out.append(f"| {stem} | {r['event']} | {r['name']} | {r['lot']} | {fmt_items(r['items'])} |")
-    out += ["", "## In the Chalice Dungeons", "",
-            "Items placed as treasure in each chalice's pre-built layouts: in how many of them.", "",
-            "| Item | Chalice | Layouts with it |", "|---|---|---:|"]
+            out.append(
+                f"| {stem} | {r['event']} | {r['name']} | {r['lot']} | {fmt_items(r['items'])} |"
+            )
+    out += [
+        "",
+        "## In the Chalice Dungeons",
+        "",
+        "Items placed as treasure in each chalice's pre-built layouts: in how many of them.",
+        "",
+        "| Item | Chalice | Layouts with it |",
+        "|---|---|---:|",
+    ]
     for name, rows in sorted(chalice_treasure(w).items()):
         for chalice, n, total in rows:
             out.append(f"| {name} | {chalice} | {n} / {total} |")
-    out += ["", "## Sold in shops", "",
-            "From `ShopLineupParam`. Price per tier; the unlock flag is the row's `qwcId`.", "",
-            "| Item | Where | Prices by tier | Unlock flag |", "|---|---|---|---:|"]
+    out += [
+        "",
+        "## Sold in shops",
+        "",
+        "From `ShopLineupParam`. Price per tier; the unlock flag is the row's `qwcId`.",
+        "",
+        "| Item | Where | Prices by tier | Unlock flag |",
+        "|---|---|---|---:|",
+    ]
     for name, rows in sorted(shops(w).items()):
         groups = collections.defaultdict(list)
         for where, price, flag, rid in rows:
             groups[(where.rsplit(", tier", 1)[0], flag)].append(price)
         for (where, flag), prices in groups.items():
-            out.append(f"| {name} | {where} | {' / '.join(map(str, prices))} | {flag or ''} |")
+            out.append(
+                f"| {name} | {where} | {' / '.join(map(str, prices))} | {flag or ''} |"
+            )
     with open(sys.argv[4], "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
-    print("\n".join(out[3:5 + len(w.maps())]))
+    print("\n".join(out[3 : 5 + len(w.maps())]))
     return 0
 
 

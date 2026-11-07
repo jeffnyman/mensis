@@ -10,7 +10,7 @@ public: `tools/pkgtool.py` decrypts it and produces the game's real filesystem, 
 29.3 GiB.
 
 **The executable decompiles.** It is a *fake* SELF with plaintext segments. Converted back to an
-ordinary x86-64 ELF and prepared for Ghidra, it analyses in about 24 minutes: 167,054 functions,
+ordinary x86-64 ELF and prepared for Ghidra, it analyzes in about 24 minutes: 167,054 functions,
 all 701 system imports named, and about 900 functions and 110 globals named from the strings
 the engine leaves behind or by hand, each with its evidence.
 
@@ -33,7 +33,7 @@ to OBJ and render every character and piece of equipment as a picture.
 * [The Chalice Dungeons](docs/the-chalice-dungeons.md): "random" Root Chalice dungeons are one of
   100 or 200 layouts that ship with the game, and [their event scripts](docs/the-chalice-events.md)
   show what the rites do inside them: every variant is already placed, and the script removes
-  all but one. A ritual's roll is steered towards unique items you haven't picked up yet.
+  all but one. A ritual's roll is steered toward unique items you haven't picked up yet.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -44,7 +44,7 @@ to OBJ and render every character and piece of equipment as a picture.
    PlayGo, and what the 1.09 update replaces.
 2. [The executable](docs/the-executable.md): SELF → ELF, imports, and the engine and middleware it
    was built from.
-3. [Loading it into Ghidra](docs/ghidra.md): from `eboot.bin` to an analysed, partly named Ghidra
+3. [Loading it into Ghidra](docs/ghidra.md): from `eboot.bin` to an analyzed, partly named Ghidra
    project, why each step is needed, how two builds are compared, and how functions get names.
 4. [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs, params
    and text, and the readers for them.
@@ -134,7 +134,7 @@ python -I tools/msb.py check|dump|diff <msb> …                       # map lay
 
 ```
 python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
-python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the Chalice Dungeon catalogue
+python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the Chalice Dungeon catalog
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 ```
 
@@ -164,8 +164,8 @@ scratch.
 | `work/ref/aerolib.inl` | NID → name database (shadPS4), downloaded on first use |
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
-| `work/items/`, `work/chalice/` | the generated item index, the Chalice catalogue and the Chalice event-script summary |
-| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armour piece drawn) and `obj/` (exported models), each with an index |
+| `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
+| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn) and `obj/` (exported models), each with an index |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |
 
 ## License

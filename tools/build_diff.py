@@ -30,6 +30,7 @@ import argparse
 import collections
 import csv
 import difflib
+import io
 import sys
 
 
@@ -45,36 +46,46 @@ def token(r):
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     ap.add_argument("old")
     ap.add_argument("new")
     ap.add_argument("out")
     ap.add_argument("--top", type=int, default=40)
-    ap.add_argument("--pairs", help="also write every pairing as TSV: bucket, old address, new address")
+    ap.add_argument(
+        "--pairs",
+        help="also write every pairing as TSV: bucket, old address, new address",
+    )
     a = ap.parse_args()
     old, new = read(a.old), read(a.new)
 
-    sm = difflib.SequenceMatcher(None, [token(r) for r in old], [token(r) for r in new], autojunk=False)
+    sm = difflib.SequenceMatcher(
+        None, [token(r) for r in old], [token(r) for r in new], autojunk=False
+    )
     buckets = collections.Counter()
-    pairs = collections.defaultdict(list)   # bucket -> [(old, new)]
+    pairs = collections.defaultdict(list)  # bucket -> [(old, new)]
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             for o, n in zip(old[i1:i2], new[j1:j2]):
-                b = "identical" if o["specific_hash"] == n["specific_hash"] else "constants"
+                b = (
+                    "identical"
+                    if o["specific_hash"] == n["specific_hash"]
+                    else "constants"
+                )
                 buckets[b] += 1
                 pairs[b].append((o, n))
             continue
         lo, ln = i2 - i1, j2 - j1
         b = "changed" if lo == ln else "replaced"
         k = min(lo, ln)
-        for o, n in zip(old[i1:i1 + k], new[j1:j1 + k]):
+        for o, n in zip(old[i1 : i1 + k], new[j1 : j1 + k]):
             buckets[b] += 1
             pairs[b].append((o, n))
-        for o in old[i1 + k:i2]:
+        for o in old[i1 + k : i2]:
             buckets["removed"] += 1
             pairs["removed"].append((o, None))
-        for n in new[j1 + k:j2]:
+        for n in new[j1 + k : j2]:
             buckets["added"] += 1
             pairs["added"].append((None, n))
 
@@ -89,7 +100,11 @@ def main():
         if q:
             n = q.popleft()
             moved_new.add(id(n))
-            b = "moved" if o["specific_hash"] == n["specific_hash"] else "moved+constants"
+            b = (
+                "moved"
+                if o["specific_hash"] == n["specific_hash"]
+                else "moved+constants"
+            )
             buckets[b] += 1
             pairs[b].append((o, n))
         else:
@@ -101,29 +116,57 @@ def main():
     def strs(r):
         return (r or {}).get("strings", "").replace("|", "/")
 
-    lines = [f"# Build diff: `{a.old}` → `{a.new}`\n",
-             f"{len(old):,} functions in the old build, {len(new):,} in the new (thunks excluded).\n",
-             "| Bucket | Functions |", "|---|---:|"]
-    for b in ("identical", "constants", "moved", "moved+constants", "changed", "replaced", "removed", "added"):
+    lines = [
+        f"# Build diff: `{a.old}` → `{a.new}`\n",
+        f"{len(old):,} functions in the old build, {len(new):,} in the new (thunks excluded).\n",
+        "| Bucket | Functions |",
+        "|---|---:|",
+    ]
+    for b in (
+        "identical",
+        "constants",
+        "moved",
+        "moved+constants",
+        "changed",
+        "replaced",
+        "removed",
+        "added",
+    ):
         lines.append(f"| {b} | {buckets[b]:,} |")
 
     def table(title, rows, key):
         rows = sorted(rows, key=key)
         lines.append(f"\n## {title} ({len(rows):,})\n")
-        lines.append("| Old | New | Bytes old → new | Instr. old → new | Strings referenced |")
+        lines.append(
+            "| Old | New | Bytes old → new | Instr. old → new | Strings referenced |"
+        )
         lines.append("|---|---|---|---|---|")
-        for o, n in rows[:a.top]:
-            lines.append("| {} | {} | {} → {} | {} → {} | {} |".format(
-                o["address"] if o else "", n["address"] if n else "",
-                o["size"] if o else "–", n["size"] if n else "–",
-                o["instructions"] if o else "–", n["instructions"] if n else "–",
-                strs(n) or strs(o)))
+        for o, n in rows[: a.top]:
+            lines.append(
+                "| {} | {} | {} → {} | {} → {} | {} |".format(
+                    o["address"] if o else "",
+                    n["address"] if n else "",
+                    o["size"] if o else "–",
+                    n["size"] if n else "–",
+                    o["instructions"] if o else "–",
+                    n["instructions"] if n else "–",
+                    strs(n) or strs(o),
+                )
+            )
         if len(rows) > a.top:
             lines.append(f"\n…and {len(rows) - a.top:,} more.")
 
     delta = lambda p: -abs(int(p[1]["size"]) - int(p[0]["size"]))
-    table("Changed functions, largest size change first", pairs["changed"] + pairs["replaced"], delta)
-    table("Constant-only changes", pairs["constants"] + pairs["moved+constants"], lambda p: -int(p[1]["size"]))
+    table(
+        "Changed functions, largest size change first",
+        pairs["changed"] + pairs["replaced"],
+        delta,
+    )
+    table(
+        "Constant-only changes",
+        pairs["constants"] + pairs["moved+constants"],
+        lambda p: -int(p[1]["size"]),
+    )
     table("Removed functions", pairs["removed"], lambda p: -int(p[0]["size"]))
     table("Added functions", pairs["added"], lambda p: -int(p[1]["size"]))
 

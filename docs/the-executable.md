@@ -28,7 +28,7 @@ S3DConversion).
 | Data (`RW-` PT_LOAD) | 3.0 MiB file / 6.0 MiB in memory |
 | `.eh_frame_hdr` entries | **162,959**, about one per function, so roughly 160k functions |
 | Build path (PT_SCE_COMMENT) | `E:/AB/SPRJ/Source/SPRJ/dist_ps4/Master_LTO/SPRJ_ps4_Master_LTO.elf` |
-| Symbols | none: a link-time-optimised ("Master_LTO") release build |
+| Symbols | none: a link-time-optimized ("Master_LTO") release build |
 | C++ RTTI | only FMOD's 201 classes; the engine was built with RTTI off |
 
 **SPRJ** is FromSoftware's internal project code for Bloodborne. It appears in the build path, in
