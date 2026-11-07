@@ -19,7 +19,7 @@ of its event instructions and the names of its events, all in Japanese, and the 
 them: gameplay tables field by field, event scripts instruction by instruction, AI and talk
 scripts, and map layouts.
 
-**Together they answer real questions.** Three worked examples so far:
+**Together they answer real questions.** Four worked examples so far:
 
 * [What the 1.09 patch changed](docs/the-patch.md): developer tooling switched off, the balance
   changes, elevator, DLC and NPC fixes, and changes that span code, data, scripts and layout.
@@ -27,6 +27,8 @@ scripts, and map layouts.
   to which badge unlocks the Chikage.
 * [The Chalice Dungeons](docs/the-chalice-dungeons.md): "random" Root Chalice dungeons are one of
   100 or 200 layouts that ship with the game.
+* [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
+  asks a server, and what that means for running it off a PS4.
 
 ## Reading order
 
@@ -43,6 +45,8 @@ scripts, and map layouts.
    layouts, the rites, and the deeper chalices the tables define but the game doesn't contain.
 7. [What the 1.09 patch changed](docs/the-patch.md): every kind of replaced file, read and
    explained.
+8. [The online boundary](docs/the-online-boundary.md): which features need a server, which server
+   each uses, and what an emulator or replacement server faces.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked.
