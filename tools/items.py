@@ -180,7 +180,44 @@ def ownership_flags(w: World) -> dict[int, str]:
                             table = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}.get(itype)
                             name = w.names.get(table, {}).get(item, f"item {item}") if table else f"item {item}"
                             out[target + slot] = f"owns {name.strip()}"
+        # Second pattern: an event that tests fixed item IDs ([3:04]/[3:16], no parameter) in a
+        # condition group and then sets a flag itself ([2003:02], state 1). Event 6680 is the one
+        # that matters: Beast Claw +0..+10, storage included, sets flag 6680.
+        for e in evs.values():
+            if e.params:
+                continue
+            owned, sets = [], []
+            for c, i, raw in e.instructions:
+                if (c, i) in ((3, 4), (3, 16)) and len(raw) >= 9:
+                    owned.append((raw[1], struct.unpack_from("<i", raw, 4)[0], raw[8], (c, i) == (3, 16)))
+                elif (c, i) == (2003, 2) and len(raw) >= 5 and raw[4] == 1:
+                    sets.append(struct.unpack_from("<I", raw, 0)[0])
+            if not owned or len(sets) != 1 or sets[0] in out or any(st != 1 for *_, st, _ in owned):
+                continue
+            table = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}
+            names = []
+            for itype, item, _, _ in owned:
+                n = w.names.get(table.get(itype), {}).get(item, f"item {item}").strip()
+                base = n.split(" +")[0]
+                if base not in names:
+                    names.append(base)
+            storage = " (storage counts)" if all(s for *_, s in owned) else ""
+            out[sets[0]] = "owns " + " or ".join(names) + (" at any upgrade level" if len(owned) > len(names) else "") + storage
     return out
+
+
+# The insight shop's line-up flags, read from the Hunter's Dream event 12101010
+# (売買メッセンジャー＿ラインナップ拡充_時間帯フラグ, "line-up expansion: time-of-day flags"): each is set
+# from one other flag, and all five once 6603 (set by the three endings) is. 9800-9802 are the
+# time of day, a 3-bit group the executable reads and writes together (Evening, Night, Eccentric
+# Moon); 12801800 and 12601800 are boss-defeat events' completion flags. See docs/the-items.md.
+LINEUP_FLAGS = {
+    5900: "once it is Evening, or after an ending",
+    5901: "once it is Night, or after an ending",
+    5902: "once the Eccentric Moon has risen, or after an ending",
+    5903: "after The One Reborn is defeated, or after an ending",
+    5904: "after the Nightmare of Mensis boss of event 12601800 is defeated, or after an ending",
+}
 
 
 def shops(w: World):
@@ -191,7 +228,7 @@ def shops(w: World):
     (see ownership_flags) are spelled out, e.g. 12101007 (owns Cainhurst Badge).
     """
     out = collections.defaultdict(list)
-    meanings = ownership_flags(w)
+    meanings = {**LINEUP_FLAGS, **ownership_flags(w)}
     for rid, r in sorted(w.rows("ShopLineupParam").items()):
         table = SHOP_EQUIP.get(r["equipType"])
         name = (w.names.get(table, {}).get(r["equipId"]) or f"{table or r['equipType']} {r['equipId']}").strip()

@@ -407,8 +407,9 @@ like the game's handling of a save that is in the DLC when the DLC is no longer 
 
 * `売買メッセンジャー＿ラインナップ拡充_時間帯フラグ` ("trading messenger: line-up expansion,
   time-of-day flags") sets the insight shop's unlock flags 5900–5904 from progress flags. 1.09
-  adds the last one: **5904 when flag 12601800 is set** (a Nightmare of Mensis flag of the same
-  `xx01800` form as 12801800, which sets 5903). It also adds **all of 5900–5904 once flag 6603 is
+  adds the last one: **5904 when flag 12601800 is set**, the completion flag of a Nightmare of
+  Mensis boss-defeat event (12801800, which sets 5903, is The One Reborn's;
+  [where the items are](the-items.md#the-insight-shops-line-up-flags) has all five). It also adds **all of 5900–5904 once flag 6603 is
   set**, and 6603 is set by the events `Aエンド`, `Bエンド` and `Cエンド`, the game's three
   endings. The new Blood Rock shop rows ([above](#what-changed)) carry unlock flag 5904 in their
   `qwcId` field (Blood Stone Chunk's carry 5903), so this event change is what makes Blood Rock

@@ -169,28 +169,53 @@ hidden rows `99<depth><base>030` with no cost and no name, which pick one of fea
 normal depths the weights are **7 / 10 / 3 / 14 / 6**. The rows ending `230` (a 2 where the
 Sinister chalices' map base IDs have one, e.g. 302) pick only 30 (21) or 32 (9).
 
-Two kinds of character are placed, each with an ordinary-enemy stand-in for when it isn't
-picked:
+Two spots are involved, each with an ordinary-enemy stand-in for when nothing is picked:
 
-| Character | Model | Templates |
-|---|---|---|
-| the "shop" character | c1110 (row 111011), with two c9020 trading messengers (902030, 902031) | `ショップあり_ショップ` keeps him; the same entity runs the `クモ男パッチ` ("Patches the spider-man") events |
-| the "no-shop" character | c7500 (750080) | `…_同士討ち` ("infighting") keeps it |
+* **The shop spot** (`ショップあり_…`, "with shop") holds two alternative sets. Set A is
+  **Patches** alone: model c1110 (row 111011, talk script 290329), whose entity also runs the
+  `クモ男パッチ` ("Patches the spider-man") events. Set B is **two trading messengers** (c9020,
+  rows 902030 and 902031) and their two objects: a shop.
+* **The no-shop spot** (`ショップなし_…`) holds a c7500 (750080), kept by `…_同士討ち`
+  ("infighting").
 
 The features combine them:
 
-| Feature | Weight | Shop character | No-shop character |
+| Feature | Weight | Shop spot | No-shop spot |
 |---:|---:|---|---|
-| 30 | 7 | present | ordinary enemy |
-| 31 | 10 | replaced by a c7500 | infighting |
-| 32 | 3 | present if story flag 1423 or 1432 is set | ordinary enemy |
-| 33 | 14 | present | infighting |
-| 34 | 6 | present if story flag 1423 or 1432 is set | infighting |
+| 30 | 7 | the messengers' shop | ordinary enemy |
+| 31 | 10 | a c7500 instead | infighting |
+| 32 | 3 | **Patches**, if his story state is 1423 or 1432; otherwise the messengers' shop | ordinary enemy |
+| 33 | 14 | the messengers' shop | infighting |
+| 34 | 6 | **Patches**, as for 32 | infighting |
 
-The Patches events' names say what he does: he turns hostile after a count of attacks
-(`攻撃回数カウント`), switching team type, and **falls** (`落下する`) both when talked to
-(`話しかけたら`) and when damaged (`ダメージを受けたら`). The trading messengers beside him (`売買メッセンジャー初期化`,
-`…アニメ`, `…表示マスク`) are the shop.
+*An earlier version of this table had Patches present for 30 and 33 too. The template's full
+logic keeps set A (Patches) only on the 32/34 branch with his story state, and set B (the
+messengers) otherwise.*
+
+**Patches' story state** is one of a group of flags, 1420–1437. Each event that changes it
+clears the group and sets one:
+
+| Flag | Set by | Meaning |
+|---:|---|---|
+| 1420 | `common`'s pre-constructor | the initial state |
+| 1421 | `クモ男パッチ_対面` ("face to face"), Byrgenwerth (m32) | met him |
+| 1422 | `クモ男パッチ_旅立ち直前` ("just before setting out"), Byrgenwerth | met him, his talk flag 73200324 is set, and both 9461 and 9466 are set: the boss-defeat events `ボス撃破_悪夢の主` ("master of the nightmare", Nightmare of Mensis) and `ボス撃破_邪神` ("evil god", Nightmare Frontier; Amygdala in [Bosses](#bosses)) |
+| 1423 | `クモ男パッチ_ダンジョンにいる` ("is in the dungeon"), `common` | 1422, talk flag 73200326, and the player not in Byrgenwerth |
+| 1430 | `クモ男パッチ_敵対した` ("turned hostile"), Byrgenwerth | |
+| 1431 | `クモ男パッチ_死亡` ("dead"), Byrgenwerth or a Chalice dungeon | |
+| 1432 | `クモ男パッチ_敵対_敵対フラグON` ("hostile flag on"), a Chalice dungeon | turned hostile in a dungeon |
+
+The two talk flags come from his talk script in Byrgenwerth. It sets 73200324 after one line
+and 73200326 after the line *"Oh, think not of poor Amygdala."* (talk 3901400). So Patches
+**moves to the Chalice Dungeons**: once he has said his piece after both bosses are dead, and
+you leave Byrgenwerth, his state becomes "in the dungeon". From then on, a dungeon that rolls 32
+or 34 has him in the shop spot, even if you've made him hostile (1432). Once he is dead (1431),
+it never does. Byrgenwerth's own event `クモ男パッチ_立ち位置切り替え` ("switch his standing
+position") tests 1423.
+
+The Patches events' names say what he does in a dungeon: he turns hostile after a count of
+attacks (`攻撃回数カウント`), switching team type, and **falls** (`落下する`) both when talked to
+(`話しかけたら`) and when damaged (`ダメージを受けたら`).
 
 ## The bell-ringing women
 
@@ -257,7 +282,6 @@ templates, not how often players meet it. That depends on which chalices players
 
 * The 7 layouts with events of their own (in `m29_00`–`m29_04`), and the library's many trap,
   door and elevator templates beyond their names.
-* What sets story flags 1423 and 1432, which gate Patches in features 32 and 34.
 * Which in-game enemies the unnamed models are. The game's text doesn't name ordinary enemies,
   and naming them from outside knowledge is left to a reader who can check in the game.
 * The AI side of each special enemy (the Lua scripts behind AI commands 10 and 200, and the

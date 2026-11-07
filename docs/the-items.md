@@ -124,20 +124,61 @@ The Chikage is bought from the Bath Messengers for 50,000 echoes once you have i
 template explains the rest of the badge groups: the Saw Hunter Badge (slot 0, flag 12101000)
 unlocks the Saw Cleaver, Hunter Axe, Threaded Cane and Saw Spear rows.
 
-`items.py` finds these flags generically: any event that waits on item ownership with the item
-from an argument, started with that argument in slot *s*, defines "flag = event + *s* → owns
-that item". That finds **47** such flags: the ten badges, the messengers' decorations ("owns
-Messenger Top Hat", the items that change the Bath Messengers' look), and the Uncanny/Lost
-versions of the DLC weapons (5500–5521, so the shop re-sells them once you have them). Shop rows
-with one of these flags show their condition in words:
+`items.py` finds these flags generically, in two patterns:
+
+* **An event that waits on item ownership with the item from an argument**, started with that
+  argument in slot *s*, defines "flag = event + *s* → owns that item". That gives 47 flags: the
+  ten badges, the messengers' decorations ("owns Messenger Top Hat", the items that change the
+  Bath Messengers' look), and the Uncanny/Lost versions of the DLC weapons (5500–5521, so the
+  shop re-sells them once you have them).
+* **An event that tests fixed item IDs and then sets a flag itself.** That gives 20 more,
+  chiefly a family of 18 in `common` (6680–6697), one per weapon, each set once you own that
+  weapon **at any upgrade level, storage included** (`[3:16]`, `倉庫含むアイテムの所有状態で判定`,
+  "judge item ownership, storage included"). Flag 6680 tests the eleven IDs of Beast Claw +0 to
+  +10.
+
+That is **67** "owns" flags in all. Shop rows with one of them show their condition in words:
 
 ```
 shop  Bath Messengers, echoes, tier 1   Chikage: price 50000, unlocked by flag 12101007 (owns Cainhurst Badge)
 ```
 
 The **Beast Claw** is also a shop row (34,000, flag 6680). It isn't placed in any main map
-layout; it is found first in the Chalice Dungeons (below). Flag 6680 isn't one of the derived
-"owns" flags, so what sets it isn't established.
+layout; it is found first in the Chalice Dungeons (below). Flag 6680 is "owns a Beast Claw, at
+any upgrade level", so the Bath Messengers sell it once you've found one, and keep selling it
+if you put yours in storage. *An earlier version of this page couldn't say what set 6680. The
+detector only knew the first pattern above.*
+
+### The insight shop's line-up flags
+
+The insight shop's later rows (Blood Stone Chunk, Blood Rock, …) are unlocked by flags
+5900–5904. The Hunter's Dream event `売買メッセンジャー＿ラインナップ拡充_時間帯フラグ` ("trading
+messenger: line-up expansion, time-of-day flags") sets each from one other flag:
+
+| Line-up flag | Set when | Source flag |
+|---:|---|---|
+| 5900 | it is Evening | 9800 |
+| 5901 | it is Night | 9801 |
+| 5902 | the Eccentric Moon has risen | 9802 |
+| 5903 | The One Reborn is defeated (Yahar'gul) | 12801800, `ボス撃破_なりそこないの邪神` |
+| 5904 | a Nightmare of Mensis boss is defeated | 12601800, `ボス撃破_レッサーデーモン（死と闇）` |
+| all five | any of the three endings is reached | 6603 |
+
+**The time of day is three event flags.** 9800–9802 aren't set by any event or talk script.
+The executable reads and writes them together as one 3-bit value (`FUN_017cfd80` /
+`FUN_017d0060` with flag 9800 and width 3). The values 0, 4, 6 and 7 are its four stages, which
+a debug display names "15o'clock", "Evening", "Night" and "EccentricMoon". Each later stage sets
+one more flag. The event scripts and talk scripts only ever test them.
+
+The two boss events are completion flags, the same convention as the badges: an event's own
+flag is set when it finishes. The Nightmare of Mensis boss of 12601800
+(`レッサーデーモン（死と闇）`, "lesser demon (death and darkness)") has model c5510 and no name in
+the text. That is the model of the Chalice Dungeons' `トラップロード移植` boss
+([the event scripts](the-chalice-events.md#bosses)). `find` spells the line-up flags out too:
+
+```
+shop  Bath Messengers, insight, tier 1   Blood Rock: price 60, unlocked by flag 5904 (after the Nightmare of Mensis boss of event 12601800 is defeated, or after an ending)
+```
 
 ## The Chalice Dungeons
 
@@ -164,8 +205,6 @@ The pattern for the weapon variants is visible here: the plain weapon in the sto
 
 ## What it doesn't cover yet
 
-* **Unlock flags that aren't "owns X".** Flag 6680 (Beast Claw), and the line-up flags 5900–5904,
-  which the messengers' event sets from progress flags (see [the patch](the-patch.md)).
 * **Three event awards** (event 9440, `誓約ボディジェム入手`, "obtain covenant body gem", lots
   10500/11500/12500) point at lots that don't exist in `ItemLotParam`, so they must resolve some
   other way.
