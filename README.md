@@ -25,8 +25,8 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
 * [The executable](docs/the-executable.md): SELF → ELF, imports, the engine and middleware it was
   built from, and what decompiling it involves.
 * [Loading it into Ghidra](docs/ghidra.md): the step-by-step procedure from `eboot.bin` to an
-  analysed Ghidra project, why each step is needed, what the result looks like, and how the 1.00
-  and 1.09 builds were compared.
+  analysed Ghidra project, why each step is needed, what the result looks like, how the 1.00
+  and 1.09 builds were compared, and how functions get named from the strings around them.
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -66,7 +66,9 @@ python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare
 
 `tools/ghidra/` also holds the Ghidra scripts: `ApplyOrbisSymbols.java` (names and function
 starts before analysis), `OrbisReport.java` (summary and landmark decompilations),
-`ExportFunctionHashes.java` (per-function hashes for `build_diff.py`) and `DeleteProjectFile.java`.
+`ExportFunctionHashes.java` (per-function hashes for `build_diff.py`), `FindStringUses.java`
+(who uses which strings), `NameFromStrings.java` (names functions and globals from step tables,
+profiler markers and singleton asserts) and `DeleteProjectFile.java`.
 `tools/pkgkeys.py` holds the public fake-package RSA keys.
 
 ## Working files (`work/`, ~30 GiB, not source)

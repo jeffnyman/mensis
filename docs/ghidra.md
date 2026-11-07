@@ -326,15 +326,113 @@ at all: they are in the replaced `gameparam.parambnd.dcx`.
 The full tables, with addresses in both builds for every changed, moved, added and removed
 function, are in `work/ghidra/diff/diff-1.00-to-1.09.md`.
 
+## Naming from strings
+
+After analysis, 157k functions are `FUN_xxxxxxxx`. The binary has no symbols, but the engine and
+its middleware leave strings that say what nearby code is. Turning those into names is the
+cheapest naming there is, and it is mechanical enough to script.
+
+### Exploring first: `FindStringUses.java`
+
+Before writing a namer it helps to see *how* a kind of string is used. `FindStringUses.java`
+lists every string matching some regular expressions, every instruction that references them,
+and optionally decompiles the referencing functions:
+
+```
+analyzeHeadless work\ghidra\project Bloodborne -process eboot-1.09.ghidra.elf -noanalysis -readOnly ^
+    -scriptPath tools\ghidra -postScript FindStringUses.java out.txt 3 "^SprjEmkSystemUpdateTask"
+```
+
+`analyzeHeadless.bat` passes its arguments through `cmd.exe`, which treats `| < > ^ &` as its
+own. So `<regex>` arguments are OR'd together rather than written with `|`, and a pattern that
+needs those characters goes in a file passed as `@file`.
+
+Three things came out of exploring:
+
+* About **740 UTF-16 strings of the form `Class::STEP_Name`** (`MapRes::STEP_LoTex_Finish`,
+  `SprjSystemStep::STEP_Wait_forBootPhase5`, `CSMovieIns::STEP_Init`). FD4 runs much of the game
+  as step-based state machines, and static initialisers register each step as a 24-byte record
+  `{ code*, 0, L"Class::STEP_Name" }`:
+
+  ```c
+  _DAT_05957950 = FUN_0198c2b0;  _DAT_05957958 = 0;  _DAT_05957960 = L"MapRes::STEP_Init";
+  _DAT_05957968 = FUN_0198c2d0;  _DAT_05957970 = 0;  _DAT_05957978 = L"MapRes::STEP_NoData";
+  ```
+
+  So the function stored next to each name *is* that step. These are the developers' own method
+  names.
+* About **70 Havok profiler markers** (`TthkbWorld::step`, `LthkpWorld::getClosestPoints`) and
+  Scaleform renderer markers (`HAL::BeginFrame`). Havok's `HK_TIMER_BEGIN` macros put these
+  inside the function being timed, with a `Tt`/`Lt` prefix.
+* About **5,660 singleton asserts**:
+  `if (g == 0) assert("...FD4Singleton.h" or "...FD4DerivedSingleton.h", line, ..., "ClassName")`.
+  The global `g` is the instance pointer of `ClassName`.
+
+### `NameFromStrings.java`
+
+```
+analyzeHeadless work\ghidra\project Bloodborne -process eboot-1.09.ghidra.elf -noanalysis ^
+    -scriptPath tools\ghidra -postScript NameFromStrings.java work\ghidra\naming\eboot-1.09.tsv [dry]
+```
+
+It applies three rules, most certain first, and writes every decision (and every refusal) to the
+TSV. With `dry` it changes nothing.
+
+| Rule | How | Named in 1.09 |
+|---|---|---:|
+| **step** | In each function that references a step name, track `LEA reg,[addr]` followed by `MOV [abs],reg`. A step-name string stored at `X` with a function stored at `X−0x10` names that function `Class::STEP_Name`, in a namespace for the class | 742 functions (744 entries; two functions serve two steps each) |
+| **havok / scaleform** | A function referencing exactly **one** distinct profiler marker is named after it, minus the `Tt`/`Lt` prefix. With several markers the function is probably several functions inlined together, so it is left alone (4 such) | 74 + 18 functions |
+| **singleton** | For each assert, find its class-name argument, then the null check that guards it (below). Name the global `g_<Class>` | 109 globals |
+
+The singleton rule needed two corrections, both worth knowing for this kind of work:
+
+1. **Two headers, arguments in any order.** Engine code asserts from `FD4Singleton.h` and game
+   code from `FD4DerivedSingleton.h`. The class-name argument can be loaded before or after the
+   path string, so the rule searches a window around the path string up to the `CALL`.
+   Matching only `FD4DerivedSingleton.h` and searching forward found just 3 classes.
+2. **The null check is not just before the assert.** The compiler moves each assert into a cold,
+   out-of-line block, so the instruction physically before it belongs to unrelated code. Taking
+   "the nearest global read before the assert" gave one class name on ten different globals. The
+   rule now uses Ghidra's `BasicBlockModel`: it takes the block holding the assert, follows every
+   branch into it (and the conditional branch that falls through into it), and reads the global
+   loaded just before *that*. It also requires a clear majority (at least 2 votes and 90%) and
+   allows each class name on only one global. Result: 109 globals, every name unique; 30
+   ambiguous ones are logged and left unnamed.
+
+The singleton handler itself, called by all 5,659 asserts, becomes `FD4_SingletonAssert`. That
+name and the `g_` prefix are *descriptive*, chosen here; the step and marker names are *the
+binary's own*. Every name is applied with Ghidra's **analysis** source type, so a name a person
+sets later always wins. Each named item also gets a comment saying which rule named it and on
+what evidence (`[mensis:step] step table entry 05957960 written by FUN_0198d3d0`).
+
+The results agree with everything identified by hand earlier: `DAT_0593b118` → `g_SprjFile`,
+`FUN_024b55b0` → `FD4_SingletonAssert`, `FUN_016f2510` →
+`SprjEmkSystemUpdateTask::_STEP_Update`. The parameter loader now decompiles as:
+
+```c
+  if (g_SprjFile != (long *)0x0) {
+    pcVar1 = *(code **)(*g_SprjFile + 0x18);
+    FUN_02bc0e00(local_78, L"param:/GameParam/GameParam.parambnd");
+    ...
+      FD4_SingletonAssert("E:\\AB\\SPRJ\\...\\FD4DerivedSingleton.h", 0xaa, &DAT_04d3b3bd, "SprjFile");
+```
+
+**Numbers:** 835 functions and 109 globals named in 1.09 (834 and 109 in 1.00). That's under 1% of the
+functions, but the globals are the engine's managers (`g_WorldChrMan`, `g_FrpgNetMan`,
+`g_SprjEventFlagMan`, `g_SprjGaitem`, `g_CSMovie`, `g_LuaConsoleManager`, …), and between them
+they are null-checked at over 5,000 sites. Their names now show up in every function that uses a
+manager, and those uses are the starting point for naming the managers' methods.
+
 ## Where to go from here
 
 Ordered by payoff for effort:
 
-1. **Name from strings.** Asserts carry file, line and class names (`FD4DerivedSingleton.h`,
-   `"SprjFile"`), and ~16,600 UTF-16 strings hold paths and class names
-   (`SprjEmkSystemUpdateTask::FD4STEPTEMPLATEBASE_CHILD_CLASS`). A script that names a function
-   after the class string it references would name thousands of functions at once.
-2. **Name the hot helpers by hand.** The assert handler, the wide-string constructor
+1. **More rules for `NameFromStrings`.** The three rules in
+   [Naming from strings](#naming-from-strings) are a start. Other assert macros (the dantelion2
+   `SingletonLifetimePolicies.inl` ones, `DLReferenceCountObject`, container heap checks) and the
+   `THIS_CLASS` registrations (which tie a class name to its runtime class record) are the next
+   candidates.
+2. **Name the hot helpers by hand.** The wide-string constructor
    (`FUN_02bc0e00`), the heap allocators and the singleton getters are each called thousands of
    times.
 3. **Bring in Havok and FMOD.** Their code makes up much of the binary and their headers are
