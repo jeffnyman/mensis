@@ -34,3 +34,4 @@ address	kind	name	confidence	evidence
 00e73a60	function	HavokScript_PrintAssert	certain	rank 33: printf("Havok Script Assertion [r $build] 0x%08X failed: ...")
 05940670	global	g_DefaultHeap	likely	cache of Heap_GetDefault(), used by WString_FromCStr and others
 05940668	global	g_ContainerHeap	likely	cache of MemorySystem_Get() + 0x458, the allocator HeapContainer_Construct binds
+01ebd5b0	function	ChaliceGlyphEntry_OnInput	likely	the only user of the glyph alphabet L"23456789abcdefghijkmnpqrstuvwxyz" (04b349a0): menu items 100-107 are the 8 glyph slots (UTF-16 at +0x668), each cycled over the 32 letters; on confirm, if FrpgNetMan reports online, sends the 8 characters to the network lookup

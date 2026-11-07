@@ -501,7 +501,7 @@ evidence and a confidence level:
 | Confidence | Meaning | Count |
 |---|---|---:|
 | certain | the code does exactly this, or a source-file assert names it | 7 |
-| likely | the behaviour is clear; the exact name is ours | 18 |
+| likely | the behaviour is clear; the exact name is ours | 19 |
 | probable | attributing it to a particular library is an inference | 4 |
 
 ```
@@ -509,6 +509,9 @@ address   kind      name                   confidence  evidence
 0247b720  function  Heap_FindForPointer    likely      rank 1, 4,057 callers: given a pointer, checks ...
 02483fe0  function  PthreadMutex_InitRecursive  certain  rank 4: scePthreadMutexattrSettype(attr, 2 = recursive) ...
 ```
+
+(The list has grown since this reading: `ChaliceGlyphEntry_OnInput`, found while working out
+[Chalice Glyphs](the-chalice-dungeons.md#glyphs), was added later and applied to 1.09 only.)
 
 `ApplyNames.java <names.tsv>` applies a list as **user-defined** names, which outrank both
 analysis and `NameFromStrings`. Each item gets a comment like `[mensis:hand/likely] rank 1, …`,
@@ -567,5 +570,5 @@ Run `%GHIDRA_INSTALL_DIR%\ghidraRun.bat` with `JAVA_HOME` set as above, *File �
 Project…* `work\ghidra\project\Bloodborne.gpr`, and double-click `eboot-1.09.ghidra.elf`. Raise
 `MAXMEM` in `support\launch.properties` to about 16G first, because the defaults struggle with a
 program this size. The *PS4* script category in the Script Manager holds all the scripts in
-`tools/ghidra/`; `FindStringUses`, `Decompile` and `MostCalled` are the ones most useful for
-exploring by hand.
+`tools/ghidra/`; `FindStringUses`, `RefsTo`, `Decompile` and `MostCalled` are the ones most useful
+for exploring by hand.

@@ -94,8 +94,8 @@ python -I tools/c_diff.py <pairs> <old.tsv> <new.tsv> <old-c> <new-c> <out.md>  
 before analysis), `OrbisReport.java` (summary and landmark decompilations),
 `ExportFunctionHashes.java` (per-function hashes for `build_diff.py`), `NameFromStrings.java`
 (names from step tables, profiler markers and singleton asserts), `ApplyNames.java` (apply a
-hand-written name list), and, for exploring, `FindStringUses.java`, `MostCalled.java`,
-`Decompile.java` and `DeleteProjectFile.java`. `tools/names/` holds the hand-assigned names for
+hand-written name list), and, for exploring, `FindStringUses.java`, `RefsTo.java`,
+`MostCalled.java`, `Decompile.java` and `DeleteProjectFile.java`. `tools/names/` holds the hand-assigned names for
 each build, one per line with a confidence level and the evidence for it.
 
 **The data** (see [The data](docs/the-data.md))

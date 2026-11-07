@@ -180,10 +180,58 @@ hold each item ([where the items are](the-items.md#the-chalice-dungeons)). For e
 Uncanny Beast Claw is in 107 of the Ailing Loran Root Chalice's 200 layouts, and the plain Beast
 Claw only in the Ailing Loran story chalice.
 
+## Glyphs
+
+A **Chalice Glyph** is the short code players share to visit each other's dungeons. The menu
+text has "Search by Chalice Glyph" and "Enter Chalice Glyph", and two telling messages: *"Chalice
+Glyph cannot be used in offline mode"* and *"No dungeons found using the given Chalice Glyph."*
+The executable shows why.
+
+**What a glyph is.** The glyph alphabet is a UTF-16 string at `0x4b349a0`:
+`23456789abcdefghijkmnpqrstuvwxyz`, 32 characters with `0`, `1`, `l` and `o` left out so that no
+two can be mistaken for each other. It was found by searching the executable for alphabet-like
+strings. Ghidra hadn't typed it as a string, so finding its user took a raw-address reference
+search (`RefsTo.java`).
+
+**The entry screen.** Exactly one function uses that alphabet, `FUN_01ebd5b0`, now named
+`ChaliceGlyphEntry_OnInput`:
+
+```c
+    uVar9 = param_3 - 100;                    // menu items 100-107: the 8 glyph slots
+    if (uVar9 < 8) {
+      ... find the slot's current character in L"23456789abcdefghijkmnpqrstuvwxyz" ...
+      cVar6 = FUN_02dbe460(param_2, &local_fc, 0, 0x1f, 1, 0, 1);   // pick 0..31
+      if (cVar6 != ' ')
+        *(short *)(param_1 + 0x668 + uVar9 * 2) = alphabet[local_fc];
+  ...
+  if (param_3 == 2000 && confirmed) {
+      if (g_FrpgNetMan online, not busy, ...) {
+        FUN_01e9f050(param_1 + 0x528, param_1 + 0x668);            // send the 8 characters
+```
+
+So a glyph is **8 characters from a 32-letter alphabet** (40 bits' worth), and entering one sends
+the text to the network.
+
+**Where a dungeon keeps its state.** The ritual helper's set-up step
+(`CSDungeonRitualHelper::STEP_Exec_forSetupHolygrail`) saves each dungeon slot (0–6) into the
+save's event flags, using flag-manager helpers that store *data* rather than single flags: a
+32-bit value at flag 94000128 + slot × 100000, 16 bytes at 94000736 + …, and 48 bytes of a wide
+string at 94000992 + …. Sixteen bytes is exactly eight UTF-16 characters, the size of a glyph.
+The helper's other steps (`ExecGet` / `WaitUpload_forPresentOffering`,
+`…_forChangeShareLevel`, `Exec_forJoin`, `Exec_forQuickJoin`, `Exec_forRandomJoin`) show that
+creating, sharing and joining a dungeon are server operations.
+
+**What follows.** Nothing in the executable builds a glyph from dungeon data: the entry screen is
+the only code that touches the alphabet. Together with "cannot be used in offline mode", that
+points to glyphs being **assigned and resolved by the server**, not computed from the layout
+number on the console. If so, how a glyph encodes a dungeon can't be read from the game files
+at all.
+
 ## Not yet established
 
-* How a Root ritual picks its variation number, and how glyphs encode it, which would let a
-  glyph be looked up in the treasure counts.
+* How a Root ritual picks its variation number when a dungeon is created (glyphs, it turns out,
+  are resolved by the server, [above](#glyphs)), and what the 32-bit value saved per dungeon slot
+  holds.
 * What the Sinister Bell's feature (40) does in the event script, and what each kind of special
   enemy is.
 * How the `m29_0x` tile library relates to the pre-built layouts.
