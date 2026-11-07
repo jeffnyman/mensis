@@ -26,7 +26,9 @@ scripts, and map layouts.
 * [Where the items are](docs/the-items.md): every treasure, drop, event award and shop row, down
   to which badge unlocks the Chikage.
 * [The Chalice Dungeons](docs/the-chalice-dungeons.md): "random" Root Chalice dungeons are one of
-  100 or 200 layouts that ship with the game.
+  100 or 200 layouts that ship with the game, and [their event scripts](docs/the-chalice-events.md)
+  show what the rites do inside them: every variant is already placed, and the script removes
+  all but one.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -44,9 +46,12 @@ scripts, and map layouts.
 5. [Where the items are](docs/the-items.md): the readers joined into one answer.
 6. [The Chalice Dungeons](docs/the-chalice-dungeons.md): rituals, their 100 or 200 pre-built
    layouts, the rites, and the deeper chalices the tables define but the game doesn't contain.
-7. [What the 1.09 patch changed](docs/the-patch.md): every kind of replaced file, read and
+7. [The Chalice Dungeons' event scripts](docs/the-chalice-events.md): one template library run
+   by 2,641 layouts, the special enemies and characters, the bell-ringing women, and the bosses'
+   working names.
+8. [What the 1.09 patch changed](docs/the-patch.md): every kind of replaced file, read and
    explained.
-8. [The online boundary](docs/the-online-boundary.md): which features need a server, which server
+9. [The online boundary](docs/the-online-boundary.md): which features need a server, which server
    each uses, and what an emulator or replacement server faces.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
@@ -119,6 +124,7 @@ python -I tools/msb.py check|dump|diff <msb> …                       # map lay
 ```
 python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
 python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the Chalice Dungeon catalogue
+python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 ```
 
 ## Working files (`work/`, ~34 GiB, not source)

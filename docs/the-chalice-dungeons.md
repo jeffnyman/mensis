@@ -96,7 +96,7 @@ The optional rites are rows of `DungeonFeatureParam`, named from the menu table
 |---|---|---|
 | **Fetid Offering** | 11 | NPC rows **+2,000,000**: a placed enemy resolves to a different `NpcParam` row |
 | **Rotted Offering** | 20–29 | no offsets: sets an event flag the dungeon event script reacts to ([below](#what-rotted-offering-does)) |
-| **Sinister Bell** | 40 | sub-feature group 4 |
+| **Sinister Bell** | 40 | sets flag 92905340, which wakes the bell-ringing women placed in the Sinister chalices' layouts ([the event scripts](the-chalice-events.md#the-bell-ringing-women)) |
 | **Curse** | 70, 73 | gem generation **+1,000,000**, and an enemy-wide special effect (7150, 7160) |
 | (unnamed) | 71, 72 | gem generation +2,000,000, effects 7151, 7152 |
 
@@ -136,10 +136,10 @@ flags. Their names say what each variant does:
 
 | Feature | Placement 1 | Placement 2 |
 |---:|---|---|
-| 20 | `特殊生成敵` "specially spawned enemy" | |
-| 21 | `NPC敵` "NPC enemy" (a hostile hunter) | |
-| 22 | `周囲強化敵` "enemy that strengthens those around it" | |
-| 23 | `不死敵` "undying enemy" | |
+| 20 | `特殊生成敵` "specially spawned enemy" | specially spawned |
+| 21 | `NPC敵` "NPC enemy" (a hostile hunter) | NPC enemy |
+| 22 | `周囲強化敵` "enemy that strengthens those around it" | strengthening |
+| 23 | `不死敵` "undying enemy" | undying |
 | 24 | specially spawned | NPC enemy |
 | 25 | specially spawned | strengthening |
 | 26 | specially spawned | undying |
@@ -147,15 +147,19 @@ flags. Their names say what each variant does:
 | 28 | NPC enemy | undying |
 | 29 | strengthening | undying |
 
-Four kinds of special enemy, singly or in every possible pair: 4 + 6 = 10 variants. So a Rotted
-Offering adds one or two special enemies to the dungeon (event names
-`サブ特徴_特殊敵_1配置_…` / `_2配置_…`, "sub-feature: special enemy, placement 1 / 2").
+Four kinds of special enemy, singly or in every possible pair: 4 + 6 = 10 variants, across a
+layout's two special-enemy placements (event names `サブ特徴_特殊敵_1配置_…` / `_2配置_…`,
+"sub-feature: special enemy, placement 1 / 2"). *An earlier version of this table left placement
+2 empty for 20–23; the event templates show a single variant fills both placements.* What each
+kind is and does, and how the layouts carry every variant at once, is in
+[the Chalice Dungeons' event scripts](the-chalice-events.md#special-enemies-what-rotted-offering-adds).
 
 **The undying enemy can't be reached.** Across all 150 rows, the Rotted Offerings at the depths
 the game has (1–5) only ever pick 20, 21, 22, 24, 25 or 27. Every variant involving the undying
 enemy (23, 26, 28, 29) appears only in the rows for depths 6 and 7, the unused rituals below.
-The event script implements placing an undying enemy (events 12905013 and 12905119), but no
-ritual in the shipped game can select it.
+The undying groups are even placed in the layouts (the placement-1 template is started in
+1,069 of them), but no ritual in the shipped game can select them, so the event script removes
+every one when the dungeon loads.
 
 ### Other feature rows
 
@@ -201,7 +205,7 @@ search (`RefsTo.java`).
     if (uVar9 < 8) {
       ... find the slot's current character in L"23456789abcdefghijkmnpqrstuvwxyz" ...
       cVar6 = FUN_02dbe460(param_2, &local_fc, 0, 0x1f, 1, 0, 1);   // pick 0..31
-      if (cVar6 != ' ')
+      if (cVar6 != '\0')
         *(short *)(param_1 + 0x668 + uVar9 * 2) = alphabet[local_fc];
   ...
   if (param_3 == 2000 && confirmed) {
@@ -232,10 +236,11 @@ at all.
 * How a Root ritual picks its variation number when a dungeon is created (glyphs, it turns out,
   are resolved by the server, [above](#glyphs)), and what the 32-bit value saved per dungeon slot
   holds.
-* What the Sinister Bell's feature (40) does in the event script, and what each kind of special
-  enemy is.
 * How the `m29_0x` tile library relates to the pre-built layouts.
-* The m29 event script (428 events), which runs the dungeons' doors, levers and bosses.
+
+(The Sinister Bell's feature, the four kinds of special enemy and the m29 event script, open
+questions in earlier versions of this page, are answered in
+[the Chalice Dungeons' event scripts](the-chalice-events.md).)
 
 ## Files
 
