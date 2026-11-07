@@ -32,7 +32,8 @@ in the same spirit as *Confederation*, a sibling project, does for *Wing Command
   and table by table: developer tooling switched off, an SOS-sign limit read live, the balance
   changes (Boom Hammer, Whirligig Saw, Valtr, the DLC enemies, Blood Rock in the shop), and the
   event-script fixes (elevators, missing DLC, NPCs, bosses), the AI changes (NPC hunters on
-  ladders, Lady Maria), and the talk-script changes.
+  ladders, Lady Maria), the talk-script changes, and the map-layout changes that tie them
+  together.
 * [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
   params and text.
 
@@ -67,6 +68,7 @@ python -I tools/params.py check|dump|diff <parambnd> <paramdefbnd> …  # gamepl
 python -I tools/events.py check|dump|diff <emedf> <emevd> …           # event scripts, decoded
 python -I tools/lua50.py dis|diff <luabnd> …                            # AI scripts (Lua 5.0), disassembled
 python -I tools/esd.py check|dump|diff <talkesdbnd> …                   # talk scripts (ESD), decoded
+python -I tools/msb.py check|dump|diff <msb> …                          # map layouts (MSB)
 python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → Ghidra-ready
 pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
 python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
@@ -130,6 +132,8 @@ becomes useful.
 The PKG decryption in `tools/pkgtool.py` and the keys in `tools/pkgkeys.py` are ported from
 [shadPS4](https://github.com/shadps4-emu/shadPS4) v0.7.0, licensed GPL-2.0-or-later, which is
 used here under version 3. The NID name database the Ghidra pipeline downloads also comes from
-shadPS4 and is not part of this repository. `tools/esd.py` follows the ESD layout documented by
-[SoulsFormats](https://github.com/JKAnderson/SoulsFormats) and the expression bytecode documented
-by [ESDLang](https://github.com/thefifthmatt/ESDLang), both MIT-licensed.
+shadPS4 and is not part of this repository.
+
+`tools/esd.py` and `tools/msb.py` follow the ESD and MSB layouts documented by
+[SoulsFormats](https://github.com/JKAnderson/SoulsFormats), and `esd.py` the expression bytecode
+documented by [ESDLang](https://github.com/thefifthmatt/ESDLang), both MIT-licensed.

@@ -173,6 +173,16 @@ python -I tools/esd.py dump  <talkesdbnd> [name-filter] [--talk menu.msgbnd.dcx]
 python -I tools/esd.py diff  <old> <new> <out.md> [--talk menu.msgbnd.dcx]
 ```
 
+`tools/msb.py` reads the map layouts (`map/mapstudio/*.msb.dcx`): models, parts (with each
+enemy's NPC, think, talk and chara-init IDs), regions and map events (with each treasure's item
+lots):
+
+```
+python -I tools/msb.py check <msb ...>
+python -I tools/msb.py dump  <msb> [parts|enemies|regions|events|treasure|models]
+python -I tools/msb.py diff  <old> <new> <out.md>
+```
+
 For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
 tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4
 holds GNF-tiled data that has to be de-tiled before it becomes a viewable DDS.

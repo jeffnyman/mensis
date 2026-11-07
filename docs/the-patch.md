@@ -513,6 +513,52 @@ arguments 1.09 also changed. And 1730 is one of the NPC flags 1.09 added to the 
 closed once it has run its course. None of these scripts speak a line themselves, so their
 speakers can't be named from the text.
 
+## The map layouts
+
+The update replaces two map layouts (MSB): the Research Hall / Astral Clocktower (m35) and the
+Fishing Hamlet (m36). An MSB holds everything placed in a map: the models it uses, every part
+(map pieces, objects, enemies, collision), every region (points and volumes that scripts test)
+and every map event (treasure, generators, messages).
+
+### Reading them: `tools/msb.py`
+
+`msb.py` follows SoulsFormats' `MSBB`: a 16-byte `MSB ` header, then four lists (models, events,
+regions, parts). Enemies carry their `NpcParam`, `NpcThinkParam`, talk and chara-init IDs, so each
+placed enemy links to the tables and scripts already decoded. Treasure events link a corpse or
+chest to up to three `ItemLotParam` rows:
+
+```
+Enemy     c0000_0001  model c0000  pos (-199.98, -40.53, 209.78)  entity 2410700  npc 6060 think 1 talk 241313
+Treasure  Item_宝死体_100  treasure o240611_5400  lots [2410100]          (宝死体: "treasure corpse")
+```
+
+`msb.py check` reads all 24 map layouts (76,021 parts, 2,890 enemies, 1,058 treasure events,
+8,976 regions) and all 2,685 Chalice Dungeon layout pieces without a failure. One mistake was
+caught along the way. A region's entity ID is at the offset stored at `+0x48`; the offset at
+`+0x40` points to the shape data. Reading the wrong one gave "entity IDs" like 1,112,014,848,
+which is `0x42480000`, the float 50.0, a box's size.
+
+`msb.py diff` matches parts, regions and events by name (names are unique within a map).
+
+### What changed
+
+No part or event moved, appeared or disappeared. All changes are to **regions**, and every one
+ties into a script change already described above:
+
+| Map | Region | Change | Ties to |
+|---|---|---|---|
+| m35 | 3502905 `敵対：恋人NPC通常行動範囲` ("hostile: lover NPC's normal activity range") | **added** | `Koibito6620`'s AI now tests 3502905 |
+| m35 | 3502910, the same `_ギミック起動後` ("after the gimmick is activated") | **added** | ...and 3502910 |
+| m35 | 3502908 `敵対：恋人NPC守備範囲_ギミック起動後` ("defence range after the gimmick") | moved 2 m up (y 1596.06 → 1598.06) | the `柱上昇ギミック` ("rising pillar") event also changed |
+| m35 | 3502124 `祭壇エレベーター：ポリ劇PCワープ位置_ゲスト` ("altar elevator: cutscene warp position, guest") | **replaced by four candidates** 3502124–3502127, spaced 1.4–3.6 m apart | the elevator's first-run event now warps players to them by a random flag |
+| m36 | 3602941 `漁村の司祭　独り言範囲` ("Fishing Hamlet priest: monologue range") | moved 1.5 m (x −579.42 → −577.92) | |
+
+The lover NPC's fix is the clearest example in the patch of one change spanning formats. The
+AI script (Lua) learned to check two regions; the layout (MSB) added those regions and raised a
+third one after the pillar rises; and the event script (EMEVD) changed the pillar gimmick itself.
+The altar elevator is the same pattern: more guest warp points in the layout, and an event that
+spreads co-op guests across them instead of stacking them on one spot.
+
 ## Files
 
 | Path | |
