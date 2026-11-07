@@ -87,6 +87,22 @@ def main():
         out.append(f"| {fid} | {name} | {f['npcParamIdOffset'] or ''} | {f['gemGenParamIdOffset'] or ''} | "
                    f"{f['eneSpeffectId'] if f['eneSpeffectId'] > 0 else ''} | "
                    f"{f['gemDropCorrectParamId'] if f['gemDropCorrectParamId'] > 0 else ''} | {f['subFeatureGroupId']} |")
+    # Rite menus: DungeonSubFeatLotParam rows, id = depth*10000 + base*1000 + rite code. Each rite
+    # has its own material row (same id) and picks one feature by weight.
+    sub = w.rows("DungeonSubFeatLotParam")
+    out += ["", "## Rite menus", "",
+            "`DungeonSubFeatLotParam`: per depth and base, each rite's cost and the features it picks "
+            "(feature: weight %). Depths 6–7 belong to the unused rituals above.", "",
+            "| Row | Depth | Base | Rite | Cost | Picks |", "|---:|---:|---|---|---|---|"]
+    for sid, s in sorted(sub.items()):
+        name = sp.get(s["subFeatureNameId"], "")
+        if not name or sid >= 1000000:
+            continue
+        m = mats.get(s["requiredMaterialId"])
+        cost = "; ".join(f"{goods.get(m[f'materialItemId_{k}'], m[f'materialItemId_{k}']).strip()} ×{m[f'num_{k}']}"
+                         for k in range(1, 6) if m and m[f"materialItemId_{k}"] > 0)
+        picks = ", ".join(f"{s[f'subFeatureId_{i}']}: {s[f'rate_{i}']:g}" for i in range(1, 11) if s[f"rate_{i}"] > 0)
+        out.append(f"| {sid} | {sid // 10000} | {BASES.get((sid // 1000) % 10, '?')} | {name} | {cost} | {picks} |")
     with open(sys.argv[3], "w", encoding="utf-8") as fo:
         fo.write("\n".join(out) + "\n")
     print("\n".join(out[:6]))

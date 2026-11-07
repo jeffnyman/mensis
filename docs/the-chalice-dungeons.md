@@ -95,7 +95,7 @@ The optional rites are rows of `DungeonFeatureParam`, named from the menu table
 | Rite | Feature rows | Mechanism |
 |---|---|---|
 | **Fetid Offering** | 11 | NPC rows **+2,000,000**: a placed enemy resolves to a different `NpcParam` row |
-| **Rotted Offering** | 20–29 | no offsets; works through sub-feature group 2 (`DungeonSubFeatLotParam`) |
+| **Rotted Offering** | 20–29 | no offsets: sets an event flag the dungeon event script reacts to ([below](#what-rotted-offering-does)) |
 | **Sinister Bell** | 40 | sub-feature group 4 |
 | **Curse** | 70, 73 | gem generation **+1,000,000**, and an enemy-wide special effect (7150, 7160) |
 | (unnamed) | 71, 72 | gem generation +2,000,000, effects 7151, 7152 |
@@ -109,6 +109,55 @@ Checked against the data:
   gem tables, and the menu's gem-name table (`魔石名`) names gems such as "Cursed Tempering Blood
   Gemstone (1)" from 1,100,000 up. Effect 7150 sets enemies' attack-power rates to ×0.9 and their
   echoes to ×1.2 (`haveSoulRate`); 7151 gives echoes ×1.4.
+
+### Rite menus and costs
+
+The rites offered for a chalice are rows of `DungeonSubFeatLotParam`, numbered depth × 10000 +
+base × 1000 + rite (010 Fetid, 020 Rotted, 070 Curse, 240 Sinister). Each has its own row in
+`RitualRequiredMatParam`, its cost, and picks a feature by weight:
+
+| Row | Rite | Cost | Picks |
+|---:|---|---|---|
+| 30010 | Fetid Offering (depth 3, Pthumeru) | Sage's Wrist ×4 | feature 11 |
+| 30020 | Rotted Offering (depth 3, Pthumeru) | Inflicted Organ ×3 | 20, 21, 22, 24, 25, 27 (16–17% each) |
+| 30240 | Sinister Bell (depth 3, Pthumeru) | Arcane Haze ×19 | feature 40 |
+| 40170 | Curse (depth 4, Pthumeru) | Bastard of Loran ×3 | feature 73 |
+
+(All rows are in `work/chalice/chalice-1.09.md`.) The costs are the ones players know: Sage's
+Wrist (Sage's Hair from depth 4) for Fetid, Inflicted Organ for Rotted, Bastard of Loran for
+Curse, Arcane Haze for Sinister.
+
+### What Rotted Offering does
+
+Features 20–29 change no offsets. Instead each has `eventflagId`, displayed as
+`イベントフラグID下２桁` ("event flag ID, lower two digits"): feature *N* sets flag
+**929053*N***, and the dungeon event script (`m29.emevd`) has sub-feature events that test those
+flags. Their names say what each variant does:
+
+| Feature | Placement 1 | Placement 2 |
+|---:|---|---|
+| 20 | `特殊生成敵` "specially spawned enemy" | |
+| 21 | `NPC敵` "NPC enemy" (a hostile hunter) | |
+| 22 | `周囲強化敵` "enemy that strengthens those around it" | |
+| 23 | `不死敵` "undying enemy" | |
+| 24 | specially spawned | NPC enemy |
+| 25 | specially spawned | strengthening |
+| 26 | specially spawned | undying |
+| 27 | NPC enemy | strengthening |
+| 28 | NPC enemy | undying |
+| 29 | strengthening | undying |
+
+Four kinds of special enemy, singly or in every possible pair: 4 + 6 = 10 variants. So a Rotted
+Offering adds one or two special enemies to the dungeon (event names
+`サブ特徴_特殊敵_1配置_…` / `_2配置_…`, "sub-feature: special enemy, placement 1 / 2").
+
+**The undying enemy can't be reached.** Across all 150 rows, the Rotted Offerings at the depths
+the game has (1–5) only ever pick 20, 21, 22, 24, 25 or 27. Every variant involving the undying
+enemy (23, 26, 28, 29) appears only in the rows for depths 6 and 7, the unused rituals below.
+The event script implements placing an undying enemy (events 12905013 and 12905119), but no
+ritual in the shipped game can select it.
+
+### Other feature rows
 
 Other feature rows carry only a gem-drop correction (`gemDropCorrectParamId` 1011–1045, by depth)
 or a sub-feature group, and several are named `消すべからず` ("do not delete"), placeholder rows.
@@ -127,8 +176,8 @@ Pthumeru Root Chalice's costs. Their purpose isn't evident from the data.
 ## Not yet established
 
 * How a Root ritual picks its variation number, and how glyphs encode it.
-* What the sub-features (`DungeonSubFeatLotParam`, 150 rows with rates) add, Rotted and
-  Sinister in particular.
+* What the Sinister Bell's feature (40) does in the event script, and what each kind of special
+  enemy is.
 * How the `m29_0x` tile library relates to the pre-built layouts.
 * The Chalice Dungeon treasure: the 100/200 layouts each place their own treasure, which the item
   index ([where the items are](the-items.md)) doesn't cover yet.
@@ -138,4 +187,4 @@ Pthumeru Root Chalice's costs. Their purpose isn't evident from the data.
 
 | Path | |
 |---|---|
-| `work/chalice/chalice-1.09.md` | every ritual with its depth, base, name, variations, layout folders and costs; the unused rituals; the rites |
+| `work/chalice/chalice-1.09.md` | every ritual with its depth, base, name, variations, layout folders and costs; the unused rituals; the rites; every rite menu with its cost and weights |
