@@ -1,8 +1,10 @@
 # Where the items are
 
-The first topic of the data track: where every item in Bloodborne comes from, worked out
-entirely from the game's own files. Nothing here uses a wiki or a guide. Every link in the
-chain below is read from the data, and the result can be checked against what players know.
+Where every item in Bloodborne comes from (treasure, enemy drops, event scripts and shops),
+worked out entirely from the game's own files. Nothing here uses a wiki or a guide. Every link in
+the chain below is read from the data, and the result can be checked against what players know.
+It is also the first use of the data readers together: map layouts, gameplay tables, event
+scripts and text, joined into one answer.
 
 ## The chain
 

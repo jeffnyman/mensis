@@ -69,7 +69,7 @@ Assert strings and `__FILE__` paths left in the binary give a clear picture of t
 | Layer | Evidence |
 |---|---|
 | **dantelion2** (`DL*` classes): FromSoftware's core library for heaps, containers, reflection, threads | `…/Include/dantelion2/Core/Kernel/DLBiHeapStrategy.inl`, `N:/FD4/Library/dantelion2_sprj/` |
-| **FD4**: FromSoftware's game engine, the generation shared by Dark Souls II/III | `N:/FD4/GameEngine/Source/…`, `FD4*` and `*::FD4STEPTEMPLATEBASE_CHILD_CLASS` step/task types |
+| **FD4**: FromSoftware's game engine (the same lineage as Dark Souls III) | `N:/FD4/GameEngine/Source/…`, `FD4*` and `*::FD4STEPTEMPLATEBASE_CHILD_CLASS` step/task types |
 | **GS / GraphicsFramework**: FromSoftware's renderer (`GX*` shaders) | `N:/GS/Source/GraphicsFramework/`, `shader/gx*.shaderbnd.dcx` |
 | **Game code** (`CS*`, `Sprj*`, `Frpg*`) | 263 `Sprj*`, 174 `Frpg*`, 45 `CS*` class-name strings. `Frpg` ("FromSoftware RPG") is the Dark Souls lineage |
 | **Havok 2014.1.0**: Physics2012 + hknp, Animation, Behavior, AI pathfinding, Cloth, **Havok Script** | `N:/HavokCompleteClient3/SDK_LocalRelease/SP/Havok_2014_1_0/hk2014_1_0_r1/…` |
@@ -80,24 +80,23 @@ Assert strings and `__FILE__` paths left in the binary give a clear picture of t
 
 ## Decompiling it
 
-This has now been done for 1.09; [Loading it into Ghidra](ghidra.md) gives the procedure and results.
+It is feasible, and has been done for both builds: [loading it into Ghidra](ghidra.md) gives the
+procedure and results. The obstacles were size and missing names, not protection:
 
-It is feasible. The obstacles are size and missing names, not protection:
-
-* **Loading.** The rebuilt ELF loads in Ghidra or IDA as x86-64. A PS4 loader (for Ghidra, e.g.
-  the *GhidraOrbis* family) parses `PT_SCE_DYNLIBDATA` and applies the NID names so imports show
-  as `sceGnmSubmitCommandBuffers` and not `ZG+ghi…`. `tools/` already has the NID hash, so a small
-  Ghidra script could do the same.
-* **Size.** About 160k functions in 81 MiB of LTO-inlined code. Expect hours for the first
-  auto-analysis, and treat it as a project, not a weekend.
-* **Names.** There are no symbols and almost no RTTI. The anchors are the thousands of class-name
-  strings (`CSDungeonRitualHelper::THIS_CLASS`, …), assert strings with file and line, Havok's
-  class-reflection tables, the system imports, and the community knowledge of the same engine in
-  Dark Souls III and Sekiro, whose PC builds are much better mapped.
-* **Two builds.** Both 1.00 and 1.09 are in `work/elf/`, so diffing them shows what the balance
-  patch touched in code, not only in params.
+* **Loading.** The rebuilt ELF needs four fixes before a stock Ghidra makes sense of it: an
+  ordinary ELF type, a non-zero base address, the relocations Sony keeps in its own tables, and
+  names for the NID-hashed imports. `tools/orbis_prep.py` and `ApplyOrbisSymbols.java` do these,
+  and also feed Ghidra the exact function starts from `.eh_frame_hdr`.
+* **Size.** About 160k functions in 81 MiB of LTO-inlined code. Auto-analysis took 24 minutes per
+  build on a 16-thread machine with a 20 GB heap.
+* **Names.** There are no symbols and almost no RTTI. Names come from the strings the engine
+  leaves behind: step tables (`MapRes::STEP_Init`), profiler markers, singleton asserts
+  (`g_WorldChrMan`), and hand-reading of the most-called helpers. Each name carries its evidence.
+* **Two builds.** Comparing 1.00 with 1.09 function by function found about a hundred changed
+  functions, mostly developer tooling switched off and online fixes. The balance changes turned
+  out to be in the data, not the code ([what the 1.09 patch changed](the-patch.md)).
 
 Much of the *game logic* is not in the executable at all. It is data the engine interprets: the
 params, the EMEVD event scripts, the Lua AI, the ESD state machines and the HKS action scripts
 (see [the data](the-data.md)). For understanding how Bloodborne plays, those are the cheaper place
-to start.
+to start, and all but the HKS scripts now have readers in `tools/`.

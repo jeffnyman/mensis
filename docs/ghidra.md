@@ -154,9 +154,11 @@ Most of the analysis time goes to a few analyzers: *Non-Returning Functions – 
 Without the `.eh_frame_hdr` function list and the pre-applied relocations, analysis is slower and
 finds fewer, worse-bounded functions.
 
-**Final program:** 167,054 functions, of which 8,603 are thunks (the 661 PLT trampolines plus
-small `jmp` wrappers inside the game). Only 690 have real names: the imports and the entry point.
-**157,761 are still `FUN_xxxxxxxx`**, and naming them is the real reverse-engineering work.
+**The program after analysis:** 167,054 functions, of which 8,603 are thunks (the 661 PLT
+trampolines plus small `jmp` wrappers inside the game). At this point only 690 have real names:
+the imports and the entry point. **157,761 are still `FUN_xxxxxxxx`**, and naming them is the real
+reverse-engineering work ([naming from strings](#naming-from-strings) and
+[by hand](#naming-the-hot-helpers-by-hand), below).
 
 The most-called system functions show what the code is like: `__stack_chk_fail` (35,054
 functions, so stack protection is on everywhere), `operator delete`/`new` (6,407 and 2,296),
@@ -316,8 +318,11 @@ singleton asserts) show where the changes are:
   gem lists (`forWepList`, `forGemList`, `?GemName?`), and save-slot text (`SLOT%d:`).
 * **World and events:** `WorldChrMan`, `SprjEventMan`/`SprjLuaEventMan`, `SprjEventFlagMan` with
   `CSDlc`/`CSPlaygo`, a new `SprjBulletIns` function, and the hit-box `Weapon&Body` helper.
-* **Engine internals:** a dantelion2 linear-heap check (`DLLinearHeap::FreeUntil()` grows from 117
-  to 469 bytes) and the system texture/shader loader.
+* **Graphics:** a graphics object's constructor grows from 117 to 469 bytes. Its
+  `DLLinearHeap::FreeUntil()` assert string first suggested a heap change, but reading the code
+  showed it now builds a default scale buffer and inlines the temporary-heap code that the assert
+  belongs to ([the patch](the-patch.md#3-graphics-a-default-scale-buffer)). The system
+  texture/shader loader also changed.
 
 The 34 constant-only changes are mostly in third-party code at addresses that did not move
 (`/libexec/ld-elf.so.1` and PCRE-style option strings appear among them). They look like
@@ -402,8 +407,8 @@ The singleton rule needed two corrections, both worth knowing for this kind of w
 
 The handler, called by all 5,659 asserts, becomes `AssertFailed`. (It was first named
 `FD4_SingletonAssert`; [hand-naming](#naming-the-hot-helpers-by-hand) showed it is the engine-wide
-assert handler, used by lock, mutex and heap code too.) That name and the `g_` prefix are *descriptive*, chosen here; the step and marker names are *the
-binary's own*. Every name is applied with Ghidra's **analysis** source type, so a name a person
+assert handler, used by lock, mutex and heap code too.) That name and the `g_` prefix are
+*descriptive*, chosen here; the step and marker names are *the binary's own*. Every name is applied with Ghidra's **analysis** source type, so a name a person
 sets later always wins. Each named item also gets a comment saying which rule named it and on
 what evidence (`[mensis:step] step table entry 05957960 written by FUN_0198d3d0`).
 
@@ -419,8 +424,8 @@ The results agree with everything identified by hand earlier: `DAT_0593b118` →
       AssertFailed("E:\\AB\\SPRJ\\...\\FD4DerivedSingleton.h", 0xaa, &DAT_04d3b3bd, "SprjFile");
 ```
 
-**Numbers:** 835 functions and 109 globals named in 1.09 (834 and 109 in 1.00). That's under 1% of the
-functions, but the globals are the engine's managers (`g_WorldChrMan`, `g_FrpgNetMan`,
+**Numbers:** 835 functions and 109 globals named in 1.09 (834 and 109 in 1.00). That's under 1%
+of the functions, but the globals are the engine's managers (`g_WorldChrMan`, `g_FrpgNetMan`,
 `g_SprjEventFlagMan`, `g_SprjGaitem`, `g_CSMovie`, `g_LuaConsoleManager`, …), and between them
 they are null-checked at over 5,000 sites. Their names now show up in every function that uses a
 manager, and those uses are the starting point for naming the managers' methods.
@@ -459,8 +464,8 @@ heap)`, then an object built in the result) show it is an aligned allocation.
 
 Reading the top 40 gave names to 25 of them. Two more functions were named along the way
 (`WString_FromCStr`, and `AssertFailed`, below), plus two globals. The other 15 are clear as code
-but nothing says *what* they are, so they stay unnamed rather than get invented names. The named ones fall into a
-few families:
+but nothing says *what* they are, so they stay unnamed rather than get invented names. The named
+ones fall into a few families:
 
 * **Memory.** The engine's heaps (dantelion2's). `Heap_FindForPointer` (#1, 4,057 callers) is
   the core of every free: it takes a pointer and checks the thread's temporary heap range, then
@@ -561,4 +566,6 @@ Ordered by payoff for effort:
 Run `%GHIDRA_INSTALL_DIR%\ghidraRun.bat` with `JAVA_HOME` set as above, *File → Open
 Project…* `work\ghidra\project\Bloodborne.gpr`, and double-click `eboot-1.09.ghidra.elf`. Raise
 `MAXMEM` in `support\launch.properties` to about 16G first, because the defaults struggle with a
-program this size. The *PS4* script category holds `ApplyOrbisSymbols` and `OrbisReport`.
+program this size. The *PS4* script category in the Script Manager holds all the scripts in
+`tools/ghidra/`; `FindStringUses`, `Decompile` and `MostCalled` are the ones most useful for
+exploring by hand.

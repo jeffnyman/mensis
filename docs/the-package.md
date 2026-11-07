@@ -15,7 +15,7 @@ What is inside `Bloodborne.Game.of.the.Year.Edition.PS4-PRELUDE.pkg`, and how
 | Inner filesystem | 28,808 files, 29.3 GiB | 405 files, 167 MiB |
 | `PUBTOOLINFO` | `c_date=20181010, sdk_ver=02000000` | `c_date=20181010` |
 
-The *Game of the Year* disc is a full re-master of the game with *The Old Hunters* already in it:
+The *Game of the Year* edition is the game with *The Old Hunters* already in it:
 areas m33–m36 (Nightmare Frontier, Hunter's Nightmare, Research Hall, Fishing Hamlet) are in the
 base package itself, not a separate add-on. `SYSTEM_VER` is 4.50, matching the scene NFO.
 
@@ -86,13 +86,16 @@ tree, lay `work/update/` over `work/base/`. It replaces:
 * `eboot.bin` (the whole executable, 89.5 MiB)
 * `gameparam.parambnd.dcx` (balance: "Improved game balance" in `changeinfo.xml`)
 * 268 `map/entryfilelist/*` and 26 `map/breakobj/*` files
-* event scripts (`*.emevd.dcx`, `*.emeld.dcx`) for ten maps, AI Lua for seven maps, talk scripts
-  for three
+* event scripts (`*.emevd.dcx`, `*.emeld.dcx`): the common script and nine maps; AI Lua for seven
+  maps; talk scripts for three
+* the map layouts (`*.msb.dcx`) of the Research Hall (m35) and the Fishing Hamlet (m36)
 * a handful of models, animation banks, navmeshes, cutscenes (`remo`) and sounds, mostly in the
   DLC areas
 * `msg/*/` for every language
 
-`changeinfo/` keeps release notes back to 1.07 ("Various bug fixes") in 18 languages.
+`changeinfo/` keeps release notes back to 1.07 ("Various bug fixes"): 16 files, one per
+language. What the replaced files actually change, function by function and table by table, is
+in [what the 1.09 patch changed](the-patch.md).
 
 ## Using the tool
 

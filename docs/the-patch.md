@@ -1,12 +1,33 @@
-# What the 1.09 patch changed in the code
+# What the 1.09 patch changed
 
 The update package replaces `eboot.bin` along with a few hundred data files
-([the package](the-package.md#the-update-is-file-replacement)). This page covers the code side:
-which functions the patch changed, what can be read from the changes, and how that was worked
-out. Every step uses tools from this repository, so it doubles as a worked example of the whole
-pipeline.
+([the package](the-package.md#the-update-is-file-replacement)). This page reads every kind of
+replaced file, the executable, the gameplay tables, the event, AI and talk scripts and the map
+layouts, and says what changed and how that was worked out. Every step uses tools from this
+repository, so it doubles as a worked example of the whole pipeline.
 
-## Method
+## In short
+
+* **Developer tooling switched off.** 1.00 shipped with a Lua console that could redirect AI
+  scripts to the developers' own script tree and open a connection on port 30000, plus a
+  remote-debugging step. 1.09 removes both ([code](#1-developer-remote-tooling-switched-off)).
+* **Balance**, all in the tables, none in the code: the Boom Hammer is cheaper to use, three
+  Whirligig Saw attacks are toned down, Valtr takes more damage, several Old Hunters enemies are
+  adjusted, and Blood Rock can be bought ([tables](#the-balance-changes-in-the-data-not-the-code)).
+* **Fixes in the event scripts:** elevators that keep their position, a safe exit for saves
+  left in the DLC areas without the DLC, NPC and boss behaviour ([events](#the-event-scripts)).
+* **NPC hunters on ladders** and Lady Maria's phase tracking in the AI ([AI](#the-ai-scripts)),
+  a dialogue held back during the NPC assassin's sequence ([talk](#the-talk-scripts)), and new
+  regions in the Research Hall's layout that tie an AI fix, a layout change and an event change
+  together ([layouts](#the-map-layouts)).
+* **Online play:** the SOS-sign request limit is read live, and several co-op and session
+  functions changed ([code](#2-sos-sign-requests-a-limit-read-live)).
+
+Of the executable's 158,451 functions, 99.6% are unchanged.
+
+## The code
+
+### Method
 
 1. **Both executables in Ghidra.** `analyze.ps1` on `work/base/eboot.bin` (1.00) and
    `work/update/eboot.bin` (1.09). See [Loading it into Ghidra](ghidra.md).
@@ -32,7 +53,7 @@ python -I tools/c_diff.py work/ghidra/diff/pairs-1.00-to-1.09.tsv work/ghidra/di
 (The output directory ends in `/`, not `\`: through `cmd.exe`, a trailing backslash escapes the
 closing quote.)
 
-### Normalising decompiled C
+#### Normalising decompiled C
 
 Two decompilations of the same function from different builds differ in many ways that mean
 nothing, and `c_diff.py` removes each of them before diffing:
@@ -54,7 +75,7 @@ What normalisation can't remove is worth knowing too, because it shows up in the
   function in 1.00, so Ghidra displayed the number as a function pointer there and not in 1.09.
   Most of the 2-line "constants" diffs are this.
 
-## Scale
+### Scale
 
 | | Functions |
 |---|---:|
@@ -69,9 +90,9 @@ SIMD temporaries, four of them copies of one template. They can't be read meanin
 graphics framework itself is named, so they are listed but not interpreted here. The rest are
 smaller, and the strings and named managers they touch make them readable.
 
-## Findings
+### Findings
 
-### 1. Developer remote tooling switched off
+#### 1. Developer remote tooling switched off
 
 The clearest change in the patch. 1.00 shipped with developer hooks that a system property
 could turn on. 1.09 removed them.
@@ -127,7 +148,7 @@ removed outright.
 *What this doesn't show:* whether these hooks could be enabled on a retail console. Both
 depend on system properties whose source on a retail system hasn't been examined.
 
-### 2. SOS-sign requests: a limit read live
+#### 2. SOS-sign requests: a limit read live
 
 SOS signs are the summon signs for co-op. `CSRequestGetSosStep` is the step-machine class that
 fetches them. In 1.00 its `STEP_Init` read a limit once, from the network client manager's
@@ -149,7 +170,7 @@ So a change to the network configuration now takes effect immediately, not at th
 init. Two of the smallest diffs belong to the same change: both remove the `+0x128` field from a
 table that registers the object's fields (`FUN_02d85480(…, param_1 + 0x128)`).
 
-### 3. Graphics: a default scale buffer
+#### 3. Graphics: a default scale buffer
 
 `SprjGraphicsStep::STEP_Prepare_forSystem` creates an object (0x38 bytes in 1.00, 0x40 in 1.09)
 whose 1.09 constructor allocates a 16-byte block holding four `1.0f` and hands it to
@@ -157,13 +178,13 @@ whose 1.09 constructor allocates a 16-byte block holding four `1.0f` and hands i
 build its `gxgi_dummy_lightMap_HDR_scale` constant. So 1.09 appears to give this graphics object
 its own default scale of 1.0, though what it scales hasn't been traced.
 
-### 4. Debug menu: blood gem names
+#### 4. Debug menu: blood gem names
 
 The function that builds the debug menu's blood gem lists (`forGemList`, `gem%d_%d`) now looks up
 each gem's name in the message repository, with `?GemName?` as the fallback. That's developer
 tooling, not gameplay.
 
-### 5. Online play, items, events
+#### 5. Online play, items, events
 
 Further changes sit in functions that use `FrpgNetMan`, `SprjNetworkClientMan`,
 `CSMultiPlayMan`, `CSPlatformNetworkMan`, `SprjSessionManager`, `SprjGaitem`,
@@ -259,14 +280,12 @@ slots went from `0` ("effect 0") to `-1` ("none"). That's data hygiene, not bala
 object row added, an NPC's type and team changed (6620), another's team changed (455000), and an
 unnamed weapon row (38090000) given a different model.
 
-The parameters are about a quarter of what the update replaced. Event scripts for ten maps, AI
-Lua for seven, talk scripts for three, and the DLC areas' navmeshes and map layouts change too
-([the package](the-package.md#the-update-is-file-replacement)). Those are the next data diffs to
-make readable.
+The tables are one of several kinds of replaced data; the event scripts, AI, talk scripts and map
+layouts follow.
 
 ## The event scripts
 
-The update also replaces the event scripts (EMEVD) of ten maps. Events are small programs the
+The update also replaces the event scripts (EMEVD) of nine maps and the common script. Events are small programs the
 maps run: wait for a condition (a flag, the player in a region, a boss dead), then act (open a
 door, play a cutscene, set a flag, warp the player).
 
@@ -308,7 +327,7 @@ python -I tools/events.py diff work/base/dvdroot_ps4/event/common.emedf.dcx \
 |---|---:|---:|---|
 | common | 82 | 4 | |
 | m21 Hunter's Dream | 105 | 5 | |
-| m24_01 (Cathedral Ward area) | 250 | 3 | |
+| m24_01 Central Yharnam | 250 | 3 | |
 | m27 Forbidden Woods | 115 | 1 | 1 / 1 (a replacement) |
 | m28 Yahar'gul | 101 | 2 | |
 | m29 Chalice Dungeons | 428 | 1 | |
@@ -567,8 +586,16 @@ spreads co-op guests across them instead of stacking them on one spot.
 
 ## Files
 
+All generated under `work/` (not in the repository):
+
 | Path | |
 |---|---|
+| `work/ghidra/diff/diff-1.00-to-1.09.md` | the function-level build diff (buckets, sizes, strings) |
 | `work/ghidra/diff/pairs-1.00-to-1.09.tsv` | every non-identical pairing: bucket, old address, new address |
 | `work/ghidra/diff/c-1.00/`, `c-1.09/` | one decompiled `.c` per changed function |
-| `work/ghidra/diff/c-diff-1.00-to-1.09.md` | the normalised diffs, largest first |
+| `work/ghidra/diff/c-diff-1.00-to-1.09.md` | the normalised decompiled diffs, largest first |
+| `work/params/gameparam-1.00-to-1.09.md` | every changed table row and field |
+| `work/events/<map>.md` | event-script diffs per map |
+| `work/ai/<map>.md` | AI-script diffs per map |
+| `work/talk/<map>.md` | talk-script diffs per map |
+| `work/msb/<map>.md` | map-layout diffs |

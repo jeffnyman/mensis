@@ -44,7 +44,8 @@ Counts are files on disk. "In" means what a DCX holds once decompressed.
 | **TPF** | `TPF\0`, platform byte 4 | 1,131 + in bnds | texture packs. PS4 platform, so GNF-tiled texture data, not DDS |
 | **MSB** | `MSB ` | 2,709 | map layout: parts, enemies, regions, events. m29 has hundreds (Chalice Dungeon pieces) |
 | **NVMA / NVM / ONAV** | `NVMA` | 2,701 | navmesh |
-| **EMEVD / EMELD** | `EVD\0` / `ELD\0` | 2,668 each | event scripts (bytecode-like instruction lists) and their labels |
+| **EMEVD / EMELD** | `EVD\0` / `ELD\0` | 2,668 each | event scripts (bytecode-like instruction lists) and their event names |
+| **EMEDF** | `EDF` + NUL | 1 | the event instruction set itself: 25 classes, 287 instructions, Japanese names, typed arguments (`event/common.emedf.dcx`) |
 | **PARAM** | | 65 in gameparam | gameplay tables (below) |
 | **FMG** | | in msgbnds | UTF-16 string tables, named in Japanese (`武器名` weapon names, `地名` place names, …) |
 | **ESD** | `fsSL` | 20 bnds + 2 | NPC dialogue/menu state machines (`enemycommon.esd`, `c0000.esd`) |
@@ -58,6 +59,10 @@ Counts are files on disk. "In" means what a DCX holds once decompressed.
 | GPARAM | | 86 | per-area graphics parameters (UTF-16 field names) |
 | `entryfilelist` | `ENFL` | 268 | which files a map/character pulls in (loading lists) |
 | `breakobj`, `btab`/`btl`/`btpb`, `bhdrinfo` | | | breakable objects, baked lighting (atlas, lights, probes) |
+
+Formats with a reader in `tools/`: DCX, BND4 and FMG (`souls.py`), PARAM (`params.py`),
+EMEVD/EMELD/EMEDF (`events.py`), AI Lua (`lua50.py`), ESD (`esd.py`) and MSB (`msb.py`); see
+[Tools](#tools) below. HKS, FLVER, TPF, HKX, TAE and the sound formats have none here.
 
 ## Maps
 
@@ -74,7 +79,7 @@ numbering:
 | m26 | Nightmare of Mensis |
 | m27 | Forbidden Woods |
 | m28 | Yahar'gul, Unseen Village |
-| m29 | **Chalice Dungeons**: 80+ `m29_XX_YY_00` blocks, assembled at run time |
+| m29 | **Chalice Dungeons**: 80+ `m29_XX_YY_00` map blocks and 2,685 layout files (`map/mapstudio/m29_*/`), each a near-complete copy of a dungeon layout template |
 | m32 | Byrgenwerth / Lecture Building / Moonside Lake |
 | m33–m36 | *The Old Hunters*: Nightmare Frontier, Hunter's Nightmare, Research Hall, Fishing Hamlet |
 
@@ -109,8 +114,10 @@ The largest:
 Bloodborne-specific systems show up as their own tables: `DungeonFeatureParam`,
 `DungeonSubFeatLotParam`, `RitualRequiredMatParam`, `HolygrailExParam` (Chalice Dungeons),
 `GemCategoryParam`, `GemDropDopingParam` (blood gems), and `QwcChange`/`QwcJudge` (the world
-tendency system inherited from Demon's Souls). Row layouts are in `paramdef/paramdefbnd.dcx`; the
-community's Bloodborne paramdefs (Paramdex) name the fields.
+tendency system inherited from Demon's Souls; Bloodborne reuses a `qwcId` field in the shop table
+for unlock flags, see [where the items are](the-items.md#unlock-flags)). Row layouts, with every
+field's internal name and Japanese display name, are in the game's own
+`paramdef/paramdef.paramdefbnd.dcx`, which is what `tools/params.py` decodes them with.
 
 ## Text
 
@@ -182,6 +189,9 @@ python -I tools/msb.py check <msb ...>
 python -I tools/msb.py dump  <msb> [parts|enemies|regions|events|treasure|models]
 python -I tools/msb.py diff  <old> <new> <out.md>
 ```
+
+`tools/items.py` joins these readers to answer where every item comes from (treasure, enemy
+drops, event awards, shops); see [where the items are](the-items.md).
 
 For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
 tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4

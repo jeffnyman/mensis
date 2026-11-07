@@ -3,41 +3,45 @@
 Taking apart the PS4 *Bloodborne: Game of the Year Edition* (CUSA03173, EU) to see how it is built,
 in the same spirit as *Confederation*, a sibling project, does for *Wing Commander*.
 
-## Short answer
+## What's here
 
-**Yes, it can be opened all the way down.**
+**The package opens all the way down.** It is a *fake* (homebrew re-signed) PKG, so its keys are
+public: `tools/pkgtool.py` decrypts it and produces the game's real filesystem, 28,808 files and
+29.3 GiB.
 
-* The PKG is a *fake* (homebrew re-signed) package, so its encryption keys are public. The
-  extractor in `tools/` decrypts it and produces the game's real filesystem: 28,808 files,
-  29.3 GiB.
-* The executable is a *fake* SELF with plaintext segments. It converts back to an ordinary
-  x86-64 ELF that Ghidra or IDA can load, and all 701 of its system imports resolve to names.
-  Decompiling it is possible but large: about 160k functions in an 81 MiB link-time-optimised
-  build with no symbols.
-* The data is FromSoftware's well-documented Souls formats, stored as loose zlib-compressed files.
-  Gameplay numbers, text, event scripts, AI (Lua 5.0) and action scripts (Havok Script) are all
-  readable without touching the executable.
+**The executable decompiles.** It is a *fake* SELF with plaintext segments. Converted back to an
+ordinary x86-64 ELF and prepared for Ghidra, it analyses in about 24 minutes: 167,054 functions,
+all 701 system imports named, and about 860 functions and 110 globals named from the strings
+the engine leaves behind or by hand, each with its evidence.
 
-## Notes
+**The data reads, in the game's own terms.** The game ships the layouts of its tables, the names
+of its event instructions and the names of its events, all in Japanese, and the tools here use
+them: gameplay tables field by field, event scripts instruction by instruction, AI and talk
+scripts, and map layouts.
 
-* [The package](docs/the-package.md): PKG → encrypted PFS → PFSC → inner PFS, the key chain,
-  PlayGo, and what the 1.09 update replaces.
-* [The executable](docs/the-executable.md): SELF → ELF, imports, the engine and middleware it was
-  built from, and what decompiling it involves.
-* [Loading it into Ghidra](docs/ghidra.md): the step-by-step procedure from `eboot.bin` to an
-  analysed Ghidra project, why each step is needed, what the result looks like, how the 1.00
-  and 1.09 builds were compared, and how functions get named: by rule from the strings around
-  them, and by hand for the most-called helpers.
-* [What the 1.09 patch changed](docs/the-patch.md): the last update read function by function
-  and table by table: developer tooling switched off, an SOS-sign limit read live, the balance
-  changes (Boom Hammer, Whirligig Saw, Valtr, the DLC enemies, Blood Rock in the shop), and the
-  event-script fixes (elevators, missing DLC, NPCs, bosses), the AI changes (NPC hunters on
-  ladders, Lady Maria), the talk-script changes, and the map-layout changes that tie them
-  together.
-* [Where the items are](docs/the-items.md): every treasure spot, enemy drop and event-given item,
-  traced from the map layouts through the item tables to their names.
-* [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs,
-  params and text.
+**Together they answer real questions.** Two worked examples so far:
+
+* [What the 1.09 patch changed](docs/the-patch.md): developer tooling switched off, the balance
+  changes, elevator, DLC and NPC fixes, and changes that span code, data, scripts and layout.
+* [Where the items are](docs/the-items.md): every treasure, drop, event award and shop row, down
+  to which badge unlocks the Chikage.
+
+## Reading order
+
+1. [The package](docs/the-package.md): PKG → encrypted PFS → PFSC → inner PFS, the key chain,
+   PlayGo, and what the 1.09 update replaces.
+2. [The executable](docs/the-executable.md): SELF → ELF, imports, and the engine and middleware it
+   was built from.
+3. [Loading it into Ghidra](docs/ghidra.md): from `eboot.bin` to an analysed, partly named Ghidra
+   project, why each step is needed, how two builds are compared, and how functions get names.
+4. [The data](docs/the-data.md): the `dvdroot_ps4` tree, every file format in it, map IDs, params
+   and text, and the readers for them.
+5. [Where the items are](docs/the-items.md): the readers joined into one answer.
+6. [What the 1.09 patch changed](docs/the-patch.md): every kind of replaced file, read and
+   explained.
+
+Each page says how its results were obtained, including the wrong turns that were corrected on
+the way, so the method can be followed and checked.
 
 ## Setup
 
@@ -49,6 +53,7 @@ uv venv .venv && uv pip install --python .venv -r pyproject.toml
 ```
 
 or the equivalent with `python -m venv .venv` and `pip install cryptography pyelftools capstone`.
+`python` below means the one in `.venv` (`.venv/Scripts/python` on Windows).
 
 For the Ghidra work you also need Ghidra 12.2 and a JDK 25, located through two environment
 variables (see [Loading it into Ghidra](docs/ghidra.md#what-you-need)):
@@ -62,47 +67,64 @@ variables (see [Loading it into Ghidra](docs/ghidra.md#what-you-need)):
 
 ## Tools
 
+**The package**
+
 ```
-python -I tools/pkgtool.py info|list|extract <pkg> …               # PKG/PFS extractor
-python -I tools/unfself.py <eboot.bin> <out.elf>                     # fake SELF → ELF
-python -I tools/souls.py dcx|bnd|fmg|param <file> …                  # DCX/BND4/FMG/PARAM
-python -I tools/params.py check|dump|diff <parambnd> <paramdefbnd> …  # gameplay tables, decoded
-python -I tools/events.py check|dump|diff <emedf> <emevd> …           # event scripts, decoded
-python -I tools/lua50.py dis|diff <luabnd> …                            # AI scripts (Lua 5.0), disassembled
-python -I tools/esd.py check|dump|diff <talkesdbnd> …                   # talk scripts (ESD), decoded
-python -I tools/msb.py check|dump|diff <msb> …                          # map layouts (MSB)
-python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
-python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>     # ELF → Ghidra-ready
-pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>         # whole Ghidra pipeline
-python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md>             # compare two builds
-python -I tools/port_names.py <names.tsv> <from.tsv> <to.tsv> <out.tsv>  # carry names across builds
-python -I tools/c_diff.py <pairs.tsv> <old.tsv> <new.tsv> <old-c> <new-c> <out.md>  # diff decompiled C
+python -I tools/pkgtool.py info|list|extract <pkg> …        # PKG/PFS: keys, file tree, extraction
+python -I tools/unfself.py <eboot.bin> <out.elf>              # fake SELF → ELF
 ```
 
-(`python` meaning the one in `.venv`, e.g. `.venv/Scripts/python` on Windows.)
-
-`tools/ghidra/` also holds the Ghidra scripts: `ApplyOrbisSymbols.java` (names and function
-starts before analysis), `OrbisReport.java` (summary and landmark decompilations),
-`ExportFunctionHashes.java` (per-function hashes for `build_diff.py`), `FindStringUses.java`
-(who uses which strings), `NameFromStrings.java` (names functions and globals from step tables,
-profiler markers and singleton asserts), `MostCalled.java` (the most-called unnamed functions,
-decompiled), `Decompile.java` (decompile any addresses, optionally with callers),
-`ApplyNames.java` (apply a hand-written name list) and `DeleteProjectFile.java`.
-
-`tools/names/` holds the hand-assigned names for each build, one per line with a confidence
-level and the evidence for it.
 `tools/pkgkeys.py` holds the public fake-package RSA keys.
 
-## Working files (`work/`, ~30 GiB, not source)
+**The executable** (see [Loading it into Ghidra](docs/ghidra.md))
+
+```
+python -I tools/orbis_prep.py <elf> <nid-db> <out.elf> <out.tsv>        # ELF → Ghidra-ready + symbols
+pwsh tools/ghidra/analyze.ps1 -Self <eboot.bin> -Name <name>            # the whole Ghidra pipeline
+python -I tools/build_diff.py <old.tsv> <new.tsv> <out.md> [--pairs …]  # compare two builds
+python -I tools/port_names.py <names.tsv> <from.tsv> <to.tsv> <out>     # carry names across builds
+python -I tools/c_diff.py <pairs> <old.tsv> <new.tsv> <old-c> <new-c> <out.md>   # diff decompiled C
+```
+
+`tools/ghidra/` holds the Ghidra scripts: `ApplyOrbisSymbols.java` (names and function starts
+before analysis), `OrbisReport.java` (summary and landmark decompilations),
+`ExportFunctionHashes.java` (per-function hashes for `build_diff.py`), `NameFromStrings.java`
+(names from step tables, profiler markers and singleton asserts), `ApplyNames.java` (apply a
+hand-written name list), and, for exploring, `FindStringUses.java`, `MostCalled.java`,
+`Decompile.java` and `DeleteProjectFile.java`. `tools/names/` holds the hand-assigned names for
+each build, one per line with a confidence level and the evidence for it.
+
+**The data** (see [The data](docs/the-data.md))
+
+```
+python -I tools/souls.py dcx|bnd|fmg|param <file> …                 # DCX, BND4, FMG text
+python -I tools/params.py check|dump|diff <parambnd> <paramdefbnd> … # gameplay tables
+python -I tools/events.py check|dump|diff <emedf> <emevd> …          # event scripts
+python -I tools/lua50.py dis|diff <luabnd> …                         # AI scripts (Lua 5.0)
+python -I tools/esd.py check|dump|diff <talkesdbnd> …                # talk scripts (ESD)
+python -I tools/msb.py check|dump|diff <msb> …                       # map layouts (MSB)
+```
+
+**Joining it up**
+
+```
+python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
+```
+
+## Working files (`work/`, ~34 GiB, not source)
+
+Everything the tools produce goes under `work/`, which `.gitignore` excludes: it is the game's
+own data, or derived from it.
 
 | Path | |
 |---|---|
-| `work/base/` | full extracted 1.00 base game (`eboot.bin`, `dvdroot_ps4/`, `sce_sys/`, …) |
-| `work/update/` | extracted 1.09 patch: lay over `base/` for the current game |
-| `work/elf/` | `eboot-1.00.elf`, `eboot-1.09.elf`, the bundled `.prx` modules as ELFs, resolved import list |
-| `work/ghidra/` | Ghidra-ready ELFs + symbols, the Ghidra project with both builds (`project/Bloodborne.gpr`), logs, `report-eboot-1.0x/`, `diff/` (function hashes and the 1.00 → 1.09 diff) |
-| `work/ref/aerolib.inl` | NID → name database (shadPS4) |
+| `work/base/`, `work/update/` | the extracted 1.00 game and 1.09 patch; lay `update/` over `base/` for the current game |
 | `work/base-files.txt`, `work/update-files.txt` | full file listings with sizes |
+| `work/elf/` | both executables and the bundled `.prx` modules as ELFs, and the resolved import list |
+| `work/ref/aerolib.inl` | NID → name database (shadPS4), downloaded on first use |
+| `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
+| `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
+| `work/items/` | the generated item index |
 
 ## Not looked at yet
 
@@ -115,7 +137,8 @@ becomes useful.
 
 ## License
 
-**Mensis**, Notes and Tools for Taking Apart *Bloodborne*Copyright (C) 2026 [Jeff Nyman][owner]
+**Mensis**, Notes and Tools for Taking Apart *Bloodborne*\
+Copyright (C) 2026 [Jeff Nyman][owner]
 
 [![GNU General Public License version 3](https://raw.githubusercontent.com/jeffnyman/mensis/main/assets/gplv3-127x51.png)][GNU General Public License]
 
