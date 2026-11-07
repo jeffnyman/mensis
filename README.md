@@ -1,4 +1,6 @@
-# Mensis
+<h1 align="center">
+  <img src="assets/mensis-title.png" width="600" alt="Mensis">
+</h1>
 
 Taking apart the PS4 *Bloodborne: Game of the Year Edition* (CUSA03173, EU) to see how it is built,
 in the same spirit as *Confederation*, a sibling project, does for *Wing Commander*.
