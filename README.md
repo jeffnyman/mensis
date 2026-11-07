@@ -57,7 +57,7 @@ scripts, and map layouts.
 10. [Textures and item pictures](docs/the-textures.md): getting the game's 2D artwork out as PNG
     files, through the TPF container, the PS4's tiled layout and block compression.
 11. [Models and character renders](docs/the-models.md): the FLVER model format, exporting models
-    to OBJ, and a small software renderer that draws every character.
+    to OBJ, and a small software renderer that draws every character and piece of equipment.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked.
@@ -141,6 +141,7 @@ python -I tools/textures.py items <base dvdroot> <update dvdroot> <out dir>    #
 python -I tools/textures.py models <base> <update> <out dir> [chr,parts,obj,map] # model and map textures
 python -I tools/flver.py info|obj|render <archive> …                          # a model: summary, OBJ export, picture
 python -I tools/flver.py all <base dvdroot> <update dvdroot> <out dir>         # every character rendered
+python -I tools/flver.py parts <base dvdroot> <update dvdroot> <out dir>       # every piece of equipment rendered
 ```
 
 ## Working files (`work/`, ~34 GiB, not source)
@@ -157,7 +158,7 @@ own data, or derived from it.
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index and chalice catalogue |
-| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character, equipment, object and map textures), `renders/` (every character drawn) and `obj/` (exported models), each with an index |
+| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character, equipment, object and map textures), `renders/` (every character drawn), `equipment/` (every weapon and armour piece drawn) and `obj/` (exported models), each with an index |
 
 ## Not looked at yet
 

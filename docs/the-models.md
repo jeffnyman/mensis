@@ -10,11 +10,13 @@ python -I tools/flver.py info   work/base/dvdroot_ps4/chr/c2010.chrbnd.dcx
 python -I tools/flver.py render work/base/dvdroot_ps4/chr/c2010.chrbnd.dcx work/pictures/c2010.png
 python -I tools/flver.py obj    work/base/dvdroot_ps4/chr/c5100.chrbnd.dcx work/pictures/obj/c5100
 python -I tools/flver.py all    work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/renders
+python -I tools/flver.py parts  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/equipment
 ```
 
 `obj` writes a Wavefront `.obj` with an `.mtl` and the colour textures as PNG. Most 3D programs
 open that, including Windows' 3D Viewer and Blender, and you can turn the model around in them.
-`render` draws a still picture. `all` renders every character, with an index. As with the
+`render` draws a still picture. `all` renders every character and `parts` every piece of
+equipment, each with an index. As with the
 textures, everything goes under `work/`, which the repository ignores.
 
 ## The format
@@ -81,8 +83,11 @@ Some characters keep part of their texture set in a separate `chr/cNNNN_N.tpf.dc
 colour textures were in their own archive. The names their materials ask for point elsewhere: to
 **texture-only character archives** (`c4029`, `c4059`, …: 17 `chrbnd` files hold a TPF and no
 model at all), to equipment (`BD_…`) and to objects (`o0211…`). So `flver.py` keeps a game-wide
-index, texture name to archive, over `chr/`, `parts/` and `obj/`: 10,208 textures, built in about
-25 seconds the first time a texture is missing, with each archive decoded only when needed.
+index, texture name to archive, over `chr/`, `parts/`, `obj/` and `other/`, including standalone
+texture files such as `parts/common_body.tpf.dcx`. That is 10,578 textures, built in about 25
+seconds the first time a texture is missing, with each archive decoded only when needed. Names
+are matched regardless of case, because materials and textures often disagree (`c2080_body_a`
+against `c2080_Body_a`).
 
 ## What comes out
 
@@ -99,10 +104,20 @@ The 11 skeleton-only models include `c0000`, the human (below), and `c9030`. `c9
 ([the event scripts](the-chalice-events.md#special-enemies-what-rotted-offering-adds)), and here
 it has nothing to draw.
 
-With the index, 8 models are still entirely grey and 21 more have a grey part. The textures they
-name are mostly one, `BD_Ghost_Scroll_1_a` (38 meshes), plus face and eye textures (`FC_M_face`,
-`FG_eye_a`), and 12 meshes whose material has no colour slot at all (effects, presumably). Where
-those textures live (perhaps `facegen/` or `other/`) hasn't been checked.
+With the index, 2 models are still entirely grey and 10 more have a grey part, for three reasons:
+
+* **Faces are generated.** `FC_M_face` and `FG_eye_a` are in no file. `facegen/facegen.fgbnd`
+  holds FaceGen data instead: a base face model, morph targets (`.tri`, `.egm`) and
+  texture-generation data (`.egt`, with a base `face.bmp`). Human faces are made at run time,
+  which is also how the character creator works.
+* **Four textures don't ship.** `c2710_Axe_a`, `c2800_bow_a`, `c2810_Body_a` and
+  `c5500_Body_NoLight_a` are named by materials but are in none of `chr/`, `parts/`, `obj/`,
+  `other/`, the map texture packs, the effect archives or the patch.
+* **Some materials have no colour slot** (12 meshes; effects, presumably).
+
+An earlier version of this page reported 8 fully grey and 21 partly grey. Searching `other/` and
+`parts/`'s standalone textures (where `BD_Ghost_Scroll_1_a`, used by 38 meshes, turned out to
+be) and matching names regardless of case closed most of the gap.
 
 The renders also answer a question the data couldn't. Model `c1110`, the "shop character" of
 [the Chalice Dungeons' event scripts](the-chalice-events.md#special-characters) whose entity runs
@@ -111,6 +126,27 @@ same renderer handles equipment and objects: `wp_a_1063` is the Chikage's curved
 `o240611`, the treasure corpse the Saw Spear lies on in Central Yharnam
 ([where the items are](the-items.md#what-it-finds)), is a dead hunter hanging from a 7-metre
 chain.
+
+## Equipment
+
+`parts` renders every piece of player equipment (not the `_l` low-detail twins), named from the
+item tables as on [the textures page](the-textures.md#characters-equipment-objects-and-maps).
+Weapons are drawn side-on, armour from the front:
+
+| Prefix | Is | Rendered |
+|---|---|---:|
+| `wp_a` | weapons and shields | 91 |
+| `hd`, `bd`, `am`, `lg` | head, body, arms, legs (`_m`, `_f`, `_a` = male, female, both) | 386 |
+| `fg_a`, `fc`, `hr_a` | face parts, faces and hair | 91 |
+
+**568** pieces render (109 MB at 768×768); the other 27 have no meshes of their own, such as
+`wp_a_1000`, Bare Fists.
+
+Every weapon is recognisable from its name: Saw Cleaver, Logarius' Wheel, Stake Driver,
+Whirligig Saw, the Wooden Shield. The armour comes out as garments: the Charred Hunter coat,
+the Noble Dress, the Crowfeather Garb. Each piece is drawn on its own, in the pose it is fitted
+to the body in. An arms piece is a pair of separate gloves, and a body piece a coat with no one in
+it.
 
 ## What this doesn't cover
 
@@ -130,4 +166,5 @@ chain.
 | Path | |
 |---|---|
 | `work/pictures/renders/` | every character rendered from the front, with `index.md` (generated; not in the repository) |
+| `work/pictures/equipment/` | every piece of equipment rendered, named, with `index.md` |
 | `work/pictures/obj/` | models exported with `flver.py obj` |

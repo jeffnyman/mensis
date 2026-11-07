@@ -201,14 +201,14 @@ def _model_names(w) -> dict[str, list[str]]:
     wn = w.names.get("EquipParamWeapon", {})
     for rid, r in w.rows("EquipParamWeapon").items():
         n = re.sub(r" \+\d+$", "", (wn.get(rid) or "").strip())
-        if n and n != "*" and r["equipModelId"] > 0:
+        if n and n != "*" and not re.fullmatch(r"en\d+", n) and r["equipModelId"] > 0:
             lst = out.setdefault(f"wp_a_{r['equipModelId']:04d}", [])
             if n not in lst:
                 lst.append(n)
     pn = w.names.get("EquipParamProtector", {})
     for rid, r in w.rows("EquipParamProtector").items():
         n = (pn.get(rid) or "").strip()
-        if not n or n == "NOT NEEDED":
+        if not n or n == "NOT NEEDED" or re.fullmatch(r"en\d+", n):  # unnamed rows hold placeholders
             continue
         for slot, flag in (("hd", "headEquip"), ("bd", "bodyEquip"), ("am", "armEquip"), ("lg", "legEquip")):
             if r.get(flag):
