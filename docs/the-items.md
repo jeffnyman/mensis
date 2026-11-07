@@ -34,8 +34,8 @@ python -I tools/items.py find  work/base/dvdroot_ps4 work/update/dvdroot_ps4 "Sa
 ```
 
 `world` writes the whole index (every map's treasure with position and pickup flag, every
-enemy's echoes and drops, every event-given item, every shop row) in under a second. `find`
-searches it.
+enemy's echoes and drops, every event-given item, every shop row, and the Chalice Dungeons'
+treasure). `find` searches it.
 
 ## Item lots
 
@@ -135,21 +135,44 @@ shop  Bath Messengers, echoes, tier 1   Chikage: price 50000, unlocked by flag 1
 ```
 
 The **Beast Claw** is also a shop row (34,000, flag 6680). It isn't placed in any main map
-layout, which fits it being found first in the Chalice Dungeons; flag 6680 isn't one of the
-derived "owns" flags, so what sets it isn't established.
+layout; it is found first in the Chalice Dungeons (below). Flag 6680 isn't one of the derived
+"owns" flags, so what sets it isn't established.
+
+## The Chalice Dungeons
+
+Each Root chalice is 100 or 200 pre-built layouts, each placing its own treasure
+([the Chalice Dungeons](the-chalice-dungeons.md)). The index reads all 2,685 Chalice layouts,
+attributes each layout folder to its chalice through the ritual table, and counts how many of a
+chalice's layouts place each item: how likely a given dungeon from that chalice is to hold it.
+The 152,959 treasure lot references give 166 distinct items:
+
+| Item | Chalice | Layouts with it |
+|---|---|---:|
+| Beast Claw | Ailing Loran Chalice (story) | 2 of 2 |
+| Uncanny Beast Claw | Ailing Loran Root Chalice | 107 of 200 |
+| Lost Beast Claw | Lower Ailing Loran Root Chalice | 49 of 200 |
+| Lost Beast Claw | Sinister Lower Loran Root Chalice | 42 of 200 |
+| Uncanny Chikage | Cursed and Defiled Root Chalice | 96 of 200 |
+| Lost Chikage | Pthumeru Ihyll Root Chalice | 50 of 200 |
+
+The pattern for the weapon variants is visible here: the plain weapon in the story chalice,
+*Uncanny* in a depth-4 Root chalice, *Lost* in a depth-5 one. With the Chalice layouts included,
+`world` takes about 25 seconds.
 
 ## What it doesn't cover yet
 
-* **Chalice Dungeons.** Each Root chalice has 100 or 200 pre-built layouts, each placing its own
-  treasure ([the Chalice Dungeons](the-chalice-dungeons.md)); those layouts aren't in the index
-  yet.
 * **Unlock flags that aren't "owns X".** Flag 6680 (Beast Claw), and the line-up flags 5900–5904,
   which the messengers' event sets from progress flags (see [the patch](the-patch.md)).
 * **Three event awards** (event 9440, `誓約ボディジェム入手`, "obtain covenant body gem", lots
   10500/11500/12500) point at lots that don't exist in `ItemLotParam`, so they must resolve some
   other way.
-* **Blood gems** are listed by generator ID only. Naming them would mean following
-  `GemGenParam` → `GemeffectParam` the way the game builds a gem's name.
+* **Blood gems have no fixed name, by design.** A treasure's gem is a `GemGenParam` row, a recipe
+  for a *random* gem: up to six effect slots, each drawn from an effect table with a chance to
+  appear and a chance to turn negative, plus slot-shape rates. None of the 1,337 generators is
+  marked unique. The menu's gem-name table (`魔石名`, 3,148 names such as "Hard Adept Blood Gemstone
+  (2)") names the possible *outcomes*, which the game composes when the gem is rolled (through
+  `GemeffectParam`'s `gemNameIdOffset`). So the index lists a gem as its generator, which is the
+  most a treasure spot can say.
 
 ## Files
 

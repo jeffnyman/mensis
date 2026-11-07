@@ -10,6 +10,7 @@ The chain, every link read from the game (1.09 files laid over 1.00):
                       enemy part --> NpcParam --> blood echoes + item lots --> ...
     event script      [2003:04] obtain item(lot) --> ...   (literal, or passed in by [2000:00])
     ShopLineupParam   item, price per tier, unlock flag (qwcId)
+    Chalice layouts   map/mapstudio/m29_*/, attributed to their chalice through HolygrailExParam
 
 Item lot categories, established by matching IDs against the tables:
     0 weapon (EquipParamWeapon)   1 armour (EquipParamProtector)   4 goods (EquipParamGoods)
@@ -90,6 +91,41 @@ class World:
 
     def layout(self, m: str):
         return msblib.Msb(souls.load(self.path(f"map/mapstudio/{m}.msb.dcx")))
+
+
+def chalice_treasure(w: World):
+    """{item name: [(chalice, layouts containing it, layouts of that chalice)]} for the Chalice Dungeons.
+
+    Each Root chalice is 100 or 200 pre-built layouts (see docs/the-chalice-dungeons.md); a layout
+    folder belongs to the ritual whose mapBaseId ABC names it (m29_AB_C...). Counting the layouts
+    that place an item says how likely a given dungeon of that chalice is to hold it.
+    """
+    goods = w.names.get("EquipParamGoods", {})
+    folder_owner = {}
+    ms = os.path.join(w.base, "map", "mapstudio")
+    folders = sorted(d for d in os.listdir(ms) if d.startswith("m29_"))
+    for rid, r in w.rows("HolygrailExParam").items():
+        mb = r["mapBaseId"]
+        name = goods.get(rid, "").strip()
+        if not mb or not name:
+            continue
+        for f in folders:
+            if f.startswith(f"m29_{mb // 100}{(mb // 10) % 10}_{mb % 10}"):
+                folder_owner[f] = name
+    per_chalice = collections.defaultdict(collections.Counter)
+    layouts = collections.Counter()
+    for f in folders:
+        owner = folder_owner.get(f)
+        if not owner:
+            continue  # tile library and other non-ritual folders
+        for fn in os.listdir(os.path.join(ms, f)):
+            lay = msblib.Msb(souls.load(os.path.join(ms, f, fn)))
+            layouts[owner] += 1
+            seen = {name for e in lay.events if e["type"] == "Treasure"
+                    for lid in e.get("item_lots", []) for name, n, c in w.lot(lid)}
+            for name in seen:
+                per_chalice[name][owner] += 1
+    return {name: [(ch, n, layouts[ch]) for ch, n in sorted(c.items())] for name, c in per_chalice.items()}
 
 
 SHOP_EQUIP = {0: "EquipParamWeapon", 1: "EquipParamProtector", 3: "EquipParamGoods"}
@@ -263,6 +299,10 @@ def main():
                 for name, n, c in r["items"]:
                     if q in name.lower():
                         print(f"{stem:14} event {r['event']} {r['name']}: {r['how']}: {name} x{n}")
+        for name, rows in chalice_treasure(w).items():
+            if q in name.lower():
+                for chalice, n, total in rows:
+                    print(f"{'chalice':14} {chalice:38} {name}: in {n} of {total} layouts")
         for m in w.maps():
             for t in treasure[m]:
                 for name, n, c in t["items"]:
@@ -301,6 +341,12 @@ def main():
     for stem in sorted(awards):
         for r in awards[stem]:
             out.append(f"| {stem} | {r['event']} | {r['name']} | {r['lot']} | {fmt_items(r['items'])} |")
+    out += ["", "## In the Chalice Dungeons", "",
+            "Items placed as treasure in each chalice's pre-built layouts: in how many of them.", "",
+            "| Item | Chalice | Layouts with it |", "|---|---|---:|"]
+    for name, rows in sorted(chalice_treasure(w).items()):
+        for chalice, n, total in rows:
+            out.append(f"| {name} | {chalice} | {n} / {total} |")
     out += ["", "## Sold in shops", "",
             "From `ShopLineupParam`. Price per tier; the unlock flag is the row's `qwcId`.", "",
             "| Item | Where | Prices by tier | Unlock flag |", "|---|---|---|---:|"]

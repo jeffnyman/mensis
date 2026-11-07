@@ -173,14 +173,20 @@ Two more rows, 6900 and 6901, have no chalice item and point straight at a map
 (`directMapUid` 29019998 and 29019999, the layouts `m29_01_99_98` and `m29_01_99_99`), with the
 Pthumeru Root Chalice's costs. Their purpose isn't evident from the data.
 
+## Treasure
+
+Each layout places its own treasure. The item index counts, per chalice, how many of its layouts
+hold each item ([where the items are](the-items.md#the-chalice-dungeons)). For example, the
+Uncanny Beast Claw is in 107 of the Ailing Loran Root Chalice's 200 layouts, and the plain Beast
+Claw only in the Ailing Loran story chalice.
+
 ## Not yet established
 
-* How a Root ritual picks its variation number, and how glyphs encode it.
+* How a Root ritual picks its variation number, and how glyphs encode it, which would let a
+  glyph be looked up in the treasure counts.
 * What the Sinister Bell's feature (40) does in the event script, and what each kind of special
   enemy is.
 * How the `m29_0x` tile library relates to the pre-built layouts.
-* The Chalice Dungeon treasure: the 100/200 layouts each place their own treasure, which the item
-  index ([where the items are](the-items.md)) doesn't cover yet.
 * The m29 event script (428 events), which runs the dungeons' doors, levers and bosses.
 
 ## Files
