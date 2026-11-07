@@ -41,7 +41,7 @@ Counts are files on disk. "In" means what a DCX holds once decompressed.
 | **BND4** | `BND4` | ~3,750 | archive of named, numbered files (`*bnd.dcx`) |
 | **BXF4** | `BHF4` + `BDF4` | 108 pairs | split archive: header `.tpfbhd`/`.hkxbhd`, data `.tpfbdt`/`.hkxbdt` (map textures, collision); `.patch` pairs override |
 | **FLVER** | `FLVER\0` v`0x20014` | 11,033 + in bnds | 3D models: meshes, materials, bones (DS3-era version) |
-| **TPF** | `TPF\0`, platform byte 4 | 1,131 + in bnds | texture packs. PS4 platform, so GNF-tiled texture data, not DDS |
+| **TPF** | `TPF\0`, platform byte 4 | 1,131 + in bnds | texture packs. PS4 platform, so the texture data is in the GPU's tiled layout ([textures](the-textures.md)) |
 | **MSB** | `MSB ` | 2,709 | map layout: parts, enemies, regions, events. m29 has hundreds (Chalice Dungeon pieces) |
 | **NVMA / NVM / ONAV** | `NVMA` | 2,701 | navmesh |
 | **EMEVD / EMELD** | `EVD\0` / `ELD\0` | 2,668 each | event scripts (bytecode-like instruction lists) and their event names |
@@ -61,8 +61,9 @@ Counts are files on disk. "In" means what a DCX holds once decompressed.
 | `breakobj`, `btab`/`btl`/`btpb`, `bhdrinfo` | | | breakable objects, baked lighting (atlas, lights, probes) |
 
 Formats with a reader in `tools/`: DCX, BND4 and FMG (`souls.py`), PARAM (`params.py`),
-EMEVD/EMELD/EMEDF (`events.py`), AI Lua (`lua50.py`), ESD (`esd.py`) and MSB (`msb.py`); see
-[Tools](#tools) below. HKS, FLVER, TPF, HKX, TAE and the sound formats have none here.
+EMEVD/EMELD/EMEDF (`events.py`), AI Lua (`lua50.py`), ESD (`esd.py`), MSB (`msb.py`), TPF
+(`textures.py`) and FLVER (`flver.py`, as far as exporting and rendering models); see
+[Tools](#tools) below. HKS, HKX, TAE and the sound formats have none here.
 
 ## Maps
 
@@ -193,6 +194,6 @@ python -I tools/msb.py diff  <old> <new> <out.md>
 `tools/items.py` joins these readers to answer where every item comes from (treasure, enemy
 drops, event awards, shops); see [where the items are](the-items.md).
 
-For anything deeper (FLVER meshes, MSB editing, TAE, EMEVD decompilation), the mature community
-tools already handle Bloodborne's formats. The one PS4-specific gap is textures: TPF platform 4
-holds GNF-tiled data that has to be de-tiled before it becomes a viewable DDS.
+For anything deeper (MSB editing, TAE, EMEVD decompilation, animation), the mature community
+tools already handle Bloodborne's formats. The PS4-specific step, untiling textures, is in
+[textures and item pictures](the-textures.md), which writes them straight to PNG.

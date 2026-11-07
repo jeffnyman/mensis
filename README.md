@@ -19,6 +19,11 @@ of its event instructions and the names of its events, all in Japanese, and the 
 them: gameplay tables field by field, event scripts instruction by instruction, AI and talk
 scripts, and map layouts.
 
+**The artwork comes out.** Textures are block-compressed and stored in the PS4 GPU's tiled
+layout. Untiled and decoded, they come out as ordinary PNG files: 1,056 item pictures, and every
+character, equipment, object and map texture. The 3D models read too, so the tools export them
+to OBJ and render every character and piece of equipment as a picture.
+
 **Together they answer real questions.** Four worked examples so far:
 
 * [What the 1.09 patch changed](docs/the-patch.md): developer tooling switched off, the balance
@@ -60,7 +65,8 @@ scripts, and map layouts.
     to OBJ, and a small software renderer that draws every character and piece of equipment.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
-the way, so the method can be followed and checked.
+the way, so the method can be followed and checked. To reproduce everything from your own copy
+of the game, [rebuilding `work/`](docs/rebuilding-work.md) goes through every step in order.
 
 ## Setup
 
@@ -144,30 +150,23 @@ python -I tools/flver.py all <base dvdroot> <update dvdroot> <out dir>         #
 python -I tools/flver.py parts <base dvdroot> <update dvdroot> <out dir>       # every piece of equipment rendered
 ```
 
-## Working files (`work/`, ~34 GiB, not source)
+## Working files (`work/`, ~40 GiB, not source)
 
 Everything the tools produce goes under `work/`, which `.gitignore` excludes: it is the game's
-own data, or derived from it.
+own data, or derived from it. [Rebuilding `work/`](docs/rebuilding-work.md) recreates it from
+scratch.
 
 | Path | |
 |---|---|
 | `work/base/`, `work/update/` | the extracted 1.00 game and 1.09 patch; lay `update/` over `base/` for the current game |
 | `work/base-files.txt`, `work/update-files.txt` | full file listings with sizes |
-| `work/elf/` | both executables and the bundled `.prx` modules as ELFs, and the resolved import list |
+| `work/elf/` | both executables and the bundled `.prx` modules as ELFs (plus import lists written while exploring; `work/ghidra/*.symbols.tsv` holds the same imports) |
 | `work/ref/aerolib.inl` | NID → name database (shadPS4), downloaded on first use |
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
-| `work/items/`, `work/chalice/` | the generated item index and chalice catalogue |
-| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character, equipment, object and map textures), `renders/` (every character drawn), `equipment/` (every weapon and armour piece drawn) and `obj/` (exported models), each with an index |
-
-## Not looked at yet
-
-`Bloodborne [FitGirl Repack]` is a compressed installer (`setup.exe` + 15 GiB of `fg-*.bin`). Its
-contents can't be seen without running it. If it is what the name suggests, it holds the shadPS4
-emulator plus an already-extracted `CUSA03173` folder, the same tree as `work/base` with
-`work/update` laid over it, probably with community patches. Nothing here depends on it, since the
-PKG gives the same files directly. shadPS4 is the obvious way to *run* what's in `work/` if that
-becomes useful.
+| `work/items/`, `work/chalice/` | the generated item index, the Chalice catalogue and the Chalice event-script summary |
+| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armour piece drawn) and `obj/` (exported models), each with an index |
+| `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |
 
 ## License
 

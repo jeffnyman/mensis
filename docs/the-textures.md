@@ -72,7 +72,7 @@ away the padding.
 | goods (consumables, key items, bells, …) | 219 | `EquipParamGoods` |
 | weapons | 41 | `EquipParamWeapon` |
 | blood gems (3000–4199) | 490 | — |
-| rune glyphs (4200–4245) | 55 | — |
+| rune glyphs (4200–4254) | 55 | — |
 | other, unnamed | 30 | — |
 
 Each picture is written as `NNNNN <item name>.png`, and `index.md` beside them lists every
@@ -87,9 +87,11 @@ effects, not from a fixed item. Looking at the pictures, the numbering is system
 - the tens digit is a colour variant (3110 is blue rather than red).
 
 Part of the mapping is in the data: for 101 pictures, the number is 3000 plus a
-`GemeffectParam` row's `gemIconIdOffset`. The covenant rune effect "Cont. heal near death"
-(offset 1014) has picture 4014, for example. How the rest are chosen hasn't been worked out. The
-55 pictures at 4200–4245 are rune glyphs.
+`GemeffectParam` row's `gemIconIdOffset`. That table holds rune effects as well as gem effects,
+so the rule gives some rune effects a picture here too: the covenant rune effect "Cont. heal near
+death" (offset 1014) has picture 4014, a round droplet. Which picture the game shows for a rune,
+this or a glyph, hasn't been checked, and how the other gem pictures are chosen hasn't been
+worked out. The 55 pictures at 4200–4254 are rune glyphs.
 
 The **30 other unnamed pictures** belong to item rows with no name in the text, such as hoods
 (2116–2131), a ring (2142), a chest of vials (2) and a lantern (33). Whether they're cut
@@ -156,8 +158,8 @@ model every hunter uses, and the bell-ringers in The One Reborn's arena carry th
   containers surveyed; the tool reports any it skips.
 * **Mip levels beyond the first**, which are smaller copies of the same image.
 * **The blood gem picture rule** beyond the `gemIconIdOffset` cases.
-* **Pictures of 3D models.** That needs the model format (FLVER) and a renderer, a project of
-  its own.
+* **Pictures of 3D models**, which are on the next page,
+  [models and character renders](the-models.md).
 
 ## Files
 

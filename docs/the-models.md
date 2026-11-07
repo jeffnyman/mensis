@@ -10,7 +10,7 @@ python -I tools/flver.py info   work/base/dvdroot_ps4/chr/c2010.chrbnd.dcx
 python -I tools/flver.py render work/base/dvdroot_ps4/chr/c2010.chrbnd.dcx work/pictures/c2010.png
 python -I tools/flver.py obj    work/base/dvdroot_ps4/chr/c5100.chrbnd.dcx work/pictures/obj/c5100
 python -I tools/flver.py all    work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/renders
-python -I tools/flver.py parts  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/equipment
+python -I tools/flver.py parts  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/equipment --size 768
 ```
 
 `obj` writes a Wavefront `.obj` with an `.mtl` and the colour textures as PNG. Most 3D programs
@@ -99,10 +99,10 @@ against `c2080_Body_a`).
 | no model in the archive: texture-only, supplying other models | 17 |
 | a model with no meshes: a skeleton only | 11 |
 
-The 11 skeleton-only models include `c0000`, the human (below), and `c9030`. `c9030`'s
-`NpcParam` row 903000 is the stand-in that sits in Chalice special-enemy spots
-([the event scripts](the-chalice-events.md#special-enemies-what-rotted-offering-adds)), and here
-it has nothing to draw.
+The 11 skeleton-only models include `c0000`, the human (below), and `c9030`. `c9030`, with
+`NpcParam` row 903000, fills the first slot of the Chalice special-enemy spots' "no feature"
+and "strengthening" groups 3,356 times each (the counts are in `work/chalice/events-1.09.md`
+from [the event scripts](the-chalice-events.md)). It has nothing to draw: an invisible stand-in.
 
 With the index, 2 models are still entirely grey and 10 more have a grey part, for three reasons:
 
@@ -129,7 +129,8 @@ chain.
 
 ## Equipment
 
-`parts` renders every piece of player equipment (not the `_l` low-detail twins), named from the
+`parts` renders every piece of player equipment (not the `_l` twins, very likely lower-detail
+versions), named from the
 item tables as on [the textures page](the-textures.md#characters-equipment-objects-and-maps).
 Weapons are drawn side-on, armour from the front:
 

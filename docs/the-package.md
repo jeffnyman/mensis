@@ -1,7 +1,7 @@
 # The package
 
-What is inside `Bloodborne.Game.of.the.Year.Edition.PS4-PRELUDE.pkg`, and how
-`tools/pkgtool.py` gets the game's files out of it.
+What is inside the game's PKG file (and its 1.09 update), and how `tools/pkgtool.py` gets the
+game's files out of it.
 
 ## Identity
 
@@ -17,7 +17,7 @@ What is inside `Bloodborne.Game.of.the.Year.Edition.PS4-PRELUDE.pkg`, and how
 
 The *Game of the Year* edition is the game with *The Old Hunters* already in it:
 areas m33–m36 (Nightmare Frontier, Hunter's Nightmare, Research Hall, Fishing Hamlet) are in the
-base package itself, not a separate add-on. `SYSTEM_VER` is 4.50, matching the scene NFO.
+base package itself, not a separate add-on. `SYSTEM_VER` is 4.50.
 
 ## Layers
 
@@ -48,7 +48,7 @@ unencrypted but compressed, and it is the filesystem the game sees as `/app0`.
 ## The keys, and why this works at all
 
 A retail PKG cannot be opened off the console. Its PFS key (EKPFS) is wrapped with keys that live
-in the console's secure processor and are not public. These PRELUDE releases are **fake packages**
+in the console's secure processor and are not public. These packages are **fake packages**
 (fpkg): they were re-signed for consoles running homebrew, and that toolchain wraps the keys with
 RSA keysets that are public (they ship in every fpkg tool and in shadPS4). Unwrapping takes four
 steps:

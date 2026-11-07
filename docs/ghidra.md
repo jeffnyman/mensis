@@ -12,7 +12,7 @@ a disassembler.
 |---|---|---|
 | Ghidra | 12.2 (`ghidra_12.2_PUBLIC_20261016`, from the NSA's GitHub releases) | `GHIDRA_INSTALL_DIR` |
 | JDK | Temurin **25** (Ghidra 12.2 refuses 21: `application.java.min=25`) | `JAVA_HOME` |
-| Python | 3.12+ with the packages in `pyproject.toml` | `MENSIS_PYTHON`, else `.venv`, else `python` |
+| Python | 3.10+ (3.12 used) with the packages in `pyproject.toml` | `MENSIS_PYTHON`, else `.venv`, else `python` |
 | NID database | shadPS4 v0.7.0 `src/core/aerolib/aerolib.inl` (59,280 names) | downloaded to `work/ref/aerolib.inl` on first run |
 
 Ghidra and the JDK are plain zips. Unpack both anywhere and set the two variables, for example in
