@@ -12,6 +12,7 @@ dependencies = [
     "pyelftools>=0.31",   # ELF inspection while surveying executables
     "capstone>=5",        # ad-hoc disassembly while surveying executables
     "pillow>=10",         # textures.py: decoding block-compressed (BC1-BC7) textures to PNG
+    "numpy>=1.24",        # flver.py: the software renderer for model pictures
 ]
 
 # The tools are run as scripts (python -I tools/<tool>.py ...), not installed as a package.
