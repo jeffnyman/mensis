@@ -3,7 +3,9 @@
 The NPCs' stories, read from the data: what state each character is in, what moves them on,
 what they say in each state, and what they hand over. It builds on
 [event flags](the-flags.md), which finds the 24 flag ranges that hold the characters' states.
-This page turns each range into a **sheet** and reads one character's story from hers.
+This page turns each range into a **sheet**. It then reads one character's story from hers,
+and the story she is part of: [the safe places](#the-safe-places), where six people can be sent
+and what becomes of them.
 
 ```
 python -I tools/story.py ranges work/base/dvdroot_ps4 work/update/dvdroot_ps4
@@ -109,10 +111,132 @@ the chapel's account of the killing can be about her.
 Flag 1184 is tested by her initialization and placed like the chapel states, but nothing in the
 files sets it.
 
+## The safe places
+
+The Old Woman is one of six people you can send to safety. There are two refuges: Oedon Chapel,
+kept by the blind man at the sanctuary (`避難所の盲人`, range 1100, the Oedon Chapel Dweller),
+and Iosefka's Clinic. The clinic's doctor has two ranges: `診療所の女医`, "the clinic's woman
+doctor" (1120), and `ニセ女医`, "the false woman doctor" (1140). Everything in this section is read from
+their events in the Cathedral Ward (`m24_00`) and Central Yharnam (`m24_01`) scripts, and from
+the residents' sheets.
+
+| Resident (range) | Met in | On the way to chapel / clinic | At the chapel / clinic |
+|---|---|---|---|
+| `偏屈な老人`, the cantankerous old man (1160) | Cathedral Ward | 1168 / 1169 | 1164 / 1163 |
+| `孤独な老婆`, the lonely old woman (1180) | Central Yharnam | 1193 / 1194 | 1181 / 1190 |
+| `娼婦`, the prostitute (1220) | Cathedral Ward | 1232 / 1233 | 1224 / 1223 |
+| `囚われた尼僧`, the captive nun (1300) | Yahar'gul, Unseen Village | 1313 / 1314 | 1304 / 1309 |
+| `感染者の乞食`, the infected beggar (1200) | Forbidden Woods | 1208 / 1209 | 1205 / 1204 |
+| `少女`, the girl (1260) | Central Yharnam | 1265 / 1266 | — / 1268 |
+
+As with the Old Woman, each resident's initialization event moves them from "on the way" to
+"there" on a later load.
+
+**Which places you can offer.** A resident's dialogue offers a refuge only once its flag is
+set. The chapel's is 9430, set by the dweller's talk script. The clinic's is 9431, and only one
+script sets it: the false doctor's (`t241314`). The real doctor's range has nothing like it. The
+false doctor arrives at Evening: `ニセ女医_通常` ("normal") moves her from 1140, "not here yet",
+to 1141 once flag 9800 is on. Until she has told you about it, the clinic can't be offered.
+
+### The chapel
+
+The dweller's `避難所の盲人_住人を保護_XX` ("shelter the residents", event 12400708) is started
+four times: for the old man, the old woman, the nun and the prostitute. Each copy waits until
+its resident is at the chapel, at the clinic or dead, whichever comes first. Only the first
+counts: it adds one to a 3-bit count of refugees (12400733) and sets the resident's "arrived"
+talk flag. Around that count:
+
+* `…_避難人数カウント` ("count of refugees") sets 72400309 once the count reaches three.
+* `…_最後の避難者_行き先判定` ("the last refugee: where did they go") records whether the most
+  recent of the four went to the chapel (72400307) or the clinic (72400308).
+* `…_依頼成功` ("request succeeded", 1104) needs all four at the chapel, alive. `…_依頼失敗`
+  ("request failed", 1105) waits until all four copies of the shelter event have ended, so every
+  fate is settled, and at least one of them isn't at the chapel.
+* `…_惨劇1` and `…_惨劇2` ("tragedy 1, 2", dweller states 1102 and 1103) follow the first and
+  second of the four to die. Four identification events per tragedy (`…_人物特定_老人`, `_老婆`,
+  `_娼婦`, `_尼僧`) record who it was. The second set waits for the first to have fired.
+
+The beggar and the girl aren't among the four. The beggar reaches the chapel through his own
+event (`感染者の乞食_避難所状態へ`, "to the sanctuary state"). The girl never gets there: sending
+her to the chapel (1265) and her running off in despair after her mother's death (1264,
+`少女_母が死んだので自暴自棄`) both lead to the same state, 1267. From 1267, or from 1271, its
+later form once flag 9802 (the Eccentric Moon) is on, the event `少女_吸血豚が血塗れのリボンを落とす`
+("the blood-sucking pig drops the bloody ribbon") applies. It checks that you don't already own
+the Red Messenger Ribbon. Only the clinic route (1266, then 1268) brings her anywhere.
+
+### The beggar
+
+`感染者の乞食_他NPC殺害` ("the infected beggar kills another NPC", event 12400629) is the chapel's
+danger. It runs on load, and it kills one resident at a time, always in the same order:
+
+| Victim | Their state | Only while they're |
+|---|---|---|
+| the old man | 1166 | at the chapel (1164, 1165) |
+| the old woman | 1191 | at the chapel (1181, 1184–1188) |
+| the nun | 1312 | at the chapel (1304–1307) |
+| the dweller | 1108 | in any of his states 1100–1105 |
+| the prostitute | 1231 | at the chapel (1224–1226, 1228, 1229) |
+
+He has to have kills to spend. Two common events, `感染者の乞食_他NPC殺害カウント_地上` and
+`…_ダンジョン` ("kill count: surface", "dungeon"), add one to a 3-bit counter (70000200–202, at
+most 7) whenever a boss-defeat flag changes. That covers the main game's bosses and the Chalice
+Dungeons' alike. Both count only while he is at the chapel (1205, or transformed, 1207) and talk
+flag 72400360 is set (in his chapel conversations). Each run of the killing event then spends
+one kill on the next victim. In his "on the
+way" state (1208), the event goes straight to a killing and spends nothing. When the dweller is
+the victim, `避難所の盲人_乞食に殺される` ("killed by the beggar") leaves his body as one you can
+loot.
+
+His `感染者の乞食_満足` ("satisfied", 1211) is the other way his story closes. It needs the
+dweller dead, and every other resident gone, at the clinic or dead, none of them by his hand
+(the five "killed by the beggar" flags 72400934–938 all off).
+
+### The nun and the prostitute
+
+The nun's initialization has a branch of its own. If both women are at the chapel (the nun in
+1304 or 1305, the prostitute in 1224–1227), and the prostitute has given her blood (72400942,
+set by `娼婦_血の施しを行った`, "the prostitute gave her blood") and the nun has already talked to
+you there (72400380), it sets the nun to 1306 and the prostitute to 1230. The prostitute's own
+events treat 1230 exactly as her death (1222), and the dweller's tragedy events count it as
+hers. The nun also has a state `娼婦に嫉妬`, "jealous of the prostitute" (1305).
+
+The prostitute's last stage is elsewhere. From 1228, with talk flag 72400486, the Central Yharnam
+map's initialization moves her to 1229. There a second placement of hers (NpcParam 6113) stands
+beside a `c2521` character:
+
+* `娼婦_娼婦が産んだ月の幼生を見たのでSAN値UP` ("saw the moon larva the prostitute bore, so sanity
+  up") gives three points of `SAN値` ("sanity") through common event 9350 when you enter a region
+  of the map (2412302) while she is in 1228 or 1229.
+* `娼婦_月の幼生が死亡したら死亡させる` ("if the moon larva dies, make her die") ends her (1236)
+  the moment the `c2521` is killed while she lives.
+
+### The clinic
+
+The false doctor takes residents in only in two of her states: `受付中`, "receiving" (1142, after
+talk flag 72410320 in her script), and `共犯（外）`, "accomplice, outside" (1144).
+`ニセ女医_住人を保護した` ("has sheltered a resident") is started six times: for the old man (1163),
+the beggar (1204), the girl (1268), the old woman (1190), the prostitute (1223) and the nun
+(1309). Each adds one to a 4-bit count (12410646), which sets 72410328 at four. `…_全員保護した`
+("has sheltered everyone", 72410333) needs all six.
+
+What becomes of them is the next event. `ニセ女医_月の使者生成_XX` ("generate a moon messenger")
+is started six times, each with a `c2500` character in the clinic, the flag that makes it
+appear, and the animation it plays. Five of the flags are residents' "at the clinic" states:
+the old man's, the beggar's, the girl's, the old woman's and the prostitute's. The beggar's and
+the prostitute's play animations of their own (7001, 7000). The nun has none. The sixth flag is
+1124, the real doctor's `どこにもいない`, "nowhere". Her range's other states are 1121, "comes to
+exist", 1122, "likes you more", and 1123, "fed up with you hitting the door". So a moon
+messenger appears for each of those five sent there, and one for the doctor herself.
+
+The false doctor's own states run on: `共犯（診療所）`, "accomplice, in the clinic" (1143), when
+you step inside; `敵対`, "hostile" (1145); `狂った`, "gone mad" (1146), once 9802 is on; and death
+(1148, 1149).
+
 ## What this doesn't cover yet
 
-* **The other 23 sheets.** They are generated. Reading each into a story like the one above is
-  the next step.
+* **The other sheets.** They are generated. Gascoigne's daughter's elder sister (`少女の姉`,
+  who hands over a ribbon), the hunters (1320–1379), Patches (1420) and the Hunter's Dream
+  ranges are next.
 * **Untranslated conditions.** Talk functions other than `f15` print as numbers: `f23()` and
   `f22()` look like a menu's answer (the branch after `f23() == 1` is labelled Yesを選んだ,
   "chose Yes"), `f45(12, 0, …)` picks one of a line's two copies, and `f1()` is likely distance.

@@ -63,7 +63,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
 * [Event flags](docs/the-flags.md): every place the game's world state is read or set, across
   event scripts, talk scripts and tables, and the 24 flag ranges that hold the NPCs' stories.
   [The questlines](docs/the-questlines.md) read each range into a sheet of states,
-  conversations and gifts, and one character's story from hers.
+  conversations and gifts, and tell the safe-places story from them: who can be sent to Oedon
+  Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -96,7 +97,7 @@ and character models rendered from the game's own meshes and textures (`flver.py
 12. [Event flags](docs/the-flags.md): an index of every read and write of the game's world state,
     through event templates and talk scripts, and the NPCs' state ranges.
 13. [The questlines](docs/the-questlines.md): each NPC's states, every conversation with the path
-    that leads to it, what they hand over, and the lonely old woman's story read from the data.
+    that leads to it, what they hand over, and the safe places read from the data.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
