@@ -5,7 +5,8 @@ move's share of it, and what a hit does to stamina, poise and rally. This page r
 **data** first: the gameplay tables and what their own descriptions say about them. Then
 [the formulas](#the-formulas) that combine those numbers, read from the executable: the stat
 curve, attack rating, the requirement penalty, defense from stats, the cost of a level, max
-HP, how rally wins health back, and how a hit's attack meets the target's defense.
+HP, how rally wins health back, and how a hit's attack meets the target's defense. And last, [the
+effects](#effects-blood-gems-buffs-and-new-game) behind blood gems, buffs and New Game+.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -393,6 +394,95 @@ total     200.0
 `hit` leaves out the weakness multipliers, effects and the three flags, so its numbers are a
 hit on an unbuffed, unflagged target.
 
+## Effects: blood gems, buffs and New Game+
+
+Everything that changes a number for a while, or for good, is a **special effect**, a row of
+`SpEffectParam` (7,855 rows, 228 fields). Blood gems, runes, buffs and New Game+ all come down
+to these rows.
+
+```
+python -I tools/effects.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
+python -I tools/effects.py effect work/base/dvdroot_ps4 work/update/dvdroot_ps4 7421
+```
+
+`tables` writes `work/combat/gems.md` (every gem effect, by category and rank) and `ngplus.md`
+(the New Game+ effects). A field counts as **changed** when it differs from the value most rows
+hold: 1.0 for a rate, 0 or −1 for most others. A few gem effects show no changed number; their
+work is done through a state ID (`stateInfo`) or by code, not by a field.
+
+### Two kinds of attack multiplier
+
+The effect fields keep attack and damage apart, and their own names say so:
+
+| Field | Its name | What it scales |
+|---|---|---|
+| `physicsAttackPowerRate` (and magic, fire, thunder) | 物理攻撃力倍率, "physical attack power rate" | attack rating |
+| `physicsAttackRate` (and the others) | 攻撃側：物理ダメージ倍率, "attacker side: physical damage rate" | damage |
+| `slashAttackPowerRate`, `blowAttackPowerRate`, `thrustAttackPowerRate` | attack power by physical type | attack of that type |
+| `physicsAttackPower` (and the others) | 物理攻撃力[point] | a flat amount of attack |
+| `physicsDiffenceRate`, `physicsDiffence` (and the others) | defense rate, flat defense | defense |
+| `slashDamageCutRate` (and the other types) | damage cut by type | damage taken |
+
+**Stacking.** Two of the functions that gather a character's active effects were read, and both
+**multiply** rates and **add** flat values. `SpEffect_DefenseRates` (`01be76b0`) multiplies the
+defense rates of every active effect and sums the flat defenses. `SpEffect_DamageCutRates`
+(`01be7a80`) multiplies the damage-cut rates for the damage type at hand, skipping effects of
+a few categories (110, and in one mode 158 and 204). So two gems of ×1.10 give ×1.21, not ×1.20.
+The attacker's own attack-rate gathering isn't read yet, so attack rates are only likely to
+stack the same way.
+
+### Blood gems
+
+A gem is made of **gem effects**, rows of `GemeffectParam` (16,101). Each names its special
+effect, a category (`GemCategoryParam`, 444), a rank, and the ranks it can drop at. It also has
+an optional second effect for when an attack hits (`speffectId_forAtk`). Gem generators
+(`GemGenParam`, 1,337) roll up to six effects each, with a chance for each to appear and to turn
+negative. **The game text names every effect**: the menu text's 魔石効果 ("gem effect") table
+is keyed by the `GemeffectParam` row. 12,579 of its 12,585 lines match a row.
+
+The text is presentation, and the effect row is what applies:
+
+* **The "Add … ATK" gems are whole numbers in the data.** "Add blood ATK +0.5" stores 0, so the
+  rank-1 gem adds nothing. "+1.1" stores 1, "+1.5" stores 2, "+2.5" stores 2, "+2.8" stores 3.
+  The elemental "Add" gems are the same: "Add arcane ATK +3.5" stores 4. Those elemental gems
+  also set `weaponConvertAttribute` (1 arcane, 2 fire, 3 bolt), which marks a weapon as
+  converted. In attack rating, an attribute weapon (`isAttributeWep`) can lose its physical
+  base under a context flag, but that path isn't followed here.
+* **The percentage gems mostly match.** Of 6,279 effects whose text gives one percentage and
+  whose row changes one rate, 6,036 agree to a twentieth of a percent. "Physical ATK UP +2.7%"
+  is ×1.027. "Blunt ATK UP +0.4%" is ×1.0036, which the text rounds.
+* **"Boosts rally potential" stores four times what it says.** "+1.8%" is `regainRate` ×1.072,
+  and 241 of the 244 rally effects are within rounding of 4×.
+* **"Falling damage reduced 30%" stores ×0.5**, a 50% reduction; "50%" stores ×0.25 and "100%"
+  ×0.
+
+### New Game+
+
+Each `NpcParam` row names a `GameClearSpEffectID`, the effect that character gets in New
+Game+. There are 95 such effects, and they all have `bGameClearBonus` set: 周回ボーナス用か, "is
+it for the cycle bonus?". The effect gatherer handles that flag itself. In the first playthrough
+the effect does nothing. From the second, it is multiplied by a factor for the playthrough,
+read from a table in the executable (`04b31ed0`), indexed by a count in the game data and capped
+at the sixth:
+
+| Playthrough | 1 | 2 | 3 | 4 | 5 | 6 | 7 on |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Factor | — | ×1.0 | ×1.07 | ×1.1 | ×1.125 | ×1.15 | ×1.2 |
+
+The effects scale an enemy's max HP, attack, defense, stamina damage and echoes. Early enemies
+gain the most, which brings them up toward the late game's:
+
+| Effect | Used by (among others) | HP | Attack | Defense | Echoes |
+|---:|---|---:|---:|---:|---:|
+| 7421 | Father Gascoigne | ×6.08 | ×2.328 | ×1.24 | ×19.107 |
+| 7403 | Cleric Beast, Vicar Amelia | ×4.118 | ×1.683 | ×1.326 | ×6.895 |
+| 7408 | Rom, the Vacuous Spider | ×2.496 | ×1.334 | ×1.176 | ×5.072 |
+| 7410 | The One Reborn | ×1.883 | ×1.248 | ×1.137 | ×4.217 |
+| 7425 | Gehrman, the First Hunter | ×1.456 | ×1.099 | ×1.031 | ×3.064 |
+| 7413 | Moon Presence | ×1.34 | ×1.089 | ×1.016 | ×2.965 |
+
+(Effect 9200 adds a further, multiplayer scaling through curve 121. That isn't followed here.)
+
 ## What this doesn't cover yet
 
 * **The hit's flags and multipliers.** What the 1.4, 1.125 and 0.8 multipliers in
@@ -405,13 +495,16 @@ hit on an unbuffed, unflagged target.
   read yet.
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
-* **Effects.** Blood gems, runes and buffs work through `SpEffectParam`, which isn't covered
-  here.
+* **The attacker's effect gathering, and elemental conversion.** How an attacker's own
+  attack rates combine, and what a converted weapon's attack rating does, aren't read yet
+  ([effects](#effects-blood-gems-buffs-and-new-game)).
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
+| `tools/effects.py` | the gem and New Game+ tables, and any special effect's changes |
 | `tools/names/eboot-1.09.hand.tsv` | the formula functions' names and evidence |
+| `work/combat/gems.md`, `ngplus.md` | every blood gem effect with its text and numbers; the New Game+ effects and who uses them |
 | `work/combat/weapons.md`, `moves/`, `curves.md` | every weapon at +0 and its last level, each weapon's moves, the stat curves |
