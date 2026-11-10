@@ -133,6 +133,14 @@ def _pct(v) -> str:
     return "" if v is None else f"{v}"
 
 
+def regain(weapon: dict, attack: dict) -> float:
+    """The regain amount a hit carries (HitRecord_Build, 023137a0)."""
+    return (
+        weapon["wepRegainHp"] * attack["wepRegainHpScale"] * 0.01
+        + attack["atkRegainHp"]
+    )
+
+
 def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
     r0 = ws.rows[levels[0]]
     name = ws.name(base_id)
@@ -165,17 +173,22 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
     out.append("## Moves\n")
     out.append(
         "Percentages of the weapon's values. Judge ids are the animation events'; "
-        "a trick weapon's two sets of moves are 400 apart.\n"
+        "a trick weapon's two sets of moves are 400 apart. Regain is what a hit carries "
+        "(HitRecord_Build): wepRegainHp x rally % / 100 + flat rally, at +0 and the last "
+        "level.\n"
     )
     out.append(
         "| Judge | Stamina | Damage % | Stamina dmg % | Poise % | Rally % | "
-        "Flat rally | Hit level | Notes |"
+        "Flat rally | Regain | Hit level | Notes |"
     )
-    out.append("|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    out.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    rN = ws.rows[levels[-1]]
     for m in moves:
         a = m["a"]
         if a is None:
-            out.append(f"| {m['judge']} | {m['stamina']} | | | | | | | no attack row |")
+            out.append(
+                f"| {m['judge']} | {m['stamina']} | | | | | | | | no attack row |"
+            )
             continue
         parts = {d: a[c] for _, c, d in DAMAGE}
         dmg = (
@@ -198,7 +211,8 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
         out.append(
             f"| {m['judge']} | {m['stamina']} | {dmg} | {a['atkStamCorrection']} | "
             f"{a['atkSuperArmorCorrection']} | {a['wepRegainHpScale']} | "
-            f"{a['atkRegainHp'] or ''} | {a['dmgLevel']} | {', '.join(notes)} |"
+            f"{a['atkRegainHp'] or ''} | {regain(r0, a):g} → {regain(rN, a):g} | "
+            f"{a['dmgLevel']} | {', '.join(notes)} |"
         )
     return out
 

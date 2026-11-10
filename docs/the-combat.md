@@ -4,7 +4,8 @@ What a weapon does when it lands: its damage, how that grows with stats and upgr
 move's share of it, and what a hit does to stamina, poise and rally. This page reads the
 **data** first: the gameplay tables and what their own descriptions say about them. Then
 [the formulas](#the-formulas) that combine those numbers, read from the executable: the stat
-curve, attack rating, the requirement penalty, defense from stats, and the cost of a level.
+curve, attack rating, the requirement penalty, defense from stats, the cost of a level, max
+HP, and how rally wins health back.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -124,7 +125,8 @@ Kirkhammer 37. In every move the Saw Cleaver makes, the poise multiplier equals 
 
 ### Rally
 
-Rally is **リゲイン, "regain"**, in the tables. A hit's regain comes from three fields:
+Rally is **リゲイン, "regain"**, in the tables ([how it wins health
+back](#how-rally-wins-health-back) is below). A hit's regain comes from three fields:
 
 * the weapon's `wepRegainHp`, "weapon regain amount": the Saw Cleaver's goes 35 → 55 over its
   levels, the Hunter Axe's 75 → 125, the Kirkhammer's 60 → 120;
@@ -258,11 +260,86 @@ Past level 11 (`x > 92`) this is `0.02L³ + 3.12L² + 111.78L − 786.32`. That 
 Demon's Souls and Dark Souls cost, `0.02x³ + 3.06x² + 105.6x − 895`, at `x = L + 1`. Below
 it, the cost is `x²/10 + 1`.
 
+### How rally wins health back
+
+Rally runs in two places. One is where a hit is put together. The other is a small state machine
+that the developers' own debug menu names.
+
+**A hit's regain amount.** `HitRecord_Build` (`023137a0`) fills in the record a hit carries. Its
+regain amount is
+
+    wepRegainHp × wepRegainHpScale / 100 + atkRegainHp
+
+the weapon's regain, scaled by the move, plus the attack's flat amount. Beside it the record
+keeps the attack's `regainableSlotId`, `regainableHpRateScale` and `regainableTimeScale` (with
+no attack row: slot −1, rate 1.0, time 1.0). The moves tables in `work/combat/moves/` now give
+each move's amount at +0 and at the last level. The Saw Cleaver's first attack carries 35 at +0
+and 55 at +10.
+
+**The grace HP.** In the code, rally is **猶予HP**, "grace HP": the damage you can still win
+back, the orange part of the health bar. Each character has a `ChrHpRegainSlot`. Its constructor
+(`01905510`) registers a debug page, `HpRegain`, whose labels name every tuning value:
+
+| Value | Label | In the file |
+|---|---|---:|
+| `05527b10` | DelayTime 猶予時間, "grace time" | 3.0 seconds |
+| `05527b14` | DelayRate 猶予率, "grace rate" | 1.0 |
+| `05527b0c` | VanishDelayRate 猶予消滅率 [MaxHp/Sec], "grace vanishing rate" | 0.25 |
+| `05527b18` | RegainRate リゲイン率, "regain rate" | 0.6 |
+| `05527b1c` | FollowTartgetDelay 目標猶予追従, "follow the target grace" | on |
+| `05952d74`, `05952d75` | StackDelayHp 猶予HP蓄積, "stack grace HP"; ResetDelayTime 猶予時間リセット, "reset grace time" | off (zeroed memory) |
+
+Its live readouts are current HP, target grace HP, grace HP, vanishing grace HP per second,
+**奪還HP ("recaptured HP", RegainHp)**, and remaining grace time. `ChrHpRegainSlot_Update`
+(`01905a40`) runs every frame:
+
+* **Taking damage** sets the grace HP to the HP before the hit, less `damage × (1 − DelayRate)`.
+  With the rate at 1.0, all of the damage can be won back. The timer is set to 3 seconds.
+* **Recapturing:** while there is recaptured HP waiting, `max(it × RegainRate, 1)` is added to
+  the HP, up to the grace HP, rounded down. So 60% of the waiting amount becomes health, at
+  least 1 point. If the timer has already run out, it restarts at 3 seconds. While it runs, a
+  hit doesn't extend it, because ResetDelayTime is off.
+* **When the timer runs out**, the grace HP drains toward current HP at a quarter of max HP per
+  second. With FollowTartgetDelay on, the bar shown follows it at the same rate. Once the bar
+  reaches current HP, the orange is gone.
+* **Healing** above the grace HP carries it up.
+
+The step between the two isn't followed here: how a landed hit's regain amount becomes the slot's
+recaptured HP. That includes the slot ID's combining, and where the attack's time and rate scales
+apply. If the amount passes straight through, the Saw Cleaver's first hit at +10 recaptures
+`55 × 0.6 = 33` HP.
+
+### Health
+
+`MaxHp_FromVigor` (`0197eaf0`) is curve **100** of the first stat:
+
+| Vigor | 1 | 15 | 30 | 50 | 99 |
+|---|---:|---:|---:|---:|---:|
+| Max HP | 400 | 682 | 1,100 | 1,500 | 1,900 |
+
+The exponents between the points are 1.1, 1.2, −1.2 and −1.1. So each stage starts a little
+slowly up to 30, and after 30 the gains come early in each stage. Curve **101** is read from
+the second stat (presumably Endurance) and rises to 450. What it sets isn't followed here.
+
+### What the hit does to defense: not found
+
+How an attack meets the target's defense isn't found yet. Two searches came up empty:
+
+* **Dark Souls' damage formula** is a piecewise curve in the ratio of attack to defense, with
+  constants such as 19.2/49 and 0.8/121. None of them is stored in the executable. (One float
+  equal to 0.4/3 is, but nothing references it.)
+* **The functions that read a hit record's four attack values together** (33 of them) include
+  copies and graphics code, and the ones read so far aren't the formula.
+
+The defense side's inputs are known: the base defense above, the armor pieces, and effect
+multipliers. The next place to look is the code that consumes a received hit record and changes
+HP.
+
 ## What this doesn't cover yet
 
 * **The hit itself.** How a hit's attack meets the target's defense, and what damage type
-  (slash, blunt, thrust) changes, is in the hit code. So is how the regain amount, timer and
-  rate combine into rally. Neither is followed yet.
+  (slash, blunt, thrust) changes ([not found](#what-the-hit-does-to-defense-not-found)). And how
+  a landed hit's regain amount reaches the grace HP ([rally](#how-rally-wins-health-back)).
 * **Which calculation a real hit uses.** Attack rating's mode 4, physical scaled by Bloodtinge,
   is traced only as far as the five functions that call it.
 * **Move names.** Which button plays a judge id is in the animation events (TAE), which aren't
