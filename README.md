@@ -50,7 +50,7 @@ and character models rendered from the game's own meshes and textures (`flver.py
 </tr>
 </table>
 
-**Together they answer real questions.** Four worked examples so far:
+**Together they answer real questions.** Five worked examples so far:
 
 * [What the 1.09 patch changed](docs/the-patch.md): developer tooling switched off, the balance
   changes, elevator, DLC and NPC fixes, and changes that span code, data, scripts and layout.
@@ -60,6 +60,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   100 or 200 layouts that ship with the game, and [their event scripts](docs/the-chalice-events.md)
   show what the rites do inside them: every variant is already placed, and the script removes
   all but one. A ritual's roll is steered toward unique items you haven't picked up yet.
+* [Event flags](docs/the-flags.md): every place the game's world state is read or set, across
+  event scripts, talk scripts and tables, and the 24 flag ranges that hold the NPCs' stories.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -89,6 +91,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     files, through the TPF container, the PS4's tiled layout and block compression.
 11. [Models and character renders](docs/the-models.md): the FLVER model format, exporting models
     to OBJ, and a small software renderer that draws every character and piece of equipment.
+12. [Event flags](docs/the-flags.md): an index of every read and write of the game's world state,
+    through event templates and talk scripts, and the NPCs' state ranges.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
@@ -162,6 +166,7 @@ python -I tools/msb.py check|dump|diff <msb> …                       # map lay
 python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # where every item is
 python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the Chalice Dungeon catalog
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
+python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         # where every event flag is read and set
 ```
 
 **Checking**
@@ -199,6 +204,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
+| `work/story/` | the event-flag index |
 | `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn), `hunters/` (every armor set worn) and `obj/` (exported models), each with an index |
 | `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |

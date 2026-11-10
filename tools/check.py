@@ -234,6 +234,12 @@ def checks() -> list[dict]:
             ],
         },
         {
+            "name": "flags",
+            "needs": [B, U],
+            "text": [f"{OUT}/flags.tsv"],
+            "cmds": [PY + ["tools/flags.py", "index", B, U, f"{OUT}/flags.tsv"]],
+        },
+        {
             "name": "unfself",
             "needs": ["work/update/eboot.bin"],
             "binary": [f"{OUT}/eboot-1.09.elf"],
