@@ -9,6 +9,10 @@
         # every character model rendered, with an index
     python -I tools/flver.py parts  <base dvdroot> <update dvdroot> <out dir> [--size N]
         # every piece of equipment rendered on its own, named from the item tables
+    python -I tools/flver.py hunter  <base dvdroot> <update dvdroot> <out.png> <set> [--sex m|f] [--size N]
+        # a whole hunter in one armor set: <set> is its model number or any piece's name
+    python -I tools/flver.py hunters <base dvdroot> <update dvdroot> <out dir> [--size N]
+        # every armor set as a whole hunter, male and female, with an index
 
 Output belongs under work/ (gitignored): the models are the game's own.
 
@@ -433,35 +437,53 @@ def export_obj(path: str, outdir: str) -> str:
 
 
 def render(
-    path: str, out: str, size: int = 1024, yaw: float = 180.0, pitch: float = 0.0
+    path: str | list[str],
+    out: str,
+    size: int = 1024,
+    yaw: float = 180.0,
+    pitch: float = 0.0,
 ) -> None:
-    """A software render: orthographic, depth-buffered, textured, one light. Y is up."""
+    """A software render: orthographic, depth-buffered, textured, one light. Y is up.
+
+    `path` may be a list of archives, drawn together into one picture: equipment pieces share
+    the human skeleton's rest pose, so head, body, arms and legs assemble a whole figure."""
     import numpy as np
     from PIL import Image
 
-    f, texs = load(path)
-    by_name = {t.name: t for t in texs}
+    paths = [path] if isinstance(path, str) else list(path)
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
     cp, sp = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
     rot = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]]) @ np.eye(3)
     rot = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]]) @ rot
     parts = []
     allp = []
-    for i, v, tris, tex in meshes(f):
-        if not tris:
-            continue
-        p = np.asarray(v["pos"], dtype=np.float64) @ rot.T
-        n = (
-            np.asarray(v.get("normal") or [(0, 1, 0)] * len(p), dtype=np.float64)
-            @ rot.T
-        )
-        uv = np.asarray(v.get("uv") or [(0, 0)] * len(p), dtype=np.float64)
-        img = None
-        found = _texture(tex, by_name, path)
-        if found is not None:
-            img = np.asarray(found.image().convert("RGBA"), dtype=np.float32) / 255.0
-        parts.append((p, n, uv, np.asarray(tris, dtype=np.int64), img))
-        allp.append(p)
+    for src in paths:
+        f, texs = load(src)
+        by_name = {t.name: t for t in texs}
+        parts_of = [(v, tris, tex) for _, v, tris, tex in meshes(f) if tris]
+        for v, tris, tex in parts_of:
+            p = np.asarray(v["pos"], dtype=np.float64) @ rot.T
+            n = (
+                np.asarray(v.get("normal") or [(0, 1, 0)] * len(p), dtype=np.float64)
+                @ rot.T
+            )
+            uv = np.asarray(v.get("uv") or [(0, 0)] * len(p), dtype=np.float64)
+            img = refl = None
+            found = _texture(tex, by_name, src)
+            if found is not None:
+                img = (
+                    np.asarray(found.image().convert("RGBA"), dtype=np.float32) / 255.0
+                )
+            # the reflectance map beside the color map (x_a -> x_r): where metal's look lives
+            if tex and tex[-2:].lower() == "_a":
+                rfound = _texture(tex[:-2] + "_r", by_name, src)
+                if rfound is not None:
+                    refl = (
+                        np.asarray(rfound.image().convert("RGB"), dtype=np.float32)
+                        / 255.0
+                    )
+            parts.append((p, n, uv, np.asarray(tris, dtype=np.int64), img, refl))
+            allp.append(p)
     if not allp:
         raise ValueError("the model has no meshes of its own")
     pts = np.concatenate(allp)
@@ -474,7 +496,11 @@ def render(
     depth = np.full((size, size), np.inf, np.float32)
     light = np.array([0.4, 0.6, 0.7])
     light /= np.linalg.norm(light)
-    for p, n, uv, tris, img in parts:
+    half = light + np.array(
+        [0.0, 0.0, 1.0]
+    )  # Blinn-Phong half vector; the viewer is at +Z
+    half /= np.linalg.norm(half)
+    for p, n, uv, tris, img, refl in parts:
         sx = (p[:, 0] - cx) * scale + size / 2
         sy2 = size / 2 - (p[:, 1] - cyy) * scale
         sz = -p[:, 2]  # nearer = smaller
@@ -511,11 +537,18 @@ def render(
                 ty = (np.mod(vv, 1.0) * th).astype(np.int64).clip(0, th - 1)
                 texel = img[ty, tx]
                 vis &= texel[..., 3] >= 0.5  # alpha test (hair, cloth edges)
-                rgb = texel[..., :3]
+                rgb = texel[..., :3] * shade[..., None]
+                if refl is not None:
+                    # reflectance: an even sheen plus a highlight, so metal reads as metal
+                    rh, rw = refl.shape[:2]
+                    rx = (np.mod(u, 1.0) * rw).astype(np.int64).clip(0, rw - 1)
+                    ry = (np.mod(vv, 1.0) * rh).astype(np.int64).clip(0, rh - 1)
+                    spec = np.clip(np.abs(nn @ half), 0, 1) ** 24
+                    rgb = rgb + refl[ry, rx] * (0.45 + 1.1 * spec)[..., None]
             else:
-                rgb = np.full(gx.shape + (3,), 0.7, np.float32)
+                rgb = np.full(gx.shape + (3,), 0.7, np.float32) * shade[..., None]
             region[vis] = z[vis]
-            color[y0:y1, x0:x1][vis] = (rgb * shade[..., None])[vis]
+            color[y0:y1, x0:x1][vis] = rgb[vis]
     Image.fromarray((color.clip(0, 1) * 255).astype(np.uint8)).save(out)
 
 
@@ -553,6 +586,114 @@ def render_all(base: str, update: str, outdir: str, size: int) -> None:
     with open(os.path.join(outdir, "index.md"), "w", encoding="utf-8") as fo:
         fo.write("\n".join(lines) + "\n")
     print(f"{ok} renders -> {outdir}")
+
+
+SLOTS = (
+    ("hd", "headEquip"),
+    ("bd", "bodyEquip"),
+    ("am", "armEquip"),
+    ("lg", "legEquip"),
+)
+
+
+def armor_sets(base: str, update: str) -> dict[int, dict[str, str]]:
+    """Armor sets by model: {equipModelId: {slot: item name}}. A set's pieces share one model
+    number; each piece's slot comes from its head/body/arm/leg flag."""
+    import re
+
+    import items as itemlib
+
+    w = itemlib.World(base, update)
+    names = w.names.get("EquipParamProtector", {})
+    sets: dict[int, dict[str, str]] = {}
+    for rid, r in sorted(w.rows("EquipParamProtector").items()):
+        n = (names.get(rid) or "").strip()
+        if not n or n == "NOT NEEDED" or re.fullmatch(r"en\d+", n):
+            continue
+        for slot, flag in SLOTS:
+            if r.get(flag) and r["equipModelId"] > 0:
+                sets.setdefault(r["equipModelId"], {}).setdefault(slot, n)
+    return sets
+
+
+def hunter_parts(base: str, model: int, sex: str = "m") -> list[str]:
+    """The archives for a whole hunter in armor set `model`: the naked body (`fc_m_0000`
+    or `fc_f_0000`), each slot's piece for that sex (or the shared `_a_` piece), and the
+    default face (`fg_a_0000`), which closed helmets cover. The "bare" pieces (`bd_m_0000`
+    and so on) are skeletons with no meshes, so the body is what fills an empty slot."""
+    parts = os.path.join(base, "parts")
+
+    def find(*names: str) -> list[str]:
+        for n in names:
+            path = os.path.join(parts, n + ".partsbnd.dcx")
+            if os.path.exists(path):
+                return [path]
+        return []
+
+    out = find(f"fc_{sex}_0000")
+    for slot, _ in SLOTS:
+        out += find(f"{slot}_{sex}_{model:04d}", f"{slot}_a_{model:04d}")
+    return out + find("fg_a_0000")
+
+
+def render_hunter(
+    base: str, update: str, out: str, which: str, sex: str = "m", size: int = 1024
+) -> None:
+    """One hunter: `which` is a set's model number or the name of any piece of it."""
+    sets = armor_sets(base, update)
+    if which.isdigit():
+        model = int(which)
+    else:
+        model = next(
+            (
+                m
+                for m, s in sets.items()
+                if any(n.lower() == which.lower() for n in s.values())
+            ),
+            -1,
+        )
+    if model not in sets:
+        raise ValueError(f"no armor set {which!r}")
+    render(hunter_parts(base, model, sex), out, size)
+
+
+def render_hunters(base: str, update: str, outdir: str, size: int) -> None:
+    """Every armor set as a whole hunter, male and female, with an index."""
+    import textures as tex
+
+    sets = armor_sets(base, update)
+    os.makedirs(outdir, exist_ok=True)
+    lines = [
+        "# Hunters\n",
+        (
+            "Generated by `tools/flver.py hunters`: each armor set worn by the human "
+            "model, male and female, in its rest pose. The naked body (`fc_m_0000`, `fc_f_0000`) is "
+            "drawn under every set; the face is the default `fg_a_0000`.\n"
+        ),
+        "| Set | Male | Female | Pieces |",
+        "|---:|---|---|---|",
+    ]
+    for model, pieces in sorted(sets.items()):
+        label = pieces.get("bd") or next(iter(pieces.values()))
+        cells = []
+        for sex in "mf":
+            fname = tex._safe(f"{model:04d} {sex} {label}") + ".png"
+            try:
+                render(
+                    hunter_parts(base, model, sex), os.path.join(outdir, fname), size
+                )
+                cells.append(f"`{fname}`")
+            except ValueError as e:
+                cells.append(f"— ({e})")
+        lines.append(
+            f"| {model} | {cells[0]} | {cells[1]} | "
+            + ", ".join(pieces[s] for s, _ in SLOTS if s in pieces)
+            + " |"
+        )
+        print(model, label, flush=True)
+    with open(os.path.join(outdir, "index.md"), "w", encoding="utf-8") as fo:
+        fo.write("\n".join(lines) + "\n")
+    print(f"{len(sets)} sets -> {outdir}")
 
 
 def render_parts(base: str, update: str, outdir: str, size: int) -> None:
@@ -604,6 +745,22 @@ def main():
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8")
     a = sys.argv
+    if len(a) >= 5 and a[1] == "hunters":
+        render_hunters(
+            a[2], a[3], a[4], int(a[a.index("--size") + 1]) if "--size" in a else 1024
+        )
+        return 0
+    if len(a) >= 6 and a[1] == "hunter":
+        render_hunter(
+            a[2],
+            a[3],
+            a[4],
+            a[5],
+            a[a.index("--sex") + 1] if "--sex" in a else "m",
+            int(a[a.index("--size") + 1]) if "--size" in a else 1024,
+        )
+        print(a[4])
+        return 0
     if len(a) >= 5 and a[1] == "parts":
         render_parts(
             a[2], a[3], a[4], int(a[a.index("--size") + 1]) if "--size" in a else 1024

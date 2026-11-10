@@ -43,7 +43,7 @@ and character models rendered from the game's own meshes and textures (`flver.py
 <td align="center" width="25%"><img src="assets/showcase/item-cainhurst-badge.png" width="180" alt="Cainhurst Badge"><br><sub>Cainhurst Badge</sub></td>
 </tr>
 <tr>
-<td align="center" width="25%"><img src="assets/showcase/chr-c2010.png" width="180" alt="c2010, a lantern-bearer"><br><sub>c2010, a lantern-bearer</sub></td>
+<td align="center" width="25%"><img src="assets/showcase/hunter-cainhurst.png" width="180" alt="A hunter in the Cainhurst Armor"><br><sub>A hunter in the Cainhurst Armor</sub></td>
 <td align="center" width="25%"><img src="assets/showcase/chr-c1110.png" width="180" alt="c1110, Patches the spider"><br><sub>c1110, Patches the spider</sub></td>
 <td align="center" width="25%"><img src="assets/showcase/chr-c5100.png" width="180" alt="c5100, Rom, the Vacuous Spider"><br><sub>c5100, Rom, the Vacuous Spider</sub></td>
 <td align="center" width="25%"><img src="assets/showcase/chr-c2100.png" width="180" alt="c2100, the Witch of Hemwick"><br><sub>c2100, the Witch of Hemwick</sub></td>
@@ -180,6 +180,7 @@ python -I tools/textures.py models <base> <update> <out dir> [chr,parts,obj,map]
 python -I tools/flver.py info|obj|render <archive> …                          # a model: summary, OBJ export, picture
 python -I tools/flver.py all <base dvdroot> <update dvdroot> <out dir>         # every character rendered
 python -I tools/flver.py parts <base dvdroot> <update dvdroot> <out dir>       # every piece of equipment rendered
+python -I tools/flver.py hunter|hunters <base> <update> <out> …                # whole hunters in armor sets
 ```
 
 ## Working files (`work/`, ~40 GiB, not source)
@@ -198,7 +199,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
-| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn) and `obj/` (exported models), each with an index |
+| `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn), `hunters/` (every armor set worn) and `obj/` (exported models), each with an index |
 | `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |
 

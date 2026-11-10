@@ -305,7 +305,7 @@ def checks() -> list[dict]:
         },
         {
             "name": "renders",
-            "needs": [B],
+            "needs": [B, U],
             "images": f"{OUT}/render-*.png",
             "cmds": [
                 PY
@@ -336,6 +336,19 @@ def checks() -> list[dict]:
                     "512",
                     "--yaw",
                     "0",
+                ],
+                PY
+                + [
+                    "tools/flver.py",
+                    "hunter",
+                    B,
+                    U,
+                    f"{OUT}/render-hunter-3200-f.png",
+                    "3200",
+                    "--sex",
+                    "f",
+                    "--size",
+                    "512",
                 ],
             ],
         },

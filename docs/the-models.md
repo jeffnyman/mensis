@@ -11,12 +11,15 @@ python -I tools/flver.py render work/base/dvdroot_ps4/chr/c2010.chrbnd.dcx work/
 python -I tools/flver.py obj    work/base/dvdroot_ps4/chr/c5100.chrbnd.dcx work/pictures/obj/c5100
 python -I tools/flver.py all    work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/renders
 python -I tools/flver.py parts  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/equipment --size 768
+python -I tools/flver.py hunter work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/knight.png "Knight's Garb"
+python -I tools/flver.py hunters work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/hunters --size 768
 ```
 
 `obj` writes a Wavefront `.obj` with an `.mtl` and the color textures as PNG. Most 3D programs
 open that, including Windows' 3D Viewer and Blender, and you can turn the model around in them.
 `render` draws a still picture. `all` renders every character and `parts` every piece of
-equipment, each with an index. As with the
+equipment, each with an index. `hunter` draws a whole player character in one armor set, and
+`hunters` every set ([below](#hunters)). As with the
 textures, everything goes under `work/`, which the repository ignores.
 
 ## The format
@@ -71,10 +74,17 @@ the project's dependencies:
    in front at;
 3. color each pixel from the material's color texture (`g_Diffuse`, the `_a` texture), using
    the interpolated UV, and drop pixels whose alpha is below a half (hair and ragged cloth edges);
-4. light it with one light, through the interpolated normal.
+4. light it with one light, through the interpolated normal;
+5. add the **reflectance** texture beside it (the `_r` map), as an even sheen plus a highlight
+   (Blinn-Phong).
 
-It is deliberately plain: no normal maps, no shadows, no shaders. It shows the model and its
-colors faithfully, not the game's lighting.
+Step 5 matters for metal. In this material scheme, a metal surface's color map is dark: its
+brightness lives in the reflectance map. Drawn from the color map alone, the Cainhurst armor came
+out a dull brown. With reflectance it is silver plate. Cloth and skin have near-black reflectance,
+so they barely change.
+
+It is otherwise deliberately plain: no normal maps, no shadows, no shaders. It shows the model and
+its colors faithfully, not the game's lighting.
 
 Some characters keep part of their texture set in a separate `chr/cNNNN_N.tpf.dcx` (Rom's is
 `c5100_2`); the loader picks those up.
@@ -149,15 +159,41 @@ the Noble Dress, the Crowfeather Garb. Each piece is drawn on its own, in the po
 to the body in. An arms piece is a pair of separate gloves, and a body piece a coat with no one in
 it.
 
+## Hunters
+
+The player character has no body of its own. `c0000`, the human model every hunter uses, is a
+skeleton only, and what you see is equipment. Every piece is skinned to that skeleton and stored
+in its rest pose. So drawing a set's head, body, arms and legs **into the same picture** assembles
+a whole hunter, with no skeleton arithmetic: the coat hangs over the trousers, and the gloves
+meet the sleeves.
+
+`hunter` takes a set's model number or the name of any piece of it, and `--sex f` for the female
+pieces:
+
+* **A set** is the armor rows that share an `equipModelId`, each piece's slot given by its
+  head, body, arm and leg flags. There are 37 named sets, 25 of them covering all four
+  slots.
+* **The body is a separate model.** The "bare" pieces (`bd_m_0000` and the rest) are
+  skeletons with no meshes. The naked body is `fc_m_0000` (`fc_f_0000` for women): a whole
+  figure in twelve meshes, drawn under every set so a slot the set doesn't cover shows skin.
+  The material names (`#41#`, `#42#`, …) look like region numbers the game uses to hide body
+  parts under armor; here the z-buffer does that job, and nothing pokes through. The skin
+  texture is grey on purpose: the game tints it with the skin tone chosen at character
+  creation, so it stays grey here.
+* **The face is `fg_a_0000`**, drawn on top; closed helmets cover it. Faces are generated at run
+  time from FaceGen data ([above](#what-comes-out)), and `fg_a_0000` is the one textured face
+  that ships.
+
+`hunters` renders every set, male and female, with an index.
+
 ## What this doesn't cover
 
 * **Poses and animation.** The renders are all in the rest pose. Posing a character means reading
   its skeleton's animations (`cNNNN.anibnd`, Havok data) and skinning the vertices to them.
-* **The player character.** `c0000`, the human model every hunter uses, has no geometry of its
-  own. It is assembled from equipment parts (`parts/hd_…`, `bd_…`, `am_…`, `lg_…`, `wp_…`), each a
-  separate FLVER the renderer can draw on its own. Fitting them together onto one figure isn't
-  done.
-* **Materials beyond color.** Normal, reflectance and shininess maps, and the game's shaders
+* **A hunter's weapons, face and hair.** Weapons are separate models in their own space, and
+  holding one means placing it on the hand bone. Faces are generated, so every hunter has the
+  default face, and hair (`hr_…`) isn't added.
+* **Materials beyond color and reflectance.** Normal and shininess maps, and the game's shaders
   (`.mtd`), aren't applied.
 * **Maps.** Map pieces are FLVERs too (`map/mNN_…/*.flver.dcx`, 11,033 of them), placed by the
   map layouts. Assembling a whole area is a different job.
@@ -168,4 +204,5 @@ it.
 |---|---|
 | `work/pictures/renders/` | every character rendered from the front, with `index.md` (generated; not in the repository) |
 | `work/pictures/equipment/` | every piece of equipment rendered, named, with `index.md` |
+| `work/pictures/hunters/` | every armor set as a whole hunter, male and female, with `index.md` |
 | `work/pictures/obj/` | models exported with `flver.py obj` |

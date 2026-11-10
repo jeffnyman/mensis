@@ -163,6 +163,7 @@ python -I tools/textures.py items  work/base/dvdroot_ps4 work/update/dvdroot_ps4
 python -I tools/textures.py models work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/models chr,parts
 python -I tools/flver.py    all    work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/renders
 python -I tools/flver.py    parts  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/equipment --size 768
+python -I tools/flver.py    hunters work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/pictures/hunters --size 768
 ```
 
 | Step | Takes | Writes |
@@ -200,7 +201,7 @@ covers one tool, or one tool's output for every file of a kind:
 - `unfself` and `orbis_prep` on the 1.09 executable;
 - the build and decompiled-code diffs;
 - the item pictures;
-- three renders.
+- four renders, one of them a whole hunter.
 
 The checks take about four minutes. A check whose inputs you haven't built is reported as
 `SKIP`; for example, the code diffs need step 4, and so Ghidra. Text is compared after
