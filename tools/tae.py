@@ -145,16 +145,21 @@ GLOSS = (
     (r"^Atk(?:Right|Both)Step", "R1 out of a quickstep"),
     (r"^Atk(?:Right|Both)Jump", "jump attack"),
     (r"^AtkFall(Start|Loop|End)", lambda m: f"plunging attack ({m[1].lower()})"),
-    (r"^AtkPower(?:Start|Loop)(B?)", lambda m: "charging R2" + (" (B)" if m[1] else "")),
+    (
+        r"^AtkPower(?:Start|Loop)(B?)",
+        lambda m: "charging R2" + (" (B)" if m[1] else ""),
+    ),
     (
         r"^AtkPowerNormalHit(B?)(\d+)",
         lambda m: "R2, released before full charge" + (" (B)" if m[1] else ""),
     ),
     (
         r"^AtkPowerHardHit(B?)(\d+)",
-        lambda m: "R2, fully charged"
-        + (f" #{int(m[2])}" if int(m[2]) > 1 else "")
-        + (" (B)" if m[1] else ""),
+        lambda m: (
+            "R2, fully charged"
+            + (f" #{int(m[2])}" if int(m[2]) > 1 else "")
+            + (" (B)" if m[1] else "")
+        ),
     ),
     (r"^Atk(?:Right|Both)NormalDraw", "R1 (draw)"),
     (r"^ChangeGimmick_\w+_ModeA", "transform attack (L1)"),

@@ -6,8 +6,9 @@ move's share of it, and what a hit does to stamina, poise and rally. This page r
 [the formulas](#the-formulas) that combine those numbers, read from the executable: the stat
 curve, attack rating, the requirement penalty, defense from stats, the cost of a level, max
 HP, how rally wins health back, and how a hit's attack meets the target's defense. Which button
-plays each move comes from the [animations](#which-button-plays-which-move). And last, [the
-effects](#effects-blood-gems-buffs-and-new-game) behind blood gems, buffs and New Game+.
+plays each move comes from the [animations](#which-button-plays-which-move). Then [the
+effects](#effects-blood-gems-buffs-and-new-game) behind blood gems, buffs and New Game+, and
+last [the enemies' movesets](#enemy-movesets): every enemy's attacks, by name.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -209,7 +210,8 @@ Cleaver these are 22 rows: 100–130, 240, 260–300, 500, 510, 650–700, 800 a
 them are moves of other sets: 500 is the Hunter Axe's transformed R2. Others, 16 of the 22, no
 animation of any set invokes: 100–130, 260–300 (300 being the stamina-only move), 660–700, 900
 and 901. Those may be unused, or started another way, by the action script or a throw. That
-isn't followed here. Two sets, a155 and a156, have attack events, but no weapon's category
+isn't followed here. Their own labels say what they were meant to be
+([the names come with the data](#the-names-come-with-the-data)). Two sets, a155 and a156, have attack events, but no weapon's category
 leads to them.
 
 ### Poise
@@ -578,6 +580,111 @@ gain the most, which brings them up toward the late game's:
 
 (Effect 9200 adds a further, multiplayer scaling through curve 121. That isn't followed here.)
 
+## Enemy movesets
+
+An enemy attacks the same way the player does: an animation invokes a judge id, the judge id
+picks a behavior row, and the behavior row points at an attack. The enemy's AI picks the
+animations.
+
+```
+python -I tools/enemies.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
+python -I tools/enemies.py enemy  work/base/dvdroot_ps4 work/update/dvdroot_ps4 Cleric Beast
+```
+
+`tables` writes `work/combat/enemies.md`, one line per enemy, and a sheet per enemy in
+`work/combat/enemies/`. There are 148 sheets, with 8,364 hits between them, and 7,511 of those
+hits lead to an attack row.
+
+### From an NpcParam row to its attacks
+
+* **Model.** NpcParam row *r* uses the model c<(*r* mod 1,000,000) / 100>: the Cleric Beast's
+  500000 is c5000, and so is its Chalice Dungeon copy 10500000. The model's animations are in
+  `chr/c5000.anibnd.dcx`. Rows below 100000 (tests, and the human characters, who carry
+  weapons) aren't covered.
+* **Animations.** The archive's TAE file gives each animation's events, as for the player.
+  The Cleric Beast's animation 3004 invokes judge 140 at 0.73 seconds, then 141, 142 and 143:
+  one animation, four hits.
+* **Moves.** `BehaviorParam` row 200000000 + `behaviorVariationId` × 1000 + judge id is the
+  move, pointing at an `AtkParam_Npc` row or at a `Bullet` row whose `atkId_Bullet` is the
+  attack.
+* **Attacks.** Unlike the player's, an enemy's attack row holds the attack's own values, not
+  multipliers. `atkPhys`, `atkMag`, `atkFire` and `atkThun` are its physical, arcane, fire and
+  bolt attack. `atkStam` is its stamina damage, `atkSuperArmor` its poise damage, `dmgLevel`
+  the reaction it causes, and `atkAttribute` its type: 1 slash, 2 blunt, 3 thrust, and 4 in
+  256 rows whose meaning isn't read. Special effects scale these values afterwards, New Game+
+  among them ([New Game+](#new-game)).
+* **AI.** `NpcThinkParam` row `aiThinkId` names the battle script, `<battleGoalID>_battle.lua`,
+  in one of `script/*.luabnd.dcx`. Its action functions queue animations with `AddSubGoal`.
+  The sheets list, for each animation, the actions whose constants name it. The Cleric Beast's
+  `Kyoukuchou500000_Act01` names 3000, 3001, 3011 and 3017.
+
+### The names come with the data
+
+Every param row has a name. The row header (24 bytes each, from 0x40) holds the row id, its
+data offset and the offset of a UTF-16 string, the developers' working label for the row.
+`params.Param.row_names()` reads it. For an enemy's attacks these labels say what the attack is:
+
+| Animation | Judge | `AtkParam_Npc` row name | In English | Physical | Type | Poise damage | Hit level |
+|---:|---:|---|---|---:|---|---:|---:|
+| 3000 | 100 | `c5000_教区長_右フック` | Cleric Beast: right hook | 229 | slash | 50 | 2 |
+| 3001 | 110 | `左フック` | left hook | 194 | slash | 50 | 2 |
+| 3002 | 120 | `叩きつけ` | slam | 379 | slash | 100 | 6 |
+| 3003 | 130 | `踏みつけ` | stomp | 379 | slash | 200 | 6 |
+| 3004 | 140–143 | `左右ラッシュ1撃目【右手】`… | left-right rush, 1st hit (right hand) to 4th | 194, 136, 153, 194 | slash | 50 | 2, 2, 2, 3 |
+| 3005 | 150, 151 | `超叩きつけ1撃目`, `2撃目（引っこ抜き）` | super slam, 1st hit; 2nd hit (pulling out) | 333, 275 | slash | 150, 100 | 6, 9 |
+
+(`教区長`, "parish head", is the Cleric Beast's working name.) The sheets keep the labels in
+Japanese, with the enemy's shared start removed. The vocabulary is too varied (1,694 distinct
+words) for a word list to translate faithfully.
+
+The NpcParam rows are named too, so an enemy without an English name still has one: 540000 is
+`悪夢を継ぐもの（第2形態）`, "the one who inherits the nightmare (2nd form)". A sheet takes its title
+from the English name of any row with its model, and otherwise from its first row's working
+name.
+
+**The player's rows confirm the animation names.** `BehaviorParam_PC` rows are labelled the
+same way, and the moves tables now show the label beside the move. Of the 815 played moves
+whose animation name says what they are, 791 agree with their label. `小1`–`小5` ("light
+1–5") are the R1 chain, `溜め小` and `溜め大` ("charge, small" and "large") the R2 released
+early and fully charged, `回避小` ("evasion, light") the attack out of a roll and
+`モードチェンジ攻撃` ("mode change attack") the transform attack. Of the 24 that don't agree, 16
+are transformed charge attacks the labels call `L小` and `L大` (Chikage, Hunter Axe, Burial
+Blade, Kirkhammer, Beast Claw and others). The other 8 are second hits riding on a move, such
+as the Kirkhammer's `衝撃波` ("shockwave") during its transformed R1 chain. The labels also name
+rows no animation plays. The Saw Cleaver's 100–130 are `大1`–`大4` ("heavy 1–4"), a heavy chain
+its animations never use. Its 300 is `近距離` ("close range") and its 900 `ガード` ("guard").
+
+### The heaviest blows
+
+Each boss's largest attack, as the sum of its four values before special effects:
+
+| Boss | Animation | Judge | Label | In English | Attack |
+|---|---:|---:|---|---|---:|
+| Celestial Emissary | 3010 | 180 | `月からの使者（大）_魔法1` | messenger from the moon (large): magic 1 | 540 |
+| Ludwig the Accursed | 3017 | 461 | `ルドウイーク_飛び降りで現れる` | Ludwig: appears by jumping down | 530 |
+| Amygdala | 3026 | 367 | `邪神（脚怒り）_大ジャンプ攻撃（足）` | evil god (legs, angered): big jump attack (feet) | 490 |
+| Darkbeast Paarl | 3003007 | 540 | `嵐の獣（骨）_ジャンプ叩きつけ_上半身_第3段階` | storm beast (bone): jump slam, upper body, 3rd stage | 460 |
+| Laurence, the First Vicar | 1003003 | 315 | `教区長Ω_踏みつけ（炎属性付加後）` | parish head Ω: stomp (after fire is added) | 454 |
+| The One Reborn | 3008 | 140 | `なりそこないの邪神_単発_両腕叩きつけ` | failed evil god: single, both-arm slam | 448 |
+| Gehrman, the First Hunter | 3031 | 300 | `拠点老人（覚醒）_月光浴` | old man of the base (awakened): moonlight bath | 390 |
+| Orphan of Kos | 3024 | 192 | `ラスボス_溜め振り下ろし` | last boss: charged downward swing | 390 |
+| Cleric Beast | 3002 | 120 | `教区長_叩きつけ` | parish head: slam | 379 |
+| Ebrietas, Daughter of the Cosmos | 3018 | 280 | `月の落とし子_中距離右腕叩きつけ` | child of the moon: mid-range right-arm slam | 379 |
+| Vicar Amelia | 3007 | 170 | `聖女ビースト_両手振り下ろし` | saint beast: two-handed downward swing | 373 |
+| Lady Maria of the Astral Clocktower | 2003016 | 715 | `時計塔ボス_解放（爆発）` | Clocktower boss: release (explosion) | 360 |
+| Rom, the Vacuous Spider | 3001 | 110 | `白痴の蜘蛛_魔法B（爆発）` | idiot spider: magic B (explosion) | 340 |
+| Father Gascoigne | 3004 | 140 | `ガスコイン神父（獣）_両手叩きつけコンボ` | Father Gascoigne (beast): two-handed slam combo | 333 |
+
+The Orphan of Kos is `ラスボス`, "last boss", in its own data. Gehrman is `拠点老人`, "the old
+man of the base", the Hunter's Dream being the base. Animation numbers above a million are
+in the same TAE file, in a numbered group: Laurence's `1003003` is animation 3003 of group 1,
+and Paarl's `3003007` animation 3007 of group 3. What each group stands for isn't read here.
+
+One attack is off the scale. The Moon Presence's `見つめる` ("gaze", animation 3013, judge
+320) goes through bullet 540040 to an attack of 9,999 physical, 9,999 fire and 9,999 bolt,
+flagged `isDisableNoDamage`. In play the gaze is known to leave the player at 1 HP rather than
+kill, so something else caps it. That isn't read here.
+
 ## What this doesn't cover yet
 
 * **The hit's flags and multipliers.** What the 1.4, 1.125 and 0.8 multipliers in
@@ -593,6 +700,11 @@ gain the most, which brings them up toward the late game's:
   ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
+* **Enemy AI choices, and an enemy hit against the player.** The sheets list which AI
+  actions can make each attack, but not the distances, odds and health thresholds the battle
+  script uses to choose an action. What an enemy's attack does to the player also depends on
+  the player's defense from armor (`EquipParamProtector`), which isn't read yet, nor is
+  atkAttribute 4.
 * **The attacker's effect gathering, and elemental conversion.** How an attacker's own
   attack rates combine, and what a converted weapon's attack rating does, aren't read yet
   ([effects](#effects-blood-gems-buffs-and-new-game)).
@@ -603,6 +715,8 @@ gain the most, which brings them up toward the late game's:
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
 | `tools/tae.py` | each weapon's animation set, and the animations and state names behind each judge id |
+| `tools/enemies.py` | every enemy's attacks: animation, time, judge id, labelled attack row, AI actions |
+| `work/combat/enemies.md`, `enemies/` | one line per enemy; each enemy's attacks |
 | `tools/effects.py` | the gem and New Game+ tables, and any special effect's changes |
 | `tools/names/eboot-1.09.hand.tsv` | the formula functions' names and evidence |
 | `work/combat/gems.md`, `ngplus.md` | every blood gem effect with its text and numbers; the New Game+ effects and who uses them |

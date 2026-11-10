@@ -74,6 +74,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   cost of a level, max HP, how rally's "grace HP" wins health back, and the damage formula: an
   attack against an enemy's defense, slash, blunt and thrust included. And the effects behind
   blood gems and New Game+: what each gem really stores, and how much each enemy grows per cycle.
+  And every enemy's moveset: each attack's timing, damage, poise damage and the AI actions that
+  use it, named by the developers' own labels (the Cleric Beast's "right hook", "stomp").
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -186,6 +188,7 @@ python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         
 python -I tools/story.py ranges|sheet|sheets <base dvdroot> <update dvdroot> …  # the NPCs' questlines
 python -I tools/combat.py weapons|weapon|ar|levels|hit <base dvdroot> <update dvdroot> …  # weapons, moves, attack rating, level costs, a hit's damage
 python -I tools/tae.py sets|moves <base dvdroot> <update dvdroot> [<weapon>]  # each weapon's animation set; which animation plays each move
+python -I tools/enemies.py tables|enemy <base dvdroot> <update dvdroot> …  # every enemy's attacks
 python -I tools/effects.py tables|effect <base dvdroot> <update dvdroot> …  # blood gem effects, New Game+, any special effect
 ```
 
@@ -225,7 +228,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
 | `work/story/` | the event-flag index, and `npcs/`: a questline sheet per NPC |
-| `work/combat/` | every weapon's damage, scaling and named moves, the stat curves, every blood gem effect, and the New Game+ effects |
+| `work/combat/` | every weapon's damage, scaling and named moves, every enemy's attacks, the stat curves, every blood gem effect, and the New Game+ effects |
 | `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn), `hunters/` (every armor set worn) and `obj/` (exported models), each with an index |
 | `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |

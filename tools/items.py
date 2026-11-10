@@ -45,6 +45,7 @@ class World:
             self.path("paramdef/paramdef.paramdefbnd.dcx"),
         )
         self.rows = lambda n: params.rows(P[n], D[P[n].type])
+        self.row_names = lambda n: P[n].row_names()
         self.lots = self.rows("ItemLotParam")
         self.lvdep = self.rows("ItemLotLvdepParam")
         self.npcs = self.rows("NpcParam")

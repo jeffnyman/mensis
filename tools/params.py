@@ -170,6 +170,22 @@ class Param:
         off = self.rows[i][1]
         return self.data[off : off + size]
 
+    def row_names(self) -> dict[int, str]:
+        """{row id: the row's working name}. Each row header (24 bytes at 0x40) is the id, the
+        data offset and the offset of a UTF-16 name, often the developers' Japanese label."""
+        out = {}
+        for i, (rid, _) in enumerate(self.rows):
+            off = struct.unpack_from("<q", self.data, 0x40 + i * 24 + 16)[0]
+            end = off
+            while (
+                0 < off
+                and end + 1 < len(self.data)
+                and self.data[end : end + 2] != b"\0\0"
+            ):
+                end += 2
+            out[rid] = self.data[off:end].decode("utf-16-le", "replace") if off else ""
+        return out
+
 
 def load(parambnd: str, paramdefbnd: str):
     defs = {}

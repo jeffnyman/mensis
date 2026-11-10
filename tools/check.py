@@ -280,6 +280,12 @@ def checks() -> list[dict]:
             ],
         },
         {
+            "name": "enemies",
+            "needs": [B, U],
+            "texts": f"{OUT}/enemies/**/*.md",
+            "cmds": [PY + ["tools/enemies.py", "tables", B, U, f"{OUT}/enemies"]],
+        },
+        {
             "name": "effects",
             "needs": [B, U],
             "text": [f"{OUT}/effects/gems.md", f"{OUT}/effects/ngplus.md"],

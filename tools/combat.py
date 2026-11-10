@@ -94,6 +94,7 @@ class Weapons:
         self.rows = w.rows("EquipParamWeapon")
         self.names = w.names.get("EquipParamWeapon", {})
         self.behaviors = w.rows("BehaviorParam_PC")
+        self.move_labels = w.row_names("BehaviorParam_PC")
         self.attacks = w.rows("AtkParam_Pc")
         self.bullets = w.rows("Bullet")
         self.table = grades(w)
@@ -132,6 +133,7 @@ class Weapons:
             out.append(
                 {
                     "judge": b["behaviorJudgeId"],
+                    "label": self.move_labels.get(bid, "").replace("\u3000", " "),
                     "stamina": b["stamina"],
                     "atk": atk_id,
                     "via": via,
@@ -188,23 +190,25 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
     out.append(
         f"Animation set a{s}. Move is what the behavior graph calls the animations that invoke "
         "the judge id, in plain words; Animations lists them with their state names. A blank "
-        "Move means none of this weapon's animations invokes the judge id. A trick weapon's two "
-        "sets of moves are 400 apart. Damage and the rest are percentages of the weapon's "
+        "Move means none of this weapon's animations invokes the judge id. Row name is the "
+        "BehaviorParam_PC row's own working name (小 light, 大 heavy, 溜め charged, モードA/B the "
+        "two forms). A trick weapon's two sets of moves are 400 apart. Damage and the rest are "
+        "percentages of the weapon's "
         "values. Regain is what a hit carries (HitRecord_Build): wepRegainHp x rally % / 100 + "
         "flat rally, at +0 and the last level.\n"
     )
     out.append(
-        "| Judge | Move | Stamina | Damage % | Stamina dmg % | Poise % | Rally % | "
+        "| Judge | Move | Row name | Stamina | Damage % | Stamina dmg % | Poise % | Rally % | "
         "Flat rally | Regain | Hit level | Notes | Animations |"
     )
-    out.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
+    out.append("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
     rN = ws.rows[levels[-1]]
     for m in moves:
         a = m["a"]
         words, states = tae.describe(ws.anims, s, judges.get(m["judge"], []))
         if a is None:
             out.append(
-                f"| {m['judge']} | {words} | {m['stamina']} | | | | | | | | no attack row | "
+                f"| {m['judge']} | {words} | {m['label']} | {m['stamina']} | | | | | | | | no attack row | "
                 f"{states} |"
             )
             continue
@@ -227,7 +231,7 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
             if x
         ]
         out.append(
-            f"| {m['judge']} | {words} | {m['stamina']} | {dmg} | {a['atkStamCorrection']} | "
+            f"| {m['judge']} | {words} | {m['label']} | {m['stamina']} | {dmg} | {a['atkStamCorrection']} | "
             f"{a['atkSuperArmorCorrection']} | {a['wepRegainHpScale']} | "
             f"{a['atkRegainHp'] or ''} | {regain(r0, a):g} → {regain(rN, a):g} | "
             f"{a['dmgLevel']} | {', '.join(notes)} | {states} |"

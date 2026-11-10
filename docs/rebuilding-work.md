@@ -156,10 +156,12 @@ python -I tools/flags.py   index work/base/dvdroot_ps4 work/update/dvdroot_ps4 w
 python -I tools/story.py   sheets work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/story/npcs
 python -I tools/combat.py  weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
 python -I tools/effects.py tables  work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
+python -I tools/enemies.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
 ```
 
 About 25 seconds each for the first three, which read every Chalice layout. The flag index, the
-questline sheets, the combat tables and the effect tables take a few seconds each.
+questline sheets, the combat tables, the effect tables and the enemy sheets take a few seconds
+each.
 
 ## 7. The artwork ([textures](the-textures.md), [models](the-models.md))
 
@@ -202,7 +204,7 @@ The outputs themselves are the game's, so the repository holds only their SHA-25
 covers one tool, or one tool's output for every file of a kind:
 - the five patch diffs;
 - the readers' `check` commands;
-- the item index, the two Chalice outputs, the flag index, the questline sheets, the combat tables and the effect tables;
+- the item index, the two Chalice outputs, the flag index, the questline sheets, the combat tables, the effect tables and the enemy sheets;
 - `unfself` and `orbis_prep` on the 1.09 executable;
 - the build and decompiled-code diffs;
 - the item pictures;
