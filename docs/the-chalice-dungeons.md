@@ -57,14 +57,59 @@ share isn't derived from that number: glyphs are assigned and resolved by the se
 ([below](#glyphs)).
 
 **Story chalices** (the `xx09` IDs, e.g. 6109 Pthumeru Chalice) have `variationNum` 1, and a
-`…_90_00` folder each: the one fixed layout. Most of these folders hold a second, near-identical
-file (`_90_01`: same map pieces, objects and treasure, one more enemy and two more dummy
-enemies), the same pattern as the main maps' state variants.
+`…_90_00` folder each: the one fixed layout. Eight of the ten folders hold a second file,
+`_90_01`: the same layout plus three or four **named NPC hunters**. They are Tomb Prospector
+Olek, Madman Wallar, the Queen Killer, and in Isz, Mensis Scholar Damian and Tomb Prospector
+Gremia. The ritual never picks it (variation 0 is the only one), and it has no event script of
+its own. Yet the played `_90_00` layouts' scripts start the library's NPC-summon templates
+(`★ダンジョン_新NPC召喚_…`, "★dungeon: new NPC summon": "can summon?", "join", "head for the
+boss room", "enter the boss room", and in two of them "no throws during the boss fight") for
+exactly those characters' entity IDs. As shipped, a story dungeon's summon events point at
+characters that aren't in the layout it loads.
 
-The other family, `m29_01_…` to `m29_09_…`, looks like a library of tiles and blocks:
-`m29_01_00_00` holds everything (2,010 parts, including 233 enemies and 52 treasures), while
-siblings such as `m29_01_00_01` hold only map pieces and collision. How the library relates to the
-pre-built layouts isn't established yet.
+That holds unless something other than the ritual roll selects variant 01, for example a dungeon
+record fetched from the server, whose packed map ID carries the variant
+([below](#how-a-ritual-picks-its-layout)). That isn't traced. *An earlier version of this page
+described `_90_01` as "one more enemy and two more dummy enemies", like the main maps' state
+variants. Resolving the extra parts showed who they are.*
+
+### The rest of `m29`: the tile kit and the development layouts
+
+**Every Chalice layout is built from one kit.** All of `m29`'s map-piece models, 3,779 of them,
+live in `map/m29_00_00_00/`; no other `m29` map folder holds any. A Root layout such as
+`m29_10_00_05` places 229 of them (`m000100`, `m000101`, …). The `m29_00_00_00` layout itself is
+nearly empty (48 parts), and its script defines events of its own:
+- a messenger;
+- an "old-man warp" (`おっさんワープ`);
+- boss-room entry;
+- `死亡時エスト瓶補充`, "refill the flask on death". エスト瓶 is *Dark Souls*' Estus Flask, a name
+  kept from the engine's previous game.
+
+**The other 34 `m29_0x` folders, about 370 layouts, are reached by nothing a player can do:**
+- no chalice names them;
+- no gameplay table holds their map IDs, except rows 6900 and 6901 (below);
+- no event script warps to them;
+- the executable contains no `m29` map name at all.
+
+Their developers' labels (region and event names) say what they were for:
+
+| Folders | Labels | Looks like |
+|---|---|---|
+| `m29_00_01`, `m29_02_02` | `巡回` ("patrol", 34,344 regions in one), `親セグメント` ("parent segment"), `沼部屋` ("swamp room"), `太い通路` ("wide corridor"), `水浸し` ("flooded") | patrol routes and regions for each kind of room |
+| `m29_01_00` | patrol, `縄張り` ("territory"), `狩猟` ("hunting"); 7,915 enemies and 1,486 treasures over 58 layouts | enemy and treasure placements |
+| `m29_01_10` – `m29_01_51` | `ボス`, `ボス前風` ("wind before the boss"), `ボス前蝋燭点火` ("candles lit before the boss"), `光の壁` ("wall of light") | boss arenas |
+| `m29_02_01`, `_03` – `_05` | `籠牢起動` ("start the cage lift"), `ガーデンレバー` ("garden lever"), `跳ね橋` ("drawbridge"), `宝物部屋の扉` ("treasure-room door") | mechanisms |
+| `m29_02_00` | events `レーダー弾丸発射` ("radar bullet firing") | a test |
+| `m29_03_00` | the event `【12月末版】 帰還イベント像` ("[end-of-December build] return-event statue") | a snapshot of a dated build |
+| `m29_03_30` | events `くぐりテスト` ("duck-under test"); one of each enemy type (priest, mimic, hounds, …) | an AI movement test |
+| `m29_03_10`, `m29_04_00` | `星の花` ("star flower") death effects; the same setup in both | a boss test |
+| `m29_05_00`, `m29_05_10` | complete dungeons: bosses, treasure, bell-ringers, sewer rats | prototype dungeons |
+| `m29_01_99`, `m29_09_00` | no labels; 1,597 and 1,240 enemies | mass enemy tests |
+
+So `m29_0x` is the dungeon builders' working material and test bench: shipped with the game, but
+not part of it. They also account for most of the 48 layouts that have no event script
+([the event scripts](the-chalice-events.md#one-library-2641-callers)). 40 are in `m29_0x`; the
+other 8 are the story chalices' `_90_01` twins.
 
 ## What a ritual costs
 
@@ -181,7 +226,10 @@ chalices than the game ever offers.
 
 Two more rows, 6900 and 6901, have no chalice item and point straight at a map
 (`directMapUid` 29019998 and 29019999, the layouts `m29_01_99_98` and `m29_01_99_99`), with the
-Pthumeru Root Chalice's costs. Their purpose isn't evident from the data.
+Pthumeru Root Chalice's costs. Those are the mass-enemy test layouts, 1,597 enemies between them
+and no labels ([above](#the-rest-of-m29-the-tile-kit-and-the-development-layouts)). The rows are
+presumably how a developer opened a test dungeon through the ordinary ritual code, without a
+chalice item. No player can reach them.
 
 ## Treasure
 
@@ -339,7 +387,8 @@ console hasn't been examined.
 ## Not yet established
 
 * What the nine sub-feature pairs in a saved dungeon hold exactly, and what the 64-bit ID is.
-* How the `m29_0x` tile library relates to the pre-built layouts.
+* Whether anything ever loads a story chalice's `_90_01` twin, and so whether its NPC summons can
+  happen.
 
 (The Sinister Bell's feature, the four kinds of special enemy and the m29 event script, open
 questions in earlier versions of this page, are answered in

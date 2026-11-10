@@ -26,8 +26,9 @@ layout's constructor makes about 440 starts: 42 of `寡婦死亡でザコ死亡_
 doors, levers and enemies in that layout's map. So a layout is its map file plus a list of
 template calls, and the behavior itself lives once, in `m29.emevd`. (The 7 exceptions, in the
 `m29_00`–`m29_04` folders, define events of their own. The counts differ from the 2,685 layout
-files because 48 layouts have no script, mostly one `_90_` layout per Root base and 20 in
-`m29_01_11`, and 4 scripts have no layout.)
+files because 48 layouts have no script, and 4 scripts have no layout. The 48 are 40 development
+layouts in `m29_0x` and the story chalices' 8 unused `_90_01` twins
+([the rest of m29](the-chalice-dungeons.md#the-rest-of-m29-the-tile-kit-and-the-development-layouts)).)
 
 Usage across all layouts shows what every dungeon has and what is rare:
 
@@ -243,8 +244,9 @@ up, fewer than one with one): by the context, room for an invader. The bell-cont
 switches the widow's behavior (effect 9100) for as long as the host has 9020.
 
 The flag is also read by `サブ特徴_マルチ召喚敵_…` ("sub-feature: multiplayer summon enemy",
-strong and weak versions, kept only when online). Those templates are started only in the test
-and story folders `m29_01_00_00`, `m29_01_01_00` and `m29_05_00_00`, not in any Root layout.
+strong and weak versions, kept only when online). Those templates are started only in the
+development folders `m29_01_00_00`, `m29_01_01_00` and `m29_05_00_00`, not in any Root or story
+layout.
 
 ## Bosses
 
@@ -280,8 +282,9 @@ templates, not how often players meet it. That depends on which chalices players
 
 ## What this doesn't cover
 
-* The 7 layouts with events of their own (in `m29_00`–`m29_04`), and the library's many trap,
-  door and elevator templates beyond their names.
+* The library's many trap, door and elevator templates beyond their names. (The 7 layouts with
+  events of their own are development layouts; see
+  [the rest of m29](the-chalice-dungeons.md#the-rest-of-m29-the-tile-kit-and-the-development-layouts).)
 * Which in-game enemies the unnamed models are. The game's text doesn't name ordinary enemies,
   and naming them from outside knowledge is left to a reader who can check in the game.
 * The AI side of each special enemy (the Lua scripts behind AI commands 10 and 200, and the
