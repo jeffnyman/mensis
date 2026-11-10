@@ -5,7 +5,8 @@ move's share of it, and what a hit does to stamina, poise and rally. This page r
 **data** first: the gameplay tables and what their own descriptions say about them. Then
 [the formulas](#the-formulas) that combine those numbers, read from the executable: the stat
 curve, attack rating, the requirement penalty, defense from stats, the cost of a level, max
-HP, how rally wins health back, and how a hit's attack meets the target's defense. And last, [the
+HP, how rally wins health back, and how a hit's attack meets the target's defense. Which button
+plays each move comes from the [animations](#which-button-plays-which-move). And last, [the
 effects](#effects-blood-gems-buffs-and-new-game) behind blood gems, buffs and New Game+.
 
 ```
@@ -83,8 +84,9 @@ a level ([below](#defense)).
 A weapon's `behaviorVariationId` (the Saw Cleaver's is 700) selects its moves:
 `BehaviorParam_PC` rows `100000000 + variation × 1000 + judge id`. The **judge id** is "the
 behavior judge ID entered in TimeActEditor", in the field's own description, which adds that
-the hardware doesn't use it directly. The animation events name the moves, so which button
-plays which judge id isn't in these tables. Each row gives the move's **stamina** cost and its
+the hardware doesn't use it directly. Which button plays which judge id isn't in these tables
+but in the animations ([which button plays which move](#which-button-plays-which-move)). Each
+row gives the move's **stamina** cost and its
 attack: an `AtkParam_Pc` row, or for a gun a `Bullet` row whose attack is `atkId_Bullet`.
 
 An attack row is mostly multipliers on the weapon's values, in percent:
@@ -106,8 +108,10 @@ The Saw Cleaver's first moves:
 Judge ids 0–40 look like a chain of light attacks, each a little stronger. 170 is flagged
 `isChargeAtk`, "is it a charged attack?". Its 190% is the largest share in the first set.
 The table splits into two parallel sets, 400 apart (0–395 and 400–795, with the same special
-moves at 300 and 700, 340 and 740). For a trick weapon these are very likely its two forms,
-but the tables don't name them.
+moves at 300 and 700, 340 and 740). The tables alone don't name them. The animations do:
+0–40 are the R1 chain, 170 the fully charged R2, and the two sets are a trick weapon's two
+forms. 100 and 120 turn out to be rows that none of the Saw Cleaver's animations play
+([which button plays which move](#which-button-plays-which-move)).
 
 A few moves stand out:
 
@@ -116,6 +120,97 @@ A few moves stand out:
   parameters", so they lead into a throw (`ThrowParam`).
 * **`dmgLevel`** is "which damage motion the enemy plays when hit": 1 for the light chain, 2 for
   heavier blows, 5 and 6 for the special moves.
+
+### Which button plays which move
+
+The judge id is invoked by the animations. Three files link it to a button:
+
+```
+python -I tools/tae.py sets  work/base/dvdroot_ps4 work/update/dvdroot_ps4
+python -I tools/tae.py moves work/base/dvdroot_ps4 work/update/dvdroot_ps4 Saw Cleaver
+```
+
+1. **The weapon picks an animation set.** `WepMotion_AnimOffset` (`01cc0b40` in the 1.09
+   executable) takes the weapon's `wepmotionCategory`, 武器モーションカテゴリ ("weapon motion
+   category"). Categories 20 to 48 go through a jump table; the rest are used as they are, so
+   the Threaded Cane (127) and the DLC weapons (140 to 153) name their set directly. The result
+   times 1,000,000, plus the animation's own number, is the animation played: the Saw Cleaver's
+   first light attack is `a112_030000`. A non-zero `spAtkcategory`, 特殊攻撃カテゴリ ("special
+   attack category"), would replace the set; no weapon sets it.
+
+   | Category | Set | Weapons |
+   |---:|---:|---|
+   | 22 | a116 | Stake Driver |
+   | 27 | a113 | Blade of Mercy |
+   | 28 | a112 | Saw Cleaver |
+   | 29 | a114 | Chikage |
+   | 30 | a103 | Hunter Axe |
+   | 33 | a109 | Tonitrus |
+   | 34 | a120 | Ludwig's Holy Blade |
+   | 35 | a110 | Logarius' Wheel |
+   | 36 | a104 | Rifle Spear |
+   | 37 | a121 | Burial Blade |
+   | 38 | a122 | Saw Spear |
+   | 40 | a124 | Reiterpallasch |
+   | 42 | a108 | Bare Fists, Kos Parasite |
+   | 47 | a106 | Beast Claw |
+   | 48 | a105 | Kirkhammer |
+
+   The guns, torches and shields map the same way: 24 → a117 (Hunter Pistol), 41 → a102
+   (Hunter Blunderbuss), 31 → a118 (Cannon), 39 → a123 (Rosmarinus), 25 → a107 (torches) and
+   20 → a125 (shields, which have no set file).
+
+   Six of the table's entries were first guessed by matching each set's judge ids against
+   each weapon's moves. The jump table confirmed all six: Hunter Axe a103, Saw Cleaver a112,
+   Beast Claw a106, Blade of Mercy a113, Logarius' Wheel a110 and Tonitrus a109. Matching alone
+   couldn't place the others, because most sets use the same judge numbers.
+
+2. **The set's animation events invoke the judge id.** `chr/c0000.anibnd.dcx` holds one TAE
+   ("time act event") file per set, `a<set>.tae`. At a moment in an animation, an event of
+   type 1 ("invoke attack behavior") or type 2 ("invoke bullet behavior") names a judge id in
+   its third value. Some animations import another's events instead: the Saw Cleaver's
+   forward roll attack (`032210`) uses the events of its unlocked one (`032200`).
+
+3. **The behavior graph names the animation.** The same archive's
+   `Export/Behaviors/c0000.hkx` is the Havok behavior graph. Its states have English names,
+   each holding a selector with one clip per set: the state `AtkRightNormal01` holds
+   `a103_030000`, `a112_030000` and so on.
+
+So the Saw Cleaver's moves read:
+
+| Judge | State | Move | Stamina | Damage |
+|---:|---|---|---:|---:|
+| 0–40 | `AtkRightNormal01`–`05` | R1, the five light attacks of the chain | 20 | 100%–109% |
+| 150 | `AtkPowerNormalHit01_ModeA` | R2, released before a full charge | 35 | 120% |
+| 170 | `AtkPowerHardHit01_ModeA` | R2, fully charged | 50 | 190% |
+| 320, 330 | `AtkRightDash`, `AtkRightDashHard` | running R1, running R2 | 30, 45 | 109%, 125% |
+| 390 | `ChangeGimmick_RightSide_ModeA` | transform attack (L1) | 23 | 130% |
+| 400 | `AtkbothNormal01` | R1, transformed | 24 | 97% |
+| 550, 570 | `AtkPowerNormalHit01`, `AtkPowerHardHit01` | R2, transformed, released early and fully charged | 38, 50 | 125%, 170% |
+| 790 | `ChangeGimmick_RightSide_ModeB` | transform attack back (L1) | 30 | 130% |
+
+This settles the two sets 400 apart. The states for 0–395 say `Right` or `ModeA`, and those
+for 400–795 say `Both` or `ModeB`. `ChangeGimmick` ("change the trick") states sit in both.
+A trick weapon's two forms are its two sets.
+The state names also show that the Saw Cleaver's R2 is a charge attack (`AtkPower…`). Its 150
+is the R2 released early, and its 170 the full charge. Other weapons have a separate
+`AtkRightHard` chain: the Hunter Axe's transformed R2 is judge 500, `AtkBothHard01`.
+
+The plain names come from the state names, and `tae.py`'s `GLOSS` table holds the
+translation. `Normal` is R1, `Hard` R2, `Power` a charged R2, `Dash` running, `Rolling` out
+of a roll, `Step` out of a quickstep, `Fall` plunging, `L2` the L2 attacks and `Throw` a
+visceral or grab. Each moves table in `work/combat/moves/` has a Move column with these names,
+and an Animations column with the animations and states behind each.
+
+**Not every row is played.** Across the 40 distinct weapons, the sets' events invoke 982 of
+the 1,530 move rows. A DLC weapon's rows are nearly all played: the Beasthunter Saif's 36 of
+39, the Church Pick's 38 of 41. A base weapon has rows its own set never invokes. For the Saw
+Cleaver these are 22 rows: 100–130, 240, 260–300, 500, 510, 650–700, 800 and 900–950. Some of
+them are moves of other sets: 500 is the Hunter Axe's transformed R2. Others, 16 of the 22, no
+animation of any set invokes: 100–130, 260–300 (300 being the stamina-only move), 660–700, 900
+and 901. Those may be unused, or started another way, by the action script or a throw. That
+isn't followed here. Two sets, a155 and a156, have attack events, but no weapon's category
+leads to them.
 
 ### Poise
 
@@ -491,8 +586,11 @@ gain the most, which brings them up toward the late game's:
   ([rally](#how-rally-wins-health-back)).
 * **Which calculation a real hit uses.** Attack rating's mode 4, physical scaled by Bloodtinge,
   is traced only as far as the five functions that call it.
-* **Move names.** Which button plays a judge id is in the animation events (TAE), which aren't
-  read yet.
+* **The moves no animation plays.** Rows like the Saw Cleaver's 100–130 and 900–950 aren't
+  invoked by any player animation. Whether the action script or the throws start them isn't
+  followed, nor are the fallback sets `WepMotion_AnimOffset` tries before the weapon's own,
+  the shot of guns whose sets have no behavior event, or the unused sets a155 and a156
+  ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
 * **The attacker's effect gathering, and elemental conversion.** How an attacker's own
@@ -504,7 +602,8 @@ gain the most, which brings them up toward the late game's:
 | Path | |
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
+| `tools/tae.py` | each weapon's animation set, and the animations and state names behind each judge id |
 | `tools/effects.py` | the gem and New Game+ tables, and any special effect's changes |
 | `tools/names/eboot-1.09.hand.tsv` | the formula functions' names and evidence |
 | `work/combat/gems.md`, `ngplus.md` | every blood gem effect with its text and numbers; the New Game+ effects and who uses them |
-| `work/combat/weapons.md`, `moves/`, `curves.md` | every weapon at +0 and its last level, each weapon's moves, the stat curves |
+| `work/combat/weapons.md`, `moves/`, `curves.md` | every weapon at +0 and its last level, each weapon's moves with their names, the stat curves |

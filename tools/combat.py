@@ -21,7 +21,8 @@ docs/the-combat.md):
   (CalcCorrectGraph). saWeaponDamage is the poise ("super armor") base, wepRegainHp the rally
   ("regain") base.
 * BehaviorParam_PC: a weapon's moves, id 100000000 + variation * 1000 + judge id. The judge id
-  is the one the animation events (TAE) use, so which button plays a move is not in the tables.
+  is the one the animation events (TAE) use; tools/tae.py finds the animations that invoke it
+  in the weapon's animation set, and the names the behavior graph gives them (the Move column).
   refType 0 points at an AtkParam_Pc row, refType 1 at a Bullet row (whose atkId_Bullet is the
   attack). stamina is the move's stamina cost.
 * AtkParam_Pc: per move, multipliers on the weapon's values, in percent: atkPhysCorrection etc.
@@ -48,6 +49,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import items as itemlib
+import tae
 
 STATS = (
     ("correctStrength", "properStrength", "Str"),
@@ -95,6 +97,13 @@ class Weapons:
         self.attacks = w.rows("AtkParam_Pc")
         self.bullets = w.rows("Bullet")
         self.table = grades(w)
+        self._anims: tae.Animations | None = None
+
+    @property
+    def anims(self) -> tae.Animations:
+        if self._anims is None:
+            self._anims = tae.Animations(self.w)
+        return self._anims
 
     def families(self) -> dict[int, list[int]]:
         """{+0 row id: [row ids by level]} for every named weapon."""
@@ -173,24 +182,30 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
         )
     out.append("")
     moves = ws.moves(r0["behaviorVariationId"])
+    s = tae.motion_set(r0)
+    judges = ws.anims.judges(s)
     out.append("## Moves\n")
     out.append(
-        "Percentages of the weapon's values. Judge ids are the animation events'; "
-        "a trick weapon's two sets of moves are 400 apart. Regain is what a hit carries "
-        "(HitRecord_Build): wepRegainHp x rally % / 100 + flat rally, at +0 and the last "
-        "level.\n"
+        f"Animation set a{s}. Move is what the behavior graph calls the animations that invoke "
+        "the judge id, in plain words; Animations lists them with their state names. A blank "
+        "Move means none of this weapon's animations invokes the judge id. A trick weapon's two "
+        "sets of moves are 400 apart. Damage and the rest are percentages of the weapon's "
+        "values. Regain is what a hit carries (HitRecord_Build): wepRegainHp x rally % / 100 + "
+        "flat rally, at +0 and the last level.\n"
     )
     out.append(
-        "| Judge | Stamina | Damage % | Stamina dmg % | Poise % | Rally % | "
-        "Flat rally | Regain | Hit level | Notes |"
+        "| Judge | Move | Stamina | Damage % | Stamina dmg % | Poise % | Rally % | "
+        "Flat rally | Regain | Hit level | Notes | Animations |"
     )
-    out.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    out.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
     rN = ws.rows[levels[-1]]
     for m in moves:
         a = m["a"]
+        words, states = tae.describe(ws.anims, s, judges.get(m["judge"], []))
         if a is None:
             out.append(
-                f"| {m['judge']} | {m['stamina']} | | | | | | | | no attack row |"
+                f"| {m['judge']} | {words} | {m['stamina']} | | | | | | | | no attack row | "
+                f"{states} |"
             )
             continue
         parts = {d: a[c] for _, c, d in DAMAGE}
@@ -212,10 +227,10 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
             if x
         ]
         out.append(
-            f"| {m['judge']} | {m['stamina']} | {dmg} | {a['atkStamCorrection']} | "
+            f"| {m['judge']} | {words} | {m['stamina']} | {dmg} | {a['atkStamCorrection']} | "
             f"{a['atkSuperArmorCorrection']} | {a['wepRegainHpScale']} | "
             f"{a['atkRegainHp'] or ''} | {regain(r0, a):g} → {regain(rN, a):g} | "
-            f"{a['dmgLevel']} | {', '.join(notes)} |"
+            f"{a['dmgLevel']} | {', '.join(notes)} | {states} |"
         )
     return out
 

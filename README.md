@@ -68,7 +68,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   Djura, Eileen, Alfred and the Queen of Cainhurst, Gascoigne's daughters, and the Old Hunters'
   Simon, Ludwig's head, Maria, Brador and Adeline.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
-  letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"). And the
+  letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
+  which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
   formulas from the executable: attack rating, the requirement penalty, defense from stats, the
   cost of a level, max HP, how rally's "grace HP" wins health back, and the damage formula: an
   attack against an enemy's defense, slash, blunt and thrust included. And the effects behind
@@ -184,6 +185,7 @@ python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # t
 python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         # where every event flag is read and set
 python -I tools/story.py ranges|sheet|sheets <base dvdroot> <update dvdroot> …  # the NPCs' questlines
 python -I tools/combat.py weapons|weapon|ar|levels|hit <base dvdroot> <update dvdroot> …  # weapons, moves, attack rating, level costs, a hit's damage
+python -I tools/tae.py sets|moves <base dvdroot> <update dvdroot> [<weapon>]  # each weapon's animation set; which animation plays each move
 python -I tools/effects.py tables|effect <base dvdroot> <update dvdroot> …  # blood gem effects, New Game+, any special effect
 ```
 
@@ -223,7 +225,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
 | `work/story/` | the event-flag index, and `npcs/`: a questline sheet per NPC |
-| `work/combat/` | every weapon's damage, scaling and moves, the stat curves, every blood gem effect, and the New Game+ effects |
+| `work/combat/` | every weapon's damage, scaling and named moves, the stat curves, every blood gem effect, and the New Game+ effects |
 | `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn), `hunters/` (every armor set worn) and `obj/` (exported models), each with an index |
 | `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |

@@ -270,6 +270,16 @@ def checks() -> list[dict]:
             ],
         },
         {
+            "name": "moves",
+            "needs": [B, U],
+            "stdout": True,
+            "cmds": [PY + ["tools/tae.py", "sets", B, U]]
+            + [
+                PY + ["tools/tae.py", "moves", B, U, *w.split()]
+                for w in ("Saw Cleaver", "Holy Moonlight Sword", "Threaded Cane")
+            ],
+        },
+        {
             "name": "effects",
             "needs": [B, U],
             "text": [f"{OUT}/effects/gems.md", f"{OUT}/effects/ngplus.md"],
