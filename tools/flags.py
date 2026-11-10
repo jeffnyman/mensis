@@ -335,7 +335,9 @@ def talk_owners(w: itemlib.World) -> dict[int, set[str]]:
         for p in w.layout(m).parts:
             if p.get("talk", 0) > 0:
                 r = w.npcs.get(p["npc"])
-                n = w.npc_names.get(r["nameId"], "").strip() if r else ""
+                # a human NPC's nameId is 0; its name, if it has one, is keyed by the NpcParam ID
+                key = r["nameId"] if r and r["nameId"] > 0 else p["npc"]
+                n = w.npc_names.get(key, "").strip()
                 out[p["talk"]].add(n or f"{p['model']} NpcParam {p['npc']}")
     return out
 

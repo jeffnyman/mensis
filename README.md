@@ -62,6 +62,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   all but one. A ritual's roll is steered toward unique items you haven't picked up yet.
 * [Event flags](docs/the-flags.md): every place the game's world state is read or set, across
   event scripts, talk scripts and tables, and the 24 flag ranges that hold the NPCs' stories.
+  [The questlines](docs/the-questlines.md) read each range into a sheet of states,
+  conversations and gifts, and one character's story from hers.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -93,6 +95,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     to OBJ, and a small software renderer that draws every character and piece of equipment.
 12. [Event flags](docs/the-flags.md): an index of every read and write of the game's world state,
     through event templates and talk scripts, and the NPCs' state ranges.
+13. [The questlines](docs/the-questlines.md): each NPC's states, every conversation with the path
+    that leads to it, what they hand over, and the lonely old woman's story read from the data.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
@@ -167,6 +171,7 @@ python -I tools/items.py world|find <base dvdroot> <update dvdroot> …   # wher
 python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the Chalice Dungeon catalog
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         # where every event flag is read and set
+python -I tools/story.py ranges|sheet|sheets <base dvdroot> <update dvdroot> …  # the NPCs' questlines
 ```
 
 **Checking**
@@ -204,7 +209,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/ghidra/` | Ghidra-ready ELFs and symbols, the project with both builds (`project/Bloodborne.gpr`), reports, naming logs, and `diff/` (function hashes, the build diff, decompiled pairs) |
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
-| `work/story/` | the event-flag index |
+| `work/story/` | the event-flag index, and `npcs/`: a questline sheet per NPC |
 | `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn), `hunters/` (every armor set worn) and `obj/` (exported models), each with an index |
 | `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |

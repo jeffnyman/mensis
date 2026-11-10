@@ -4,7 +4,7 @@ Bloodborne remembers what has happened in numbered **event flags**: a door opene
 an item picked up, a character sent to Oedon Chapel. A flag is one bit, and about ten thousand of
 them are named somewhere in the files. Nothing names their *meaning*, but every place that reads
 or sets one can be found, and that is what a questline is made of: what sets this flag, and
-what waits on it? This page builds that index. [The questlines](#whats-next) are read from it.
+what waits on it? This page builds that index. [The questlines](the-questlines.md) are read from it.
 
 ```
 python -I tools/flags.py index work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/story/flags-1.09.tsv
@@ -78,9 +78,10 @@ They are followed like event templates. Every call lands on a group, and every f
 a number.
 
 A talk script `t<id>.esd` belongs to the characters whose map placement has talk ID `<id>`.
-158 of the 236 talk scripts are matched that way. Most talking NPCs are the human model `c0000`
-with no name in the text (names exist only for characters you can fight), so the index says
-`c0000 NpcParam 6090` where it can't say more.
+158 of the 236 talk scripts are matched that way. Most talking NPCs are the human model `c0000`.
+A human's `nameId` is 0, and its name, where it has one, is keyed by its own NpcParam ID (6500 is
+"Valtr, Master of the League"). Most have none, so the index says `c0000 NpcParam 6090` where it
+can't say more.
 
 **Params.** Picking up an item lot sets its `getItemFlagId`, which is why a picked-up item stays
 gone. A shop row needs its `qwcId` flag before it is for sale, and has an `eventFlag` of its own.
@@ -169,8 +170,8 @@ model, or her remains, differently.
 
 ## What's next
 
-The questlines: each NPC's range read state by state, with the talk script's dialogue for each
-state, the events that move them on, and what can be missed.
+[The questlines](the-questlines.md): each NPC's range read state by state, with the talk
+script's dialogue for each state, the events that move them on, and what they hand over.
 
 ## Files
 

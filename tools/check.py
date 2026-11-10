@@ -240,6 +240,12 @@ def checks() -> list[dict]:
             "cmds": [PY + ["tools/flags.py", "index", B, U, f"{OUT}/flags.tsv"]],
         },
         {
+            "name": "story",
+            "needs": [B, U],
+            "texts": f"{OUT}/story/*.md",
+            "cmds": [PY + ["tools/story.py", "sheets", B, U, f"{OUT}/story"]],
+        },
+        {
             "name": "unfself",
             "needs": ["work/update/eboot.bin"],
             "binary": [f"{OUT}/eboot-1.09.elf"],
@@ -373,6 +379,10 @@ def run_check(c: dict) -> str | None:
         parts.append(hashlib.sha256(stdout.replace("\r\n", "\n").encode()).hexdigest())
     if c.get("text"):
         parts.append(_text_hash([os.path.join(ROOT, p) for p in c["text"]]))
+    if c.get(
+        "texts"
+    ):  # a glob: a folder of text outputs whose names come from the data
+        parts.append(_text_hash(sorted(glob.glob(os.path.join(ROOT, c["texts"])))))
     if c.get("binary"):
         h = hashlib.sha256()
         for p in c["binary"]:

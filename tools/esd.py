@@ -21,8 +21,9 @@ ESDLang's EzInfixor (thefifthmatt, MIT):
 
 Command and function names for Bloodborne are not public, so they print as c<bank>_<id> and
 f<id>. Integer arithmetic is folded (the compiler leaves 10000000 + 241*10000 + 7810 unfolded).
-With --talk, folded integers that have a line of subtitle text are annotated with it, which is
-usually what makes a dialogue change readable.
+With --talk, folded integers that are talk IDs are annotated with the first line they speak (a
+talk ID is a TalkParam row; its msgId keys the text), which is usually what makes a dialogue
+change readable.
 """
 
 from __future__ import annotations
@@ -275,15 +276,55 @@ def scripts(path: str) -> dict[str, bytes]:
 
 
 def talk_text(msgbnd: str | None) -> dict[int, str]:
-    """TalkParam-indexed subtitle text: the 会話 (conversation) table of a menu msgbnd."""
+    """For each talk ID, the first line its conversation speaks (see talk_rows)."""
+    rows = talk_rows(msgbnd)
+    out = {}
+    for k in rows:
+        lines = conversation(rows, k)
+        if lines:
+            out[k] = lines[0]
+    return out
+
+
+def conversation(rows: dict[int, str], tid: int) -> list[str]:
+    """The lines c1_1(tid) plays: rows tid, tid + 1, ... while they exist. Blank rows (pauses,
+    or the other speaker's turns) are skipped."""
+    out = []
+    while tid in rows:
+        if rows[tid].strip():
+            out.append(rows[tid])
+        tid += 1
+    return out
+
+
+def talk_rows(msgbnd: str | None) -> dict[int, str]:
+    """Subtitle text by talk ID, blank rows included: what a script's c1_1(<talk id>) says.
+
+    A talk ID is a TalkParam row, and the row's msgId (its first field) is the key of the line
+    in the conversation (会話) table of the menu msgbnd. TalkParam is read from the game params
+    of the same dvdroot (<root>/msg/engus/menu.msgbnd.dcx -> <root>/param/gameparam/...).
+    (An earlier version keyed the table by talk ID directly, which quoted the wrong lines.)
+    """
     if not msgbnd:
         return {}
+    lines: dict[int, str] = {}
     for b in souls.bnd4_read(souls.load(msgbnd)):
         if "会話" in b.name:
-            return {
+            lines = {
                 k: v.replace("\n", " ") for k, v in souls.fmg_read(b.data).items() if v
             }
-    return {}
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(msgbnd))))
+    gp = os.path.join(root, "param", "gameparam", "gameparam.parambnd.dcx")
+    for b in souls.bnd4_read(souls.load(gp)):
+        if os.path.basename(b.name.replace("\\", "/")).startswith("TalkParam"):
+            count = struct.unpack_from("<H", b.data, 0x0A)[0]
+            out = {}
+            for i in range(count):
+                tid, off = struct.unpack_from("<i4xq", b.data, 0x40 + i * 24)
+                msg = struct.unpack_from("<i", b.data, off)[0]  # msgId
+                out[tid] = lines.get(msg, "")
+            return out
+    raise ValueError(f"no TalkParam in {gp}")
 
 
 def main():

@@ -508,12 +508,22 @@ Two details make the output readable:
 * **Constant folding.** The compiler leaves ID arithmetic unfolded
   (`10000000 + 241*10000 + 7810 + 20*n`), so `esd.py` folds it. That turns out to build event-flag
   IDs (12417810 + 20n), the same flag numbering the event scripts use.
-* **Talk lines.** Folded integers that are talk IDs are annotated with their English subtitle,
-  from the conversation (`会話`) table of `menu.msgbnd.dcx`:
+* **Talk lines.** Folded integers that are talk IDs are annotated with the first line they
+  speak. A talk ID is a `TalkParam` row. The row's `msgId` is the line's key in the conversation
+  (`会話`) table of `menu.msgbnd.dcx`, and one call plays the rows that follow it too, as one
+  conversation. Gehrman, asleep in his chair:
 
   ```
-  entry c1_1(1400300 /* "Oh, hello... You're all right. Very good." */, -1, -1)
+  entry c1_1(1500500 /* "Oh, Laurence... what's taking you so long..." */, -1, -1)
   ```
+
+  An earlier version looked talk IDs up in the conversation table directly, skipping
+  `TalkParam`. That quoted the wrong lines (`1400300` came out as "Oh, hello... You're all
+  right. Very good.", which is someone else's line). It also left most lines unannotated, which
+  is why this page once said the patched scripts below speak no lines. Gehrman's script shows
+  the difference: looked up directly, his first conversation reads as another character's line
+  ("You... you're not from around here are ya?"), but through `msgId` it is his welcome, "Ah-hah,
+  you must be the new hunter."
 
   Annotation only happens after folding. On raw literals, the `10000000` inside a flag
   calculation was "annotated" with whatever line has ID 10,000,000.
@@ -529,15 +539,21 @@ renumbers the states after it, which inflates the diffs. `esd.py` doesn't renorm
 |---|---|---|
 | t210000–t210003 | Hunter's Dream | the same new state in all four: one call to command `c1_39()` before the conversation's main path |
 | t210721 | Hunter's Dream | small structural change (15 lines, mostly renumbering) |
-| t270503 | Forbidden Woods | a new state that calls a shared state group with arguments `(22, 822, 6770)` before the common exit. It sits next to the replaced "League: the executioner's betrayal" event |
+| t270503 | Forbidden Woods (Valtr's) | a new state that calls a shared state group with arguments `(22, 822, 6770)` before the common exit. It sits next to the replaced "League: the executioner's betrayal" event |
 | t350511 | Research Hall | the conversation now also needs flag 13505911 set and 13505912 clear to start, and ends early when 13505912 or 1730 is set |
 
 The last one ties into two event changes. Flags 13505911/13505912 are arguments of event
 13505900, `時計塔_NPC殺し屋_予兆開始` ("Clocktower: NPC assassin, warning signs begin"), whose
 arguments 1.09 also changed. And 1730 is one of the NPC flags 1.09 added to the NPC-kill event
 9480. So this conversation is now held back while the NPC assassin's sequence is under way, and
-closed once it has run its course. None of these scripts speak a line themselves, so their
-speakers can't be named from the text.
+closed once it has run its course.
+
+The speakers can be named from their lines. `t270503` belongs to NpcParam 6500, which the
+character-name text calls Valtr, Master of the League, and its lines are his: "Ahh, how goes your
+hunt?", "Ahh, very good. You've crushed some vermin." `t350511`'s character has no name in the text; it says
+"...unending death awaits those who pry into the unknown..." The Hunter's Dream scripts
+`t210000`–`t210003` and `t210721` belong to `c9020` placements, which speak no lines of their
+own.
 
 ## The map layouts
 
