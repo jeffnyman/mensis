@@ -75,7 +75,9 @@ and character models rendered from the game's own meshes and textures (`flver.py
   attack against an enemy's defense, slash, blunt and thrust included. And the effects behind
   blood gems and New Game+: what each gem really stores, and how much each enemy grows per cycle.
   And every enemy's moveset: each attack's timing, damage, poise damage and the AI actions that
-  use it, named by the developers' own labels (the Cleric Beast's "right hook", "stomp").
+  use it, named by the developers' own labels (the Cleric Beast's "right hook", "stomp"),
+  scaled by each enemy's area level. And what a hit costs a hunter: defense from level, then
+  the four armor pieces' damage cuts.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -188,7 +190,7 @@ python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         
 python -I tools/story.py ranges|sheet|sheets <base dvdroot> <update dvdroot> …  # the NPCs' questlines
 python -I tools/combat.py weapons|weapon|ar|levels|hit <base dvdroot> <update dvdroot> …  # weapons, moves, attack rating, level costs, a hit's damage
 python -I tools/tae.py sets|moves <base dvdroot> <update dvdroot> [<weapon>]  # each weapon's animation set; which animation plays each move
-python -I tools/enemies.py tables|enemy <base dvdroot> <update dvdroot> …  # every enemy's attacks
+python -I tools/enemies.py tables|enemy|hit <base dvdroot> <update dvdroot> …  # every enemy's attacks; one against a hunter
 python -I tools/effects.py tables|effect <base dvdroot> <update dvdroot> …  # blood gem effects, New Game+, any special effect
 ```
 

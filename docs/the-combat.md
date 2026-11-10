@@ -333,8 +333,9 @@ Three more things are in the same code:
 `Defense_StatSum` (`0197b180`) adds up six stats (with weights, all 1.0 in the file). In the
 same structure, attack rating reads Strength, Skill, Bloodtinge and Arcane at `+0x58`–`+0x70`.
 The six are those four and the two before them, presumably Vigor and Endurance. Curve **102**
-of that sum, rounded, is each damage type's base defense, before the four armor pieces are added
-and effects multiply it:
+of that sum, rounded, is each damage type's base defense, which effects then multiply. The
+armor's flat defenses would be added, but every piece's are 0; armor works by
+[cutting damage](#what-a-hit-costs-a-hunter) instead:
 
 | Stat sum | 1 | 60 | 120 | 195 | 600 |
 |---|---:|---:|---:|---:|---:|
@@ -610,8 +611,8 @@ hits lead to an attack row.
 * **Attacks.** Unlike the player's, an enemy's attack row holds the attack's own values, not
   multipliers. `atkPhys`, `atkMag`, `atkFire` and `atkThun` are its physical, arcane, fire and
   bolt attack. `atkStam` is its stamina damage, `atkSuperArmor` its poise damage, `dmgLevel`
-  the reaction it causes, and `atkAttribute` its type: 1 slash, 2 blunt, 3 thrust, and 4 in
-  256 rows whose meaning isn't read. Special effects scale these values afterwards, New Game+
+  the reaction it causes, and `atkAttribute` its type: 1 slash, 2 blunt, 3 thrust, and 4
+  standard ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)). Special effects scale these values afterwards, New Game+
   among them ([New Game+](#new-game)).
 * **AI.** `NpcThinkParam` row `aiThinkId` names the battle script, `<battleGoalID>_battle.lua`,
   in one of `script/*.luabnd.dcx`. Its action functions queue animations with `AddSubGoal`.
@@ -685,6 +686,79 @@ One attack is off the scale. The Moon Presence's `見つめる` ("gaze", animati
 flagged `isDisableNoDamage`. In play the gaze is known to leave the player at 1 HP rather than
 kill, so something else caps it. That isn't read here.
 
+### What a hit costs a hunter
+
+```
+python -I tools/enemies.py hit work/base/dvdroot_ps4 work/update/dvdroot_ps4 500000 120 30 "Hunter Hat" "Hunter Garb" "Hunter Gloves" "Hunter Trousers"
+```
+
+Four things stand between an enemy's attack row and the hunter's health.
+
+**1. The enemy's area level.** NpcParam's `spEffectID0`–`7` are 常駐特殊効果, "resident special
+effects". Most enemies carry one named for the level of the place they stand. Father
+Gascoigne's 7003 is `レベル3：聖堂B・神父` ("level 3: Cathedral B, the Father"), and Ludwig's
+7481 is `レベル17：聖堂街D・ボス` ("level 17: Cathedral Ward D, boss"). The effect multiplies HP,
+attack, defense and stamina damage. Gascoigne's 1,440 HP becomes 2,032, and Ludwig's 2,400
+becomes 16,658. The sheets now give each enemy's effect and its HP with it. New Game+ multiplies
+on top of this ([New Game+](#new-game)).
+
+**2. The hunter's defense.** It is curve 102 of the six stats' sum
+([defense](#defense)), and the starting origins show that sum is always the level plus 50.
+Milquetoast is level 10 with stats adding to 60, and Waste of Skin level 4 with 54. So a hunter's
+defense is 10 at level 10, 71 at 30, 129 at 50, 180 at 70 and 214 at 100. Armor adds nothing
+here: every piece's flat defenses (`defensePhysics` and the others) are 0.
+
+**3. Attack against defense**, the same formula an enemy's defense meets
+([attack against defense](#attack-against-defense)).
+
+**4. Armor.** Each piece holds damage multipliers, and the function that reads them
+(`ArmorCut_Product`, `0197abc0`) multiplies them across the four pieces. It picks the physical
+one by the attack's type: `slashDamageCutRate` for slash, `blowDamageCutRate` for blunt,
+`thrustDamageCutRate` for thrust, and for type 4 `shotDamageCutRate`. That field's own
+description explains it: "the multiplier on standard damage (the name says shot; internally it
+is standard)". So `atkAttribute` 4 is **standard** damage. Arcane, fire and bolt take their own
+rates. The player's character table reaches this function through slot 0x230
+(`PlayerIns_GetArmorCutRates`, `01d02650`), next to the defense slot 0x220. The hit function
+(`Hit_ApplyReceived`) passes the four results into `Damage_Compute`, which multiplies each
+element's damage by them after the defense curve. The full Hunter set (hat, garb, gloves,
+trousers) multiplies slash damage by 0.95 × 0.89 × 0.95 × 0.94 = 0.755.
+
+Each boss's heaviest attack ([the heaviest blows](#the-heaviest-blows)), against a hunter in the
+full Hunter set, with no buffs or runes:
+
+| Boss (row) | Area level effect | Row's attack | × | Attack | Level 30 | Level 100 |
+|---|---|---:|---:|---:|---:|---:|
+| Ludwig the Accursed (451000) | 7481, level 17: Cathedral Ward D, boss | 530 | 2.488 | 1,319 | 896 | 874 |
+| Laurence, the First Vicar (450000) | 7484, level 20.5: Cathedral Ward D, hidden boss | 454 | 2.771 | 1,258 | 828 | 729 |
+| Orphan of Kos (454000) | 7486, level 22: fishing village, boss | 390 | 2.839 | 1,107 | 737 | 623 |
+| Gehrman, the First Hunter (805000) | 7021, level 21: the base, awakened old man | 390 | 2.788 | 1,087 | 840 | 787 |
+| The One Reborn (507000) | 7015, level 15: the sacrifice town | 448 | 2.354 | 1,055 | 717 | 667 |
+| Amygdala (512000) | 7029, level 11-2: home town, second half | 490 | 2.075 | 1,017 | 691 | 637 |
+| Lady Maria (452000) | 7483, level 20: the Clocktower, boss | 360 | 2.754 | 991 | 674 | 618 |
+| Ebrietas (251000) | 7017, level 17: Cathedral C, second half, hidden | 379 | 2.488 | 943 | 641 | 580 |
+| Darkbeast Paarl (508000) | 7009, level 9: the sacrifice town, first visit | 460 | 2.003 | 921 | 616 | 472 |
+| Rom, the Vacuous Spider (510000) | 7013, level 13: the university | 340 | 2.163 | 735 | 568 | 481 |
+| Cleric Beast (500000) | 7006, level 6-3: Cathedral A | 379 | 1.624 | 615 | 418 | 338 |
+| Vicar Amelia (502000) | 7006, level 6-3: Cathedral A | 373 | 1.624 | 606 | 412 | 331 |
+| Celestial Emissary (257000) | none | 540 | 1 | 540 | 417 | 325 |
+| Father Gascoigne, beast (272000) | 7003, level 3: Cathedral B, the Father | 333 | 1.119 | 373 | 239 | 175 |
+
+The ranking changes once the area level is in. The Celestial Emissary's 540 is the largest
+attack row, but row 257000 carries no level effect. Ludwig's row value is barely smaller, yet
+in play his attack is more than twice it. Levels help less than they seem to: from level 30 to
+100, defense triples (71 to 214), but a 1,000-point attack is far above both. In the damage
+formula's terms, attack is many times defense either way, where every point of defense removes
+little. Against Ludwig, the 70 levels save 22 health.
+
+The numbers assume a few things not yet read:
+* that the attacker's attack-power rates multiply across effects, as the defense and damage-cut
+  gatherers were seen to do;
+* nothing for the third set of rates the hit function passes (character slot 0x238);
+* nothing for the hunter's own effects (runes, buffs, and the 1.4, 1.125 and 0.8 multipliers
+  of [attack against defense](#attack-against-defense)).
+
+They are the hit's damage before those.
+
 ## What this doesn't cover yet
 
 * **The hit's flags and multipliers.** What the 1.4, 1.125 and 0.8 multipliers in
@@ -700,11 +774,11 @@ kill, so something else caps it. That isn't read here.
   ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
-* **Enemy AI choices, and an enemy hit against the player.** The sheets list which AI
-  actions can make each attack, but not the distances, odds and health thresholds the battle
-  script uses to choose an action. What an enemy's attack does to the player also depends on
-  the player's defense from armor (`EquipParamProtector`), which isn't read yet, nor is
-  atkAttribute 4.
+* **Enemy AI choices.** The sheets list which AI actions can make each attack, but not the
+  distances, odds and health thresholds the battle script uses to choose an action.
+* **The rest of a hit on the player.** The third set of rates the hit function passes (slot
+  0x238), the hunter's own effects, and what holds the Moon Presence's gaze at 1 HP
+  ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)).
 * **The attacker's effect gathering, and elemental conversion.** How an attacker's own
   attack rates combine, and what a converted weapon's attack rating does, aren't read yet
   ([effects](#effects-blood-gems-buffs-and-new-game)).
@@ -715,7 +789,7 @@ kill, so something else caps it. That isn't read here.
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
 | `tools/tae.py` | each weapon's animation set, and the animations and state names behind each judge id |
-| `tools/enemies.py` | every enemy's attacks: animation, time, judge id, labelled attack row, AI actions |
+| `tools/enemies.py` | every enemy's attacks: animation, time, judge id, labelled attack row, AI actions, area level; `hit` applies one to a hunter |
 | `work/combat/enemies.md`, `enemies/` | one line per enemy; each enemy's attacks |
 | `tools/effects.py` | the gem and New Game+ tables, and any special effect's changes |
 | `tools/names/eboot-1.09.hand.tsv` | the formula functions' names and evidence |

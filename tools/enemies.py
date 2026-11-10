@@ -3,9 +3,12 @@
 
     python -I tools/enemies.py tables <base dvdroot> <update dvdroot> <out dir>
     python -I tools/enemies.py enemy  <base dvdroot> <update dvdroot> <name or NpcParam row>
+    python -I tools/enemies.py hit    <base dvdroot> <update dvdroot> <NpcParam row> <judge id> <level> [<armor piece>...]
 
 `tables` writes enemies.md (one line per enemy) and enemies/<name> <row>.md (each enemy's
-attacks). `enemy` prints one enemy's attacks.
+attacks). `enemy` prints one enemy's attacks. `hit` applies one enemy attack to a hunter of a
+given level wearing the named armor pieces (each a quoted EquipParamProtector name, such as
+"Hunter Hat"), with the enemy's area level and nothing else.
 
 How the pieces connect (docs/the-combat.md, "Enemy movesets"):
 
@@ -26,7 +29,18 @@ How the pieces connect (docs/the-combat.md, "Enemy movesets"):
 * AtkParam_Npc holds an enemy attack's own values, not multipliers: atkPhys / atkMag /
   atkFire / atkThun (physical, arcane, fire, bolt), atkStam (stamina damage), atkSuperArmor
   (poise damage), dmgLevel (the reaction it causes) and atkAttribute (1 slash, 2 blunt,
-  3 thrust). Special effects then scale them (New Game+, for one: tools/effects.py).
+  3 thrust, 4 standard). Special effects then scale them (New Game+, for one: tools/effects.py).
+* Area level: NpcParam spEffectID0-7 are 常駐特殊効果, "resident special effects". Most enemies
+  have one named for its area's level, such as 7003 "レベル3：聖堂B・神父" (level 3: Cathedral B,
+  the Father), which multiplies its HP (maxHpRate), attack (physicsAttackPowerRate and the other
+  three), defense and stamina damage. The sheets give these; `hit` multiplies the attack by them
+  (rates of several effects multiply, as the defense and damage-cut gatherers were seen to do).
+* Against the player (Hit_ApplyReceived, 01e2a770): the player's defense is curve 102 of the
+  six stats' sum, which is level + 50 (Defense_Compute); the damage formula reduces each
+  element (combat.damage_share); then the four armor pieces' cut rates multiply it
+  (ArmorCut_Product, 0197abc0, through player slot 0x230): the physical rate by attack type,
+  1 slashDamageCutRate, 2 blow, 3 thrust, 4 shotDamageCutRate ("standard", in its own
+  description), anything else 1.0.
 * NpcThinkParam row aiThinkId names the battle script, <battleGoalID>_battle.lua, in one of
   script/*.luabnd.dcx. Its action functions (<working name>_Act01 ...) queue animations with
   AddSubGoal; an animation number in an action's constants is an attack it can make.
@@ -43,12 +57,34 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import combat
 import items as itemlib
 import lua50
 import souls
 import tae
 
-ATTRIBUTE = {1: "slash", 2: "blunt", 3: "thrust"}
+ATTRIBUTE = {1: "slash", 2: "blunt", 3: "thrust", 4: "standard"}
+# ArmorCut_Product (0197abc0): the physical cut rate by atkAttribute
+PHYSICAL_CUT = {
+    1: "slashDamageCutRate",
+    2: "blowDamageCutRate",
+    3: "thrustDamageCutRate",
+    4: "shotDamageCutRate",
+}
+ELEMENT_CUT = ("magicDamageCutRate", "fireDamageCutRate", "thunderDamageCutRate")
+# an effect's attack-power rates, element by element, and its other scalings
+ATTACK_RATES = (
+    "physicsAttackPowerRate",
+    "magicAttackPowerRate",
+    "fireAttackPowerRate",
+    "thunderAttackPowerRate",
+)
+SCALES = (
+    ("maxHpRate", "HP"),
+    ("physicsAttackPowerRate", "attack"),
+    ("physicsDiffenceRate", "defense"),
+    ("staminaAttackRate", "stamina damage"),
+)
 ELEMENTS = (
     ("atkPhys", "phys"),
     ("atkMag", "arcane"),
@@ -65,6 +101,8 @@ class Enemies:
         self.bullets = w.rows("Bullet")
         self.think = w.rows("NpcThinkParam")
         self.npc_labels = w.row_names("NpcParam")
+        self.effects = w.rows("SpEffectParam")
+        self.effect_labels = w.row_names("SpEffectParam")
         self.attack_labels = w.row_names("AtkParam_Npc")
         self._scripts: dict[str, str] | None = None
         self.english: dict[int, str] = {}
@@ -78,6 +116,24 @@ class Enemies:
 
     def label(self, nid: int) -> str:
         return self.npc_labels.get(nid, "").replace("\u3000", " ").strip()
+
+    def resident(self, nid: int) -> list[int]:
+        """The resident special effects that scale something (spEffectID0-7)."""
+        r = self.w.npcs[nid]
+        out = []
+        for i in range(8):
+            e = self.effects.get(r[f"spEffectID{i}"])
+            if e and any(
+                e[f] != 1.0 for f, _ in SCALES + tuple((x, "") for x in ATTACK_RATES)
+            ):
+                out.append(r[f"spEffectID{i}"])
+        return out
+
+    def rate(self, nid: int, field: str) -> float:
+        v = 1.0
+        for e in self.resident(nid):
+            v *= self.effects[e][field]
+        return v
 
     def archive(self, model: int) -> str | None:
         for root in (self.w.update, self.w.base):
@@ -244,6 +300,18 @@ def sheet(
         f"{first['def_thunder']}. Poise {first['superArmorDurability']}. AI: "
         f"{script or 'none'}.\n"
     )
+    res = en.resident(rows[0])
+    if res:
+        out.append(
+            f"Resident effects of row {rows[0]}: "
+            + "; ".join(
+                f"{e} ({en.effect_labels.get(e, '').replace(chr(0x3000), ' ')}): "
+                + ", ".join(f"{label} ×{en.effects[e][f]:g}" for f, label in SCALES)
+                for e in res
+            )
+            + f". With them its HP is {round(first['hp'] * en.rate(rows[0], 'maxHpRate'))}, and "
+            "its attacks below are multiplied by the attack rate.\n"
+        )
     out.append(
         "Generated by `tools/enemies.py`. One line per hit: the animation, when in it the hit "
         "is judged, its judge id and the attack's own values (AtkParam_Npc, before any special "
@@ -274,6 +342,42 @@ def sheet(
     return out, stats
 
 
+def armor_cuts(pieces: list[dict], attribute: int) -> list[float]:
+    """ArmorCut_Product (0197abc0): each element's damage multiplier, the product over the
+    pieces worn; the physical one by attack type, 1.0 for a type outside 1-4."""
+    cuts = [1.0, 1.0, 1.0, 1.0]
+    for p in pieces:
+        cuts[0] *= p[PHYSICAL_CUT[attribute]] if attribute in PHYSICAL_CUT else 1.0
+        for i, f in enumerate(ELEMENT_CUT, 1):
+            cuts[i] *= p[f]
+    return cuts
+
+
+def player_defense(w: itemlib.World, level: int) -> float:
+    """Defense_Compute (0197a240): curve 102 of the six stats' sum (level + 50), rounded."""
+    return float(round(combat.curve(w.rows("CalcCorrectGraph")[102], level + 50)))
+
+
+def hit_on_player(
+    a: dict,
+    level: int,
+    pieces: list[dict],
+    w: itemlib.World,
+    rates: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+) -> list[tuple[str, float, float, float, float]]:
+    """[(element, attack, defense, after defense, after armor)] for each element present; the
+    attack is the row's value times the attacker's rate for that element."""
+    d = player_defense(w, level)
+    cuts = armor_cuts(pieces, a["atkAttribute"])
+    out = []
+    for (f, name), cut, rate in zip(ELEMENTS, cuts, rates):
+        if a[f] > 0:
+            value = a[f] * rate
+            after = value * combat.damage_share(value, d)
+            out.append((name, value, d, after, after * cut))
+    return out
+
+
 def safe(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "_", name)
 
@@ -282,10 +386,65 @@ def main() -> int:
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8")
     a = sys.argv
-    if len(a) < 5 or a[1] not in ("tables", "enemy"):
+    if len(a) < 5 or a[1] not in ("tables", "enemy", "hit"):
         print(__doc__)
         return 2
     en = Enemies(itemlib.World(a[2], a[3]))
+    if a[1] == "hit":
+        if len(a) < 7:
+            print(__doc__)
+            return 2
+        nid, judge, level = int(a[4]), int(a[5]), int(a[6])
+        armor = en.w.rows("EquipParamProtector")
+        anames = en.w.names.get("EquipParamProtector", {})
+        pieces = []
+        for want in a[7:]:
+            rid = next(
+                (
+                    k
+                    for k, v in sorted(anames.items())
+                    if (v or "").strip() == want and k in armor
+                ),
+                None,
+            )
+            if rid is None:
+                print(f"no armor piece {want!r}")
+                return 1
+            pieces.append(armor[rid])
+        if nid not in en.w.npcs:
+            print(f"no NpcParam row {nid}")
+            return 1
+        atk, via = en.move(en.w.npcs[nid]["behaviorVariationId"], judge)
+        if atk is None:
+            print(f"no attack for judge {judge}: {via}")
+            return 1
+        print(
+            f"{en.name(nid)} judge {judge}, {ATTRIBUTE.get(atk['atkAttribute'], atk['atkAttribute'])}; "
+            f"level {level}, defense {player_defense(en.w, level):g}; armor: {', '.join(a[7:]) or 'none'}"
+        )
+        rates = tuple(en.rate(nid, f) for f in ATTACK_RATES)
+        res = en.resident(nid)
+        print(
+            "resident effects: "
+            + (
+                ", ".join(
+                    f"{e} {en.effect_labels.get(e, '').replace(chr(0x3000), ' ')}"
+                    for e in res
+                )
+                or "none"
+            )
+            + f"; attack ×{rates[0]:g}"
+        )
+        total = 0.0
+        for name, value, d, after, final in hit_on_player(
+            atk, level, pieces, en.w, rates
+        ):
+            total += final
+            print(
+                f"{name:7} attack {value:6g}  after defense {after:7.1f}  after armor {final:7.1f}"
+            )
+        print(f"total   {total:.1f}")
+        return 0
     groups = en.groups()
     if a[1] == "enemy":
         want = " ".join(a[4:])

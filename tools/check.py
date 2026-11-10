@@ -34,6 +34,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HASHES = os.path.join(ROOT, "tools", "check-hashes.tsv")
+HUNTER_SET = ["Hunter Hat", "Hunter Garb", "Hunter Gloves", "Hunter Trousers"]
 OUT = "work/check"
 B, U = "work/base/dvdroot_ps4", "work/update/dvdroot_ps4"
 PY = [sys.executable, "-I"]
@@ -284,6 +285,21 @@ def checks() -> list[dict]:
             "needs": [B, U],
             "texts": f"{OUT}/enemies/**/*.md",
             "cmds": [PY + ["tools/enemies.py", "tables", B, U, f"{OUT}/enemies"]],
+        },
+        {
+            "name": "enemy-hits",
+            "needs": [B, U],
+            "stdout": True,
+            "cmds": [
+                PY + ["tools/enemies.py", "hit", B, U, *w.split(), *HUNTER_SET]
+                for w in (
+                    "500000 120 10",
+                    "451000 461 30",
+                    "451000 461 100",
+                    "454000 192 50",
+                )
+            ]
+            + [PY + ["tools/enemies.py", "hit", B, U, "271000", "140", "10"]],
         },
         {
             "name": "effects",
