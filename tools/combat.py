@@ -5,6 +5,7 @@
     python -I tools/combat.py weapon  <base dvdroot> <update dvdroot> <name>
     python -I tools/combat.py ar      <base dvdroot> <update dvdroot> <name> <level> <str> <skl> <blt> <arc>
     python -I tools/combat.py levels  <base dvdroot> <update dvdroot> [<from> <to>]
+    python -I tools/combat.py hit     <base dvdroot> <update dvdroot> <name> <level> <str> <skl> <blt> <arc> <judge id> <NpcParam row>
 
 `weapons` writes weapons.md (every weapon at +0 and its last level), moves/<weapon>.md (every
 move of each) and curves.md (the stat curves). `weapon` prints one weapon's tables.
@@ -31,9 +32,11 @@ docs/the-combat.md):
 The menu's letter grades for scaling come from MenuValueTableParam rows 100-106 (format 100 of
 the scaling properties): S at 110, A 85, B 65, C 55, D 30, E above 0.
 
-`ar` and `levels` compute with the formulas read from the 1.09 executable (docs/the-combat.md,
-"The formulas"): CalcCorrectGraph_Evaluate (01979240), AttackRating_Compute (01976df0) and
-LevelUp_TotalCost (01f2e460). `ar` gives a weapon's attack at a 100% motion value with no buffs.
+`ar`, `levels` and `hit` compute with the formulas read from the 1.09 executable (docs/the-combat.md,
+"The formulas"): CalcCorrectGraph_Evaluate (01979240), AttackRating_Compute (01976df0),
+LevelUp_TotalCost (01f2e460), NpcDefense_Compute (0197b320) and Damage_Compute (01976240).
+`ar` gives a weapon's attack at a 100% motion value with no buffs; `hit` one move against one
+enemy, without weakness multipliers, effects or the formula's three flags.
 """
 
 from __future__ import annotations
@@ -272,6 +275,41 @@ def attack_rating(ws: Weapons, rid: int, stats: tuple[int, int, int, int]) -> di
     return out
 
 
+def damage_share(attack: float, defense: float) -> float:
+    """Damage_Compute (01976240): the share of an attack that gets through a defense. The
+    game keeps it as a reduction percent, piecewise in r = attack / defense: 90 at r <= 0.12, then
+    parabolas through 60 at r = 1, 30 at r = 2.5 and 10 at r = 8 and above (and 10 with no
+    defense)."""
+    if defense <= 0:
+        cut = 10.0
+    else:
+        r = attack / defense
+        if r < 1:
+            cut = 90.0 if r <= 0.12 else (r - 0.12) ** 2 * -38.73966979980469 + 90.0
+        elif r <= 2.5:
+            cut = (r - 2.5) ** 2 * 13.333333015441895 + 30.0
+        elif r < 8:
+            cut = (r - 8.0) ** 2 * 0.6611570119857788 + 10.0
+        else:
+            cut = 10.0
+    return 1 - cut / 100
+
+
+ATTRIBUTE_DEF = {1: "def_slash", 2: "def_blow", 3: "def_thrust"}  # atkAttribute 1-3
+
+
+def npc_defense(npc: dict, attribute: int) -> dict:
+    """NpcDefense_Compute (0197b320) without effects: physical defense adjusted by the
+    percentage for the attack's physical type (slash, blunt, thrust)."""
+    adj = npc.get(ATTRIBUTE_DEF.get(attribute, ""), 0)
+    return {
+        "phys": npc["def_phys"] * (adj + 100) * 0.01,
+        "arcane": npc["def_mag"],
+        "fire": npc["def_fire"],
+        "bolt": npc["def_thunder"],
+    }
+
+
 def level_cost(row: dict, level: int) -> int:
     """LevelUp_TotalCost (01f2e460): the echoes to go from `level` to the next, with the
     CalcCorrectGraph row 200 fields; rounded twice, as the code does."""
@@ -312,7 +350,7 @@ def main() -> int:
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8")
     a = sys.argv
-    if len(a) < 4 or a[1] not in ("weapons", "weapon", "ar", "levels"):
+    if len(a) < 4 or a[1] not in ("weapons", "weapon", "ar", "levels", "hit"):
         print(__doc__)
         return 2
     ws = Weapons(itemlib.World(a[2], a[3]))
@@ -321,6 +359,45 @@ def main() -> int:
         row = ws.w.rows("CalcCorrectGraph")[200]
         for lv in range(lo, hi + 1):
             print(f"{lv:4} -> {lv + 1:4}  {level_cost(row, lv):9,}")
+        return 0
+    if a[1] == "hit":
+        name, level = " ".join(a[4:-7]), a[-7]
+        s = [int(x) for x in a[-6:-2]]
+        judge, npc_id = int(a[-2]), int(a[-1])
+        hit = next(
+            (k for k in ws.families() if ws.name(k).lower() == name.lower()), None
+        )
+        npc = ws.w.npcs.get(npc_id)
+        if hit is None or npc is None:
+            print(f"no weapon {name!r} or no NpcParam row {npc_id}")
+            return 1
+        rid = ws.families()[hit][int(level.lstrip("+"))]
+        move = next(
+            (
+                m
+                for m in ws.moves(ws.rows[rid]["behaviorVariationId"])
+                if m["judge"] == judge
+            ),
+            None,
+        )
+        if move is None or move["a"] is None:
+            print(f"no move {judge}")
+            return 1
+        atk = move["a"]
+        ar = attack_rating(ws, rid, (s[0], s[1], s[2], s[3]))
+        dfn = npc_defense(npc, atk["atkAttribute"])
+        total = 0.0
+        for (_, corr, kind), key in zip(DAMAGE, ("physical", "arcane", "fire", "bolt")):
+            value = ar[key] * atk[corr] / 100
+            if value <= 0:
+                continue
+            dmg = value * damage_share(value, dfn[kind])
+            total += dmg
+            print(
+                f"{kind:7} attack {value:7.1f}  defense {dfn[kind]:6.1f}  "
+                f"damage {dmg:7.1f}  ({damage_share(value, dfn[kind]):.3f})"
+            )
+        print(f"total   {total:7.1f}")
         return 0
     if a[1] == "ar":
         name, level = " ".join(a[4:-5]), a[-5]

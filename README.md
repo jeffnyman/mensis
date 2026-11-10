@@ -69,7 +69,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"). And the
   formulas from the executable: attack rating, the requirement penalty, defense from stats, the
-  cost of a level, max HP, and how rally's "grace HP" wins health back.
+  cost of a level, max HP, how rally's "grace HP" wins health back, and the damage formula: an
+  attack against an enemy's defense, slash, blunt and thrust included.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.

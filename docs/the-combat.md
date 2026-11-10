@@ -5,7 +5,7 @@ move's share of it, and what a hit does to stamina, poise and rally. This page r
 **data** first: the gameplay tables and what their own descriptions say about them. Then
 [the formulas](#the-formulas) that combine those numbers, read from the executable: the stat
 curve, attack rating, the requirement penalty, defense from stats, the cost of a level, max
-HP, and how rally wins health back.
+HP, how rally wins health back, and how a hit's attack meets the target's defense.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -159,6 +159,7 @@ How the game combines those numbers, read from the 1.09 executable in Ghidra
 ```
 python -I tools/combat.py ar     work/base/dvdroot_ps4 work/update/dvdroot_ps4 Saw Cleaver +0 12 10 9 9
 python -I tools/combat.py levels work/base/dvdroot_ps4 work/update/dvdroot_ps4 4 30
+python -I tools/combat.py hit    work/base/dvdroot_ps4 work/update/dvdroot_ps4 Saw Cleaver +10 25 25 9 9 0 271000
 ```
 
 **Finding them.** The param repository names its tables in one list: `{name, index}` pairs at
@@ -241,8 +242,7 @@ and effects multiply it:
 |---|---:|---:|---:|---:|---:|
 | Base defense | 10 | 10 | 180 | 255 | 300 |
 
-with exponents 1, −1.1, −1.2 and 1 between the points. How defense then reduces a hit's damage is
-in the hit code, not followed here.
+with exponents 1, −1.1, −1.2 and 1 between the points. How defense then reduces a hit is [attack against defense](#attack-against-defense).
 
 ### Leveling up
 
@@ -321,25 +321,84 @@ The exponents between the points are 1.1, 1.2, −1.2 and −1.1. So each stage 
 slowly up to 30, and after 30 the gains come early in each stage. Curve **101** is read from
 the second stat (presumably Endurance) and rises to 450. What it sets isn't followed here.
 
-### What the hit does to defense: not found
+### Attack against defense
 
-How an attack meets the target's defense isn't found yet. Two searches came up empty:
+`Damage_Compute` (`01976240`) is the hit's formula. It was found from the defender's side. An
+enemy's defense lives in NpcParam: `def_phys`, `def_mag`, `def_fire` and `def_thunder`, plus
+`def_slash`, `def_blow` and `def_thrust` described as percentages. Only one function reads all
+seven: `NpcDefense_Compute` (`0197b320`). It is called through slot `0x220` of the characters'
+virtual tables (the constructors store `0578ebc0` for an enemy, `0578f310` and `0578fa80` for
+the players), and a sweep for calls through that slot found three. The hit-receiving function
+(`01e2a770`) is one of them: it reads the hit record's four attack values, gets the defense,
+and passes both to `Damage_Compute`.
 
-* **Dark Souls' damage formula** is a piecewise curve in the ratio of attack to defense, with
-  constants such as 19.2/49 and 0.8/121. None of them is stored in the executable. (One float
-  equal to 0.4/3 is, but nothing references it.)
-* **The functions that read a hit record's four attack values together** (33 of them) include
-  copies and graphics code, and the ones read so far aren't the formula.
+**An enemy's defense:**
 
-The defense side's inputs are known: the base defense above, the armor pieces, and effect
-multipliers. The next place to look is the code that consumes a received hit record and changes
-HP.
+* **physical** is `def_phys × (100 + p) / 100`, where `p` is the enemy's percentage for the
+  attack's physical type: `def_slash`, `def_blow` (blunt) or `def_thrust`. The attack's
+  `atkAttribute` picks which, 1, 2 or 3 in that order;
+* **arcane, fire and bolt** are `def_mag`, `def_fire` and `def_thunder`.
+
+Each is then multiplied and added to by effects (`FUN_01be76b0`). A player's defense comes from
+[the stat sum and armor](#defense) through the same slot. Father Gascoigne (NpcParam 271000) has
+90 physical, 80 arcane, 65 fire and 120 bolt, and 0 for slash, blunt and thrust.
+
+**The formula** takes each damage type separately, with `r = attack / defense`. The game keeps a
+**reduction percentage** and lets through the rest:
+
+| Ratio `r` | Reduction | Damage |
+|---|---|---|
+| no defense | 10% | 0.9 × attack |
+| `r ≥ 8` | 10% | 0.9 × attack |
+| `2.5 < r < 8` | `10 + 0.6612 × (r − 8)²` | 0.9 down to 0.7 |
+| `1 ≤ r ≤ 2.5` | `30 + 13.333 × (r − 2.5)²` | 0.7 down to 0.4 |
+| `0.12 < r < 1` | `90 − 38.74 × (r − 0.12)²` | 0.4 down to 0.1 |
+| `r ≤ 0.12` | 90% | 0.1 × attack |
+
+This is **Dark Souls' damage curve, kept as percentages**. An earlier version of this page recorded
+the formula as not found: a search for Dark Souls' constants (19.2/49, 0.8/121) came up empty,
+because the game stores them differently. 0.6612/100 is 0.8/121, and 13.333/100 is 0.4/3, the same as in that
+game. Only the bottom piece moves: its bend is at 0.12 rather than 0.125, with 0.3874 in place of
+19.2/49, so it still meets 0.4 at `r = 1`.
+
+The four results are then multiplied by factors the caller passes (the weakness multipliers
+below, and two vectors of effect multipliers), summed, and scaled by three more:
+
+* **× 1.4** when bit `0x80` of a character state word (`+0x1bc`) is set (whose, the code read
+  here doesn't settle);
+* **× 1.125 or × 0.8** when one of two flags in the hit record (`+0x1c0`, `+0x1c1`) is set and no
+  other value is given;
+* **× a final factor** the caller passes.
+
+What those flags mean isn't named in the code read here. Before any of this, the receiving
+function multiplies each attack value by **weakness factors**, one for each of four bits of the
+target's NpcParam flags (`+0x145`), among them `isWeakSaint` ("weak to holy"), `isWeakA` and
+`isWeakB`.
+
+Because each type is judged against its own defense, **splitting damage costs damage**. A
+small arcane part meets the full arcane defense on its own:
+
+```
+python -I tools/combat.py hit work/base/dvdroot_ps4 work/update/dvdroot_ps4 Holy Moonlight Sword +10 16 12 9 50 0 271000
+phys    attack   225.0  defense   90.0  damage   157.5  (0.700)
+arcane  attack    92.5  defense   80.0  damage    42.5  (0.459)
+total     200.0
+```
+
+| Saw Cleaver +10, Str 25, Skl 25, against Father Gascoigne | Attack | Ratio | Damage |
+|---|---:|---:|---:|
+| judge 0 (100%) | 270.0 | 3.0 | 198.4 |
+| judge 170, charged (190%) | 513.0 | 5.7 | 443.8 |
+
+`hit` leaves out the weakness multipliers, effects and the three flags, so its numbers are a
+hit on an unbuffed, unflagged target.
 
 ## What this doesn't cover yet
 
-* **The hit itself.** How a hit's attack meets the target's defense, and what damage type
-  (slash, blunt, thrust) changes ([not found](#what-the-hit-does-to-defense-not-found)). And how
-  a landed hit's regain amount reaches the grace HP ([rally](#how-rally-wins-health-back)).
+* **The hit's flags and multipliers.** What the 1.4, 1.125 and 0.8 multipliers in
+  [attack against defense](#attack-against-defense) stand for, the weakness factors' values,
+  and the effect multipliers. Also how a landed hit's regain amount reaches the grace HP
+  ([rally](#how-rally-wins-health-back)).
 * **Which calculation a real hit uses.** Attack rating's mode 4, physical scaled by Bloodtinge,
   is traced only as far as the five functions that call it.
 * **Move names.** Which button plays a judge id is in the animation events (TAE), which aren't

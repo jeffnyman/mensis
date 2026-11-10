@@ -259,7 +259,15 @@ def checks() -> list[dict]:
                     "Holy Moonlight Sword +10 16 12 9 50",
                 )
             ]
-            + [PY + ["tools/combat.py", "levels", B, U, "1", "120"]],
+            + [PY + ["tools/combat.py", "levels", B, U, "1", "120"]]
+            + [
+                PY + ["tools/combat.py", "hit", B, U, *w.split()]
+                for w in (
+                    "Saw Cleaver +10 25 25 9 9 0 271000",
+                    "Saw Cleaver +10 25 25 9 9 170 271000",
+                    "Holy Moonlight Sword +10 16 12 9 50 0 271000",
+                )
+            ],
         },
         {
             "name": "story",
