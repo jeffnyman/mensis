@@ -3,6 +3,8 @@
 
     python -I tools/combat.py weapons <base dvdroot> <update dvdroot> <out dir>
     python -I tools/combat.py weapon  <base dvdroot> <update dvdroot> <name>
+    python -I tools/combat.py ar      <base dvdroot> <update dvdroot> <name> <level> <str> <skl> <blt> <arc>
+    python -I tools/combat.py levels  <base dvdroot> <update dvdroot> [<from> <to>]
 
 `weapons` writes weapons.md (every weapon at +0 and its last level), moves/<weapon>.md (every
 move of each) and curves.md (the stat curves). `weapon` prints one weapon's tables.
@@ -28,6 +30,10 @@ docs/the-combat.md):
 
 The menu's letter grades for scaling come from MenuValueTableParam rows 100-106 (format 100 of
 the scaling properties): S at 110, A 85, B 65, C 55, D 30, E above 0.
+
+`ar` and `levels` compute with the formulas read from the 1.09 executable (docs/the-combat.md,
+"The formulas"): CalcCorrectGraph_Evaluate (01979240), AttackRating_Compute (01976df0) and
+LevelUp_TotalCost (01f2e460). `ar` gives a weapon's attack at a 100% motion value with no buffs.
 """
 
 from __future__ import annotations
@@ -197,6 +203,77 @@ def weapon_tables(ws: Weapons, base_id: int, levels: list[int]) -> list[str]:
     return out
 
 
+def curve(row: dict, x: float) -> float:
+    """CalcCorrectGraph_Evaluate (01979240): the growth, in percent, at stat x."""
+    v = [row[f"stageMaxVal{i}"] for i in range(5)]
+    g = [row[f"stageMaxGrowVal{i}"] for i in range(5)]
+    e = [row[f"adjPt_maxGrowVal{i}"] for i in range(5)]
+    x = min(x, v[4])
+    if x <= 0:
+        return g[0]
+    i = 0
+    while i < 4 and v[i + 1] < x:
+        i += 1
+    r = (x - v[i]) / (v[i + 1] - v[i])
+    if e[i] >= 0:
+        out = g[i] + (g[i + 1] - g[i]) * r ** e[i]
+    else:
+        out = g[i] + (g[i + 1] - g[i]) * (1 - (1 - r) ** -e[i])
+    return min(max(out, min(g[i], g[i + 1])), max(g[i], g[i + 1]))
+
+
+# The requirement penalty's constants (05527fe0, 05527fe4 in the executable's data: 20, 20).
+PENALTY_SPAN, PENALTY_K0 = 20.0, 20.0
+
+
+def stat_factor(correct: float, stat: int, requirement: int, row: dict) -> float:
+    """One stat's multiplier on a damage type (AttackRating_Compute). Meeting the requirement:
+    1 + correct/100 * curve(stat)/100. Short of it: a parabola from 1.0 down to 0.198 at 20% or
+    more short (with the run-time flag at 05956720 clear)."""
+    if requirement == 0 or requirement - stat < 1:
+        if correct <= 0:
+            return 1.0
+        return correct / 100 * (curve(row, stat) / 100) + 1.0
+    k = (PENALTY_K0 - 100) / (1 - PENALTY_SPAN * PENALTY_SPAN)
+    a = PENALTY_SPAN if k > 0 else 0.0
+    m = min(PENALTY_SPAN, (1 - stat / requirement) * 100) - a
+    return (100 - a * k * a + m * k * m) / 100
+
+
+def attack_rating(ws: Weapons, rid: int, stats: tuple[int, int, int, int]) -> dict:
+    """AttackRating_Compute (01976df0) for one weapon row at a 100% motion value, no buffs, no
+    throw: physical (Strength and Skill), blood (physical with Bloodtinge alone, the mode-4
+    call), and arcane, fire and bolt (Arcane)."""
+    r = ws.rows[rid]
+    graph = ws.w.rows("CalcCorrectGraph")[r["correctType"]]
+    f = [stat_factor(r[c], s, r[p], graph) for (c, p, _), s in zip(STATS, stats)]
+    phys = min(f[0], f[1]) if f[0] < 1 or f[1] < 1 else f[0] - 1 + f[1] - 1 + 1
+    out = {
+        "physical": r["attackBasePhysics"] * phys,
+        # only for a weapon with Bloodtinge scaling: otherwise the factor is 1
+        "blood": r["attackBasePhysics"] * f[2] if r["correctMagic"] > 0 else 0,
+    }
+    for base, _, name in DAMAGE[1:]:
+        out[name] = r[base] * f[3]
+    return out
+
+
+def level_cost(row: dict, level: int) -> int:
+    """LevelUp_TotalCost (01f2e460): the echoes to go from `level` to the next, with the
+    CalcCorrectGraph row 200 fields; rounded twice, as the code does."""
+    x = level + 81
+    v = (
+        x
+        * x
+        * (
+            max(0.0, x - row["boundry_value"]) * row["boundry_inclination_soul"]
+            + row["init_inclination_soul"]
+        )
+        + row["adjustment_value"]
+    )
+    return int(int(v + 0.5) + 0.5)
+
+
 def curves(w: itemlib.World) -> list[str]:
     g = w.rows("CalcCorrectGraph")
     out = [
@@ -221,10 +298,31 @@ def main() -> int:
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8")
     a = sys.argv
-    if len(a) < 5 or a[1] not in ("weapons", "weapon"):
+    if len(a) < 4 or a[1] not in ("weapons", "weapon", "ar", "levels"):
         print(__doc__)
         return 2
     ws = Weapons(itemlib.World(a[2], a[3]))
+    if a[1] == "levels":
+        lo, hi = (int(a[4]), int(a[5])) if len(a) >= 6 else (4, 30)
+        row = ws.w.rows("CalcCorrectGraph")[200]
+        for lv in range(lo, hi + 1):
+            print(f"{lv:4} -> {lv + 1:4}  {level_cost(row, lv):9,}")
+        return 0
+    if a[1] == "ar":
+        name, level = " ".join(a[4:-5]), a[-5]
+        s = [int(x) for x in a[-4:]]
+        stats = (s[0], s[1], s[2], s[3])
+        hit = next(
+            (k for k in ws.families() if ws.name(k).lower() == name.lower()), None
+        )
+        if hit is None:
+            print(f"no weapon {name!r}")
+            return 1
+        rid = ws.families()[hit][int(level.lstrip("+"))]
+        for k, v in attack_rating(ws, rid, stats).items():
+            if v:
+                print(f"{k:9} {v:7.1f}")
+        return 0
     fams = ws.families()
     if a[1] == "weapon":
         want = " ".join(a[4:]).lower()

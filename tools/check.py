@@ -246,6 +246,22 @@ def checks() -> list[dict]:
             "cmds": [PY + ["tools/combat.py", "weapons", B, U, f"{OUT}/combat"]],
         },
         {
+            "name": "combat-formulas",
+            "needs": [B, U],
+            "stdout": True,
+            "cmds": [
+                PY + ["tools/combat.py", "ar", B, U, *w.split()]
+                for w in (
+                    "Saw Cleaver +0 12 10 9 9",
+                    "Saw Cleaver +10 99 99 99 99",
+                    "Saw Cleaver +0 5 10 9 9",
+                    "Chikage +10 10 14 50 9",
+                    "Holy Moonlight Sword +10 16 12 9 50",
+                )
+            ]
+            + [PY + ["tools/combat.py", "levels", B, U, "1", "120"]],
+        },
+        {
             "name": "story",
             "needs": [B, U],
             "texts": f"{OUT}/story/*.md",

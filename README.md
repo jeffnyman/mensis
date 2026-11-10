@@ -67,7 +67,9 @@ and character models rendered from the game's own meshes and textures (`flver.py
   Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers. Then
   Djura, Eileen, Alfred and the Queen of Cainhurst, and Gascoigne's daughters.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
-  letter, the stat curve, each move's motion value, stamina, poise and rally ("regain").
+  letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"). And the
+  formulas from the executable: attack rating, the requirement penalty, defense from stats, and
+  the cost of a level.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -101,8 +103,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     through event templates and talk scripts, and the NPCs' state ranges.
 13. [The questlines](docs/the-questlines.md): each NPC's states, every conversation with the path
     that leads to it, what they hand over, and the safe places read from the data.
-14. [Combat](docs/the-combat.md): the weapon, move and curve tables, and what their own
-    descriptions say each number does.
+14. [Combat](docs/the-combat.md): the weapon, move and curve tables, what their own
+    descriptions say each number does, and the formulas that combine them.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
@@ -178,7 +180,7 @@ python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the C
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         # where every event flag is read and set
 python -I tools/story.py ranges|sheet|sheets <base dvdroot> <update dvdroot> …  # the NPCs' questlines
-python -I tools/combat.py weapons|weapon <base dvdroot> <update dvdroot> …     # every weapon's numbers and moves
+python -I tools/combat.py weapons|weapon|ar|levels <base dvdroot> <update dvdroot> …  # weapons, moves, attack rating, level costs
 ```
 
 **Checking**

@@ -91,3 +91,10 @@ address	kind	name	confidence	evidence
 01eb9270	function	DebugChaliceMenu_OnInput	likely	menu item 0 picks any HolygrailExParam row and calls ChaliceRitual_PickDungeon; item 400 sets the variation directly; items 300-312 toggle and choose sub-feature picks
 01eb2b40	function	ChaliceSlot_WriteMapId	likely	writes the 4 bytes of a packed map id into 8-bit flag groups at 94000096 + slot*100000
 01966290	function	GameData_Construct	probable	constructs the 0x1780-byte global at 05956678; seeds the SFMT-19937 generator at +0x70 from gettimeofday (init multiplier 0x6c078965, 624 words, parity word 0x13c9e684)
+02314b60	function	Param_GetCalcCorrectGraph	likely	binary search of the SoloParamRepository table at +0x970/+0x978 (param index 32, CalcCorrectGraph in the name table at 05755ad0) by row id
+01979240	function	CalcCorrectGraph_Evaluate	certain	reads a CalcCorrectGraph row: finds the stage stageMaxVal[i] < x <= stageMaxVal[i+1], ratio r, exponent adjPt_maxGrowVal[i]; e >= 0: g[i] + (g[i+1]-g[i]) r^e, else g[i] + (g[i+1]-g[i]) (1 - (1-r)^-e); clamped to the stage
+01f2e460	function	LevelUp_TotalCost	likely	sums, per level from the current one, x^2 (max(0, x - boundry_value) boundry_inclination_soul + init_inclination_soul) + adjustment_value with x = level + 81 (CalcCorrectGraph row 200), each rounded
+01f2f5e0	function	LevelUp_CanRaiseStat	probable	the same per-level cost, checked against a held amount and a stat cap of 99
+01976df0	function	AttackRating_Compute	likely	weapon base (EquipParamWeapon +0xc4..) x upgrade rate x the move's atkPhysCorrection.. x stat factors 1 + correct/100 x curve(stat)/100 (Str+Skl added for physical, Bloodtinge alone in mode 4, Arcane for arcane/fire/bolt), requirement penalty, (100 + throwAtkRate)/100 in a throw
+0197b180	function	Defense_StatSum	likely	four weighted sums (all weights 1.0) of the six stats at +0x40,+0x48,+0x58,+0x60,+0x68,+0x70; fed to CalcCorrectGraph row 102 by the defense functions
+0197a240	function	Defense_Compute	probable	CalcCorrectGraph 102 of the stat sum, rounded, plus four armor pieces (0197a810), times and plus effect values (01be76b0), for four defense types

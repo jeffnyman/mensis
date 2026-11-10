@@ -2,9 +2,9 @@
 
 What a weapon does when it lands: its damage, how that grows with stats and upgrades, each
 move's share of it, and what a hit does to stamina, poise and rally. This page reads the
-**data**: the gameplay tables and what their own descriptions say about them. How the
-game combines these numbers (the scaling curve's exact shape, defense, the rally timer) is
-code in the executable, and is the next step.
+**data** first: the gameplay tables and what their own descriptions say about them. Then
+[the formulas](#the-formulas) that combine those numbers, read from the executable: the stat
+curve, attack rating, the requirement penalty, defense from stats, and the cost of a level.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -47,9 +47,9 @@ stat names come in the same order (Strength, Skill, Bloodtinge, Arcane). The wea
 **Damage comes in four kinds.** `attackBasePhysics`, `…Magic`, `…Fire` and `…Thunder` are
 physical, arcane, fire and bolt. The arcane weapons have the second (Blade of Mercy 30, Holy
 Moonlight Sword 50, Burial Blade 30), and the Tonitrus has 40 of the fourth. Most weapons also
-carry an Arcane scaling with no arcane base damage (the Saw Cleaver's is 33 at +0). By the
-usual reading of these games, Arcane scales the elemental damage a weapon gains from
-elsewhere. That reading belongs to the formula step.
+carry an Arcane scaling with no arcane base damage (the Saw Cleaver's is 33 at +0). The code
+settles what it is for: Arcane scales arcane, fire and bolt damage ([the
+formulas](#attack-rating)), so it matters once a weapon has elemental damage.
 
 ## Scaling and its letter
 
@@ -71,10 +71,10 @@ thresholds running downward. The Saw Cleaver's Strength 40 is a D, and its 60 at
 | Share of the scaling earned | 0% | 5% | 50% | 85% | 100% |
 
 So the stat points that pay most are those from 10 to 25. Points up to 50 still pay, and after
-50 they barely do. The curve rows hold an exponent for each stage too, all 1 for curve 0, so
-each stage is a straight line as far as the data says. Rows 100 onward are other curves, some with
-negative exponents. Which stat each is for, and exactly how an exponent bends a stage, is
-code.
+50 they barely do. The curve rows hold an exponent for each stage too. They are all 1 for curve 0, and the code
+confirms what that means: each stage is a straight line ([a stat curve](#a-stat-curve)). Rows
+100 onward are other curves, some with negative exponents: 102 is defense and 200 the cost of
+a level ([below](#defense)).
 
 ## Moves
 
@@ -148,11 +148,123 @@ rally per unit of damage comes out as follows:
 | Logarius' Wheel | 2.27 | 1.90 |
 | Hunter's Torch | 0 | 0 |
 
+## The formulas
+
+How the game combines those numbers, read from the 1.09 executable in Ghidra
+([loading it](ghidra.md)). The functions are recorded in `tools/names/eboot-1.09.hand.tsv`, and
+`combat.py` implements them:
+
+```
+python -I tools/combat.py ar     work/base/dvdroot_ps4 work/update/dvdroot_ps4 Saw Cleaver +0 12 10 9 9
+python -I tools/combat.py levels work/base/dvdroot_ps4 work/update/dvdroot_ps4 4 30
+```
+
+**Finding them.** The param repository names its tables in one list: `{name, index}` pairs at
+`05755ad0`, `EquipParamWeapon` 0 through `MenuValueTableParam` 61, with `CalcCorrectGraph` at
+32. Table *n* sits at `SoloParamRepository + 0x70 + n × 0x48`, the layout the Chalice work
+had already found for its own tables. So the code that reaches CalcCorrectGraph reads `+0x970`
+and `+0x978`. A sweep of the code for that pair found its getter (`02314b60`), and the getter's
+callers led to the rest.
+
+### A stat curve
+
+`CalcCorrectGraph_Evaluate` (`01979240`) takes a stat `x` and a curve row:
+
+1. it caps `x` at the last stage point, and finds the stage `i` with
+   `stageMaxVal[i] < x ≤ stageMaxVal[i+1]`;
+2. it takes `r = (x − stageMaxVal[i]) / (stageMaxVal[i+1] − stageMaxVal[i])` and the exponent
+   `e = adjPt_maxGrowVal[i]`, the exponent stored with the stage's **first** point;
+3. it returns `g[i] + (g[i+1] − g[i]) × r^e` when `e ≥ 0`, and `g[i] + (g[i+1] − g[i]) ×
+   (1 − (1 − r)^−e)` when `e < 0`. Here `g` is `stageMaxGrowVal`, and the result is held between
+   the two.
+
+A positive exponent above 1 starts a stage slowly, and a negative one starts it fast. Curve 0's
+are all 1, so the weapons' curve is the straight-line stages shown above.
+
+### Attack rating
+
+`AttackRating_Compute` (`01976df0`) works damage type by damage type. Each stat gives a
+multiplier:
+
+* **requirement met** (or none): `1 + correct/100 × curve(stat)/100`, where `correct` is the
+  weapon's scaling times its upgrade row's rate (all 1.0, as above), and `curve` is the
+  weapon's `correctType`. With no scaling the multiplier is 1;
+* **requirement not met:** a penalty. With `m` the shortfall in percent of the requirement,
+  capped at 20, the multiplier falls along a parabola from 1.0 at the requirement to **0.198**
+  at 20% or more short. Its constants, 20 and 20, are in the executable's data (`05527fe0`,
+  `05527fe4`). The parabola's direction depends on a flag set at run time (`05956720`), but
+  its ends don't.
+
+The damage types then use them like this:
+
+| Damage | Base | Stats |
+|---|---|---|
+| physical | `attackBasePhysics` | Strength and Skill, **added**: `1 + (Str − 1) + (Skl − 1)`, or the smaller of the two if either is a penalty |
+| arcane, fire, bolt | `attackBaseMagic`, `…Fire`, `…Thunder` | **Arcane** alone |
+| physical, in mode 4 | `attackBasePhysics` | **Bloodtinge** alone |
+
+and each is
+
+    base × upgrade rate × the move's motion value / 100 × the stat multiplier × buffs
+
+So Arcane scales every element, which settles the question left open above. Bloodtinge isn't in
+the normal physical calculation at all. The function takes a mode argument. Its three callers pass one
+through, and one of them (`01a274d0`) is called by five small functions, each taking a different
+output, one of them with mode 4. They look like the menu's five attack values, with Bloodtinge's
+being the "blood" one, but that isn't followed further here.
+
+Three more things are in the same code:
+
+* **Visceral attacks:** in a throw, the result is also multiplied by `(100 + throwAtkRate)/100`,
+  the weapon's `throwAtkRate`.
+* **Luck:** a Dark Souls luck bonus (up to ×1.21) applies to weapons with `isLuckCorrect`. No
+  Bloodborne weapon has it set.
+* **Two-handing:** another Dark Souls survival multiplies Strength under a flag, by a constant
+  that is 1.0 in the file (`05527fdc`).
+
+| Saw Cleaver | Str 12, Skl 10 | Str 25, Skl 25 | Str 99, Skl 99 | Str 5 (needs 8) |
+|---|---:|---:|---:|---:|
+| +0 | 94.9 | | | 17.8 |
+| +10 | | 270.0 | 360.0 | |
+
+### Defense
+
+`Defense_StatSum` (`0197b180`) adds up six stats (with weights, all 1.0 in the file). In the
+same structure, attack rating reads Strength, Skill, Bloodtinge and Arcane at `+0x58`–`+0x70`.
+The six are those four and the two before them, presumably Vigor and Endurance. Curve **102**
+of that sum, rounded, is each damage type's base defense, before the four armor pieces are added
+and effects multiply it:
+
+| Stat sum | 1 | 60 | 120 | 195 | 600 |
+|---|---:|---:|---:|---:|---:|
+| Base defense | 10 | 10 | 180 | 255 | 300 |
+
+with exponents 1, −1.1, −1.2 and 1 between the points. How defense then reduces a hit's damage is
+in the hit code, not followed here.
+
+### Leveling up
+
+`LevelUp_TotalCost` (`01f2e460`) uses curve row **200**, through the four fields that only that
+row fills: `init_inclination_soul` 0.1, `boundry_value` 92, `boundry_inclination_soul` 0.02,
+`adjustment_value` 1. The echoes to go from level *L* to the next are, with `x = L + 81`:
+
+    x² × (max(0, x − 92) × 0.02 + 0.1) + 1,   rounded
+
+| From level | 4 | 5 | 10 | 11 | 12 | 20 | 50 | 99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Echoes | 724 | 741 | 829 | 847 | 1,039 | 2,857 | 15,103 | 60,265 |
+
+Past level 11 (`x > 92`) this is `0.02L³ + 3.12L² + 111.78L − 786.32`. That is exactly the
+Demon's Souls and Dark Souls cost, `0.02x³ + 3.06x² + 105.6x − 895`, at `x = L + 1`. Below
+it, the cost is `x²/10 + 1`.
+
 ## What this doesn't cover yet
 
-* **The formulas.** How a stat, its curve and a scaling become attack rating, how defense and
-  damage type reduce a hit, and how the regain amount, timer and rate combine, are all code.
-  They are the next step, in the executable.
+* **The hit itself.** How a hit's attack meets the target's defense, and what damage type
+  (slash, blunt, thrust) changes, is in the hit code. So is how the regain amount, timer and
+  rate combine into rally. Neither is followed yet.
+* **Which calculation a real hit uses.** Attack rating's mode 4, physical scaled by Bloodtinge,
+  is traced only as far as the five functions that call it.
 * **Move names.** Which button plays a judge id is in the animation events (TAE), which aren't
   read yet.
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
@@ -164,5 +276,6 @@ rally per unit of damage comes out as follows:
 
 | Path | |
 |---|---|
-| `tools/combat.py` | the weapon, move and curve tables |
+| `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
+| `tools/names/eboot-1.09.hand.tsv` | the formula functions' names and evidence |
 | `work/combat/weapons.md`, `moves/`, `curves.md` | every weapon at +0 and its last level, each weapon's moves, the stat curves |
