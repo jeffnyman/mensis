@@ -5,7 +5,8 @@ what they say in each state, and what they hand over. It builds on
 [event flags](the-flags.md), which finds the 24 flag ranges that hold the characters' states.
 This page turns each range into a **sheet**. It then reads one character's story from hers,
 and the story she is part of: [the safe places](#the-safe-places), where six people can be sent
-and what becomes of them.
+and what becomes of them. [Four more stories](#four-more-stories) follow: Djura, Eileen, Alfred
+with the Queen of Cainhurst, and Gascoigne's daughters.
 
 ```
 python -I tools/story.py ranges work/base/dvdroot_ps4 work/update/dvdroot_ps4
@@ -56,10 +57,14 @@ how the talk text had been looked up ([what the patch changed](the-patch.md#read
 
 **The gifts.** One common template, `NPCアイテム入手_XX` ("NPC item obtained", event 9040), is
 started once per handover with a flag and an item lot. Its own flag, 9040 + its slot, is that
-flag, so a talk script hands an item over just by setting it. A sheet marks such a state
-**gives**, with the item. 28 handovers are found this way: the Tiny Music Box, the Powder
-Keg and Wheel Hunter Badges, the Flamesprayer, Pungent Blood Cocktails, Beast Blood Pellets,
-and the Old Woman's Sedatives.
+flag, so a talk script hands an item over just by setting it. A second template,
+`NPCアイテム入手_何度でも_XX` ("…any number of times", 9100), clears its flag again after the
+handover, so the gift can be had again: the Blood of Arianna and of Adella, Iosefka's Blood Vial,
+Blue Elixirs, Queenly Flesh. The two are started 35 times. A sheet marks a state that sets one of
+their flags **gives**, with the item. 32 of the 35 show up that way, among them the Tiny Music
+Box, three Hunter Badges, the Flamesprayer and the Old Woman's Sedatives. Of the other three,
+Queenly Flesh is given by an event, not a talk script. Tonsil Stone and one of the Blood Vials
+are set by scripts the sheets don't select.
 
 ## The lonely old woman
 
@@ -232,15 +237,139 @@ The false doctor's own states run on: `共犯（診療所）`, "accomplice, in t
 you step inside; `敵対`, "hostile" (1145); `狂った`, "gone mad" (1146), once 9802 is on; and death
 (1148, 1149).
 
+## Four more stories
+
+The hunters' and the girl's ranges, read the same way. Three of the characters are named by the
+game's own text. Alfred introduces himself ("Oh, beg pardon, you may call me Alfred"). Range
+1320 is in Old Yharnam and drops the Powder Keg Hunter Badge, and Djura's attire is "of the
+retired hunter Djura", the "old hunter Djura in Old Yharnam". Range 1360 drops the Crow Hunter
+Badge, and its character says "Leave the hunting of hunters to me". Eileen's attire is that of
+"Eileen the Crow, Hunter of Hunters".
+
+### Djura (1320–1339, `獣の守護者`, "the guardian of beasts")
+
+| State | Set by | When |
+|---|---|---|
+| 1320 | `…_通常`, normal | you are in his area and he is none of hostile, dead or friendly |
+| 1321, 1322 | `…_警告`, warning; `…_威嚇`, threatening | you step into regions near him; his team switches to 23, which his hostile state also uses |
+| 1325 | `…_友好`, friendly | from normal, once his talk flag 72300305 is set |
+| 1323 | `…_敵対`, hostile | below |
+| 1324 | `…_死亡`, dead | |
+
+The choice is a menu of his: "Hunt the Beasts of Old Yharnam" or "Spare the Beasts of Old
+Yharnam". Choosing to spare them is the branch labelled はい ("yes"). It sets 72300305 and plays
+"Yes, very good.", and it gives the Powder Keg Hunter Badge if you haven't been given it (state
+友好の証を入手, "obtained the token of friendship"). Choosing to hunt them plays "Of course, I
+thought as much." and sets 72300307, and his hostility event waits on that flag. Leaving the
+menu (回答保留, "answer on hold") is remembered (72300313), and his later greetings include
+回答催促 ("pressing for an answer").
+
+He turns hostile when you damage him, or when that "hunt" flag is set. Once he is friendly, he
+also turns hostile through `獣の守護者を裏切る` ("betray the guardian of beasts"). That template is
+started 34 times, once per creature he guards (31 `c1090`, 2 `c1290`, one `c0000`). Damaging
+any one of them while he is friendly ends its copy, and any of those 34 flags turns him.
+
+### Eileen (1360–1379, `復讐者`, "the avenger")
+
+| State | Set by |
+|---|---|
+| 1362 | `…_初対面（聖堂街A）`, "first meeting (Cathedral Ward A)": entering the region `…_ヘンリック出現` in the Cathedral Ward |
+| 1361 | `…_面識有（聖堂街B）`, "acquainted (Cathedral Ward B)": a conversation in the Central Yharnam map (talk flag 72410540) |
+| 1363 | `…_面識有（聖堂街A）（ヘンリック出現）`, "acquainted, Henryk appears": from 1361 by the same region, or from 1362 after a conversation (72400520) |
+| 1365 | `…_共闘`, "fighting together": she warps in beside you once Henryk's AI (NpcParam 6400, "Old Hunter Henryk") turns to state 3 |
+| 1366 | `…_ヘンリック単独撃破`, "Henryk killed alone": he dies while she is only acquainted (1363) |
+| 1367 | `…_ヘンリック共闘撃破`, "Henryk killed together": he dies while she fights alongside (1364, 1365) |
+| 1373, 1374, 1375 | `…_一時的にいない（衰弱ルート）`, `（闇堕ちルート）`, `…_どこにもいない`: "temporarily absent (weakened route)", "(fallen route)", "nowhere" |
+| 1370, 1372 | `…_衰弱`, "weakened"; `…_闇堕ち`, "fallen into darkness" |
+| 1371 | `…_衰弱2`, "weakened 2" |
+| 1368, 1369 | death, hostile |
+
+Henryk's appearance (`…_ヘンリック出現`) waits on her being at 1363–1365. It is closed for good
+once he is dead, or once the first half of the Forbidden Woods is cleared (9467), or once the
+Eccentric Moon has risen (9802). Her place for that fight is named after Gascoigne's room
+(`…_立ち位置03_ガスコイン部屋出口A`, "stand point 03, Gascoigne room exit A").
+
+What follows depends on that fight. When the first half of the Forbidden Woods is cleared
+(12700710):
+
+* **Henryk killed together** (1367) leads to the weakened route (1373), and at the Eccentric Moon
+  to 衰弱, "weakened" (1370).
+* **Any other acquaintance** (1361, 1363, 1364, 1365, or hostile 1369) leads to the fallen route
+  (1374), and at the Eccentric Moon to 闇堕ち, "fallen into darkness" (1372).
+* **Only a first meeting**, or none (1360, 1362), leads to "nowhere" (1375).
+
+Henryk killed without her (1366) is in none of the three; the events leave her there. From
+weakened, she moves on to "weakened 2" (1371) when a second character placed in the Cathedral
+Ward dies (NpcParam 6410, which has no name in the text). Her 強衰弱会話初回 conversation ("severely
+weakened, first conversation") then gives a blood gem. Her first greeting gives four Bold
+Hunter's Marks, and the Crow Hunter Badge is what her character drops.
+
+### Alfred and the Queen (1340–1359, `血族狩り`, "the hunter of the blood kin"; 1040–1059, `穢れた血族の女王`, "queen of the defiled bloodline")
+
+Alfred starts in the Cathedral Ward. At Night (9801), his initialization moves him from 1340 to
+1344. His menu offers "Talk about the Healing Church", "Talk about Byrgenwerth" and "About the
+Corrupted Vilebloods". It offers "Give Unopened Summons" as well, but only while you own the item
+(`f47(3, 4308, …)`). Giving it, and confirming, takes the summons (`c1_52(3, 4308, -1)`). He
+says "Ah-hah! Is that... the sigil of Cainhurst?", gives the Wheel Hunter Badge, and sets
+72400465, and `…_招待状を渡した` ("the invitation was handed over") moves him to 1347 and saves.
+His last line of the scene is "Ahh, I feel my master's hand at work."
+
+That one handover moves two stories:
+
+* **Alfred goes to Cainhurst.** The castle's initialization moves him from 1347 to 1348, and
+  talking to him there leads to 1351, "already spoken to". After that, `…_古城以外に移動した`
+  ("moved somewhere other than the old castle", common 9770) notices you leave Forsaken Cainhurst
+  Castle, and both maps' initialization events set 1343. In the Cathedral Ward, 1343 leaves a
+  placement of his as a body you can loot.
+* **The Queen is reduced to flesh.** Her initialization moves her from 1040 to 1042 as soon as
+  Alfred is in 1347, 1348 or 1349. The other way to 1042 is through 1041: she is attacked 50
+  times (`…_50回攻撃されたら肉塊準備へ`, "attacked 50 times: get the lump of flesh ready"). In 1042,
+  seeing the flesh gives three `SAN値` points (`…_肉塊を見たらSAN値上昇`), and an action button
+  gives Queenly Flesh through the repeatable item template, or "It writhes eerily." if you already
+  have it.
+
+The summons itself comes from the castle: `女王の間_無記名の招待状` ("the Queen's chamber: the
+unsigned invitation") awards the Unopened Summons from an object there, once 12500810 is set,
+the own flag of `ボス部屋後_城表示制御` ("after the boss room: castle display control").
+Alfred has two Cathedral Ward placements, each with its own copy of `…_敵対_XX` ("hostile",
+from a talk flag or 90% health) and `…_死亡_XX`.
+
+### The girl and her elder sister (1260–1279, `少女`; 1440–1459)
+
+The girl's family is named by the music box she gives: it "Plays a song shared by her mother and
+father", and inside the lid "Two names can be made out, however faintly. Viola and Gascoigne."
+
+The girl speaks from her window in Central Yharnam (`t241320`, a `c9010` window talker). Her
+first conversation asks you to find her mother. The menu is "Find Girl's Mother" or "Refuse",
+and choosing to find her gives the Tiny Music Box. Her states then follow the night: `母を探している序盤へ` ("looking for her
+mother, early"), then later stages by the time-of-day flags. A brooch you might carry changes her
+lines (ブローチを持っている, "has the brooch"). Her mother's death makes her
+`母が死んだので自暴自棄`, "in despair because her mother died" (1264). [The safe
+places](#the-chapel) cover where she can be sent.
+
+Her window script has a second speaker. Once the girl has gone (1267, at the clinic 1268, or
+1269), the branch 少女姉, "the girl's elder sister", answers instead: "Oh, you haven't by any
+chance... seen my little sister, have you?" and "She's still quite small, and wears a big white
+ribbon." Her branches test whether you carry the ribbon or the brooch (リボンを持っている,
+ブローチを持っている). Giving her the ribbon sets talk flag 72410421, `少女の姉_リボンを渡す`
+("give the elder sister the ribbon") sets 1272, and the girl's state event moves that to 1273.
+Range 1440–1459 has no events of its own. Its one script, `t241332`, is the elder sister's
+again: "What a perfect ribbon... And now it's mine..." And while the girl herself is still
+there, her window can be taken over by Patches (パッチに乗っ取られている, once his flag 1439 is
+on), as the Old Woman's can.
+
 ## What this doesn't cover yet
 
-* **The other sheets.** They are generated. Gascoigne's daughter's elder sister (`少女の姉`,
-  who hands over a ribbon), the hunters (1320–1379), Patches (1420) and the Hunter's Dream
-  ranges are next.
-* **Untranslated conditions.** Talk functions other than `f15` print as numbers: `f23()` and
-  `f22()` look like a menu's answer (the branch after `f23() == 1` is labelled Yesを選んだ,
-  "chose Yes"), `f45(12, 0, …)` picks one of a line's two copies, and `f1()` is likely distance.
-  The sheets show them as they are.
+* **The other sheets.** They are generated. Patches (1420), the Hunter's Dream ranges (the
+  doll, Gehrman), the "headmaster" and "master of the nightmare" ranges, and the DLC characters
+  (who aren't in the 24 ranges) are still to be read.
+* **Untranslated conditions.** Talk functions other than `f15` print as numbers. Some are
+  pinned down by their use. `f23()` returns the number of the option chosen from a `c1_19` menu:
+  Djura's "Spare the Beasts" is option 2, and `f23() == 2` leads to はい. `f22()` answers a
+  `c1_17` confirmation, with 1 for yes, as in Alfred's "Give Unopened Summons?". `f47(type, id,
+  …)` tests that you own an item: `f47(3, 4308, …)` is the Unopened Summons. `f45(12, 0, …)`
+  picks one of a line's two copies, and `f1()` is likely a distance. The sheets show them as
+  numbers.
 * **Event conditions besides flags.** An event that moves a character on may also wait on a
   region, a boss or the time. The sheet lists the event, and its dump says the rest
   (`events.py dump`).

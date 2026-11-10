@@ -64,7 +64,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   event scripts, talk scripts and tables, and the 24 flag ranges that hold the NPCs' stories.
   [The questlines](docs/the-questlines.md) read each range into a sheet of states,
   conversations and gifts, and tell the safe-places story from them: who can be sent to Oedon
-  Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers.
+  Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers. Then
+  Djura, Eileen, Alfred and the Queen of Cainhurst, and Gascoigne's daughters.
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.

@@ -281,14 +281,19 @@ def talk_scripts(w: itemlib.World) -> dict[tuple[str, str], esdlib.Esd]:
     return out
 
 
-GIFT = "NPCアイテム入手_XX"  # "NPC item obtained": started with (flag, item lot)
+# The common item templates, started with (flag, item lot): "NPC item obtained", and "NPC item
+# obtained, any number of times" (which clears its flag after the handover)
+GIFTS = {
+    "NPCアイテム入手_XX": "",
+    "NPCアイテム入手_何度でも_XX": ", any number of times",
+}
 
 
 def gifts(w: itemlib.World) -> dict[int, str]:
-    """{flag: what is handed over}: every start of the common item template. A talk script sets
-    the flag, and the template awards the lot."""
+    """{flag: what is handed over}: every start of the common item templates. A talk script (or
+    an event) sets the flag, and the template awards the lot."""
     names = evlib.read_emeld(souls.load(w.path("event/common.emeld.dcx")))
-    tid = next(k for k, v in names.items() if v == GIFT)
+    templates = {k: GIFTS[v] for k, v in names.items() if v in GIFTS}
     out = {}
     for f in sorted(os.listdir(os.path.join(w.base, "event"))):
         if not f.endswith(".emevd.dcx"):
@@ -297,11 +302,14 @@ def gifts(w: itemlib.World) -> dict[int, str]:
             for c, i, raw in ev.instructions:
                 if (c, i) == (2000, 0) and len(raw) >= 16:
                     _, target, flag, lot = struct.unpack_from("<iIii", raw)
-                    if target == tid:
+                    if target in templates:
                         items = ", ".join(
                             f"{n} ×{k}" if k > 1 else n for n, k, _ in w.lot(lot)
                         )
-                        out[flag] = f"{items or 'nothing'} (lot {lot}, flag {flag})"
+                        out[flag] = (
+                            f"{items or 'nothing'} (lot {lot}, flag {flag}"
+                            f"{templates[target]})"
+                        )
     return out
 
 
