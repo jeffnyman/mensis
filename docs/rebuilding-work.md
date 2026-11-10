@@ -177,7 +177,43 @@ GB. Like everything in `work/`, the pictures stay out of the repository.
 
 ## Checking the result
 
-Several pages give numbers to compare against:
+**The regression check** reruns the tools and compares every output with the result this
+repository was built from:
+
+```
+python -I tools/check.py run
+```
+
+```
+SAME  params-diff
+SAME  event-diffs
+…
+SAME  renders
+```
+
+The outputs themselves are the game's, so the repository holds only their SHA-256 hashes
+(`tools/check-hashes.tsv`). A hash proves a match without containing anything. Each check
+covers one tool, or one tool's output for every file of a kind:
+- the five patch diffs;
+- the readers' `check` commands;
+- the item index and the two Chalice outputs;
+- `unfself` and `orbis_prep` on the 1.09 executable;
+- the build and decompiled-code diffs;
+- the item pictures;
+- three renders.
+
+The checks take about four minutes. A check whose inputs you haven't built is reported as
+`SKIP`; for example, the code diffs need step 4, and so Ghidra. Text is compared after
+normalizing line endings and path separators, and images on their pixels rather than their PNG
+bytes, so the result is the same on any machine. Renders come from floating-point arithmetic, so
+a different numpy build could in principle move a pixel; if only `renders` differs after a
+library upgrade, look at the pictures first.
+
+`check.py` is also how the tools are kept honest. After changing a tool, `run` shows whether its
+output moved. After an intended change, `record` updates the hashes, and the commit shows which
+outputs changed.
+
+Several pages also give numbers to compare against:
 - 28,808 files in the game;
 - 167,054 functions in each analyzed build, and 701 resolved imports;
 - 1,056 item pictures, 217 character renders and 568 equipment renders;

@@ -164,6 +164,12 @@ python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the C
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 ```
 
+**Checking**
+
+```
+python -I tools/check.py run|record|list     # rerun the tools, compare outputs with tools/check-hashes.tsv
+```
+
 **The artwork** (see [Textures and item pictures](docs/the-textures.md) and
 [Models and character renders](docs/the-models.md))
 
@@ -193,6 +199,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
 | `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn) and `obj/` (exported models), each with an index |
+| `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |
 
 ## License
