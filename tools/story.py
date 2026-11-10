@@ -60,6 +60,20 @@ def ranges(w: itemlib.World) -> list[tuple[int, int]]:
     return out
 
 
+# The Old Hunters' characters keep their states in 1650-1789, which event 50 does not set up.
+# These ranges follow the working names of the events that set them (docs/the-questlines.md):
+# the Clocktower hunter, Ludwig's head, the one who seeks the secret, the Church's assassin, the
+# Clocktower's woman doctor and the Fishing Hamlet's priest.
+DLC_RANGES = (
+    (1650, 1669),
+    (1670, 1689),
+    (1710, 1729),
+    (1730, 1749),
+    (1750, 1769),
+    (1770, 1789),
+)
+
+
 def working_name(refs: list[flaglib.Ref], lo: int, hi: int) -> str:
     """The most common character prefix of the events that set flags in a range."""
     who: collections.Counter[str] = collections.Counter()
@@ -382,7 +396,9 @@ def sheet(
         (
             k
             for k in talk
-            if k[1][-3:] in suffixes
+            # a character number alone can collide across maps (t240504 is not t340504's
+            # character), so a script matched by it must also read or set the range
+            if (k[1][-3:] in suffixes and scripts[k[1]] > 0)
             or {n // 10 for n in npcs.get(int(k[1][1:]), ())} & family
         ),
         key=lambda k: (-scripts[k[1]], k[1]),
@@ -408,6 +424,8 @@ def main() -> int:
     if a[1] == "ranges":
         for lo, hi in ranges(w):
             print(f"{lo}-{hi}  {working_name(refs, lo, hi)}")
+        for lo, hi in DLC_RANGES:
+            print(f"{lo}-{hi}  {working_name(refs, lo, hi)}  (The Old Hunters)")
         return 0
     rows = esdlib.talk_rows(w.path("msg/engus/menu.msgbnd.dcx"))
     talk = talk_scripts(w)
@@ -432,7 +450,8 @@ def main() -> int:
             "| Range | Working name | Sheet |",
             "|---|---|---|",
         ]
-        for lo, hi in ranges(w):
+        dlc = set(DLC_RANGES)
+        for lo, hi in [*ranges(w), *DLC_RANGES]:
             fname = f"{lo}-{hi}.md"
             with open(
                 os.path.join(a[4], fname), "w", encoding="utf-8", newline="\n"
@@ -441,7 +460,10 @@ def main() -> int:
                     "\n".join(sheet(refs, rows, talk, owners, npcs, gift, lo, hi))
                     + "\n"
                 )
-            index.append(f"| {lo}–{hi} | {working_name(refs, lo, hi)} | `{fname}` |")
+            tag = " (The Old Hunters)" if (lo, hi) in dlc else ""
+            index.append(
+                f"| {lo}–{hi} | {working_name(refs, lo, hi)}{tag} | `{fname}` |"
+            )
         with open(
             os.path.join(a[4], "index.md"), "w", encoding="utf-8", newline="\n"
         ) as fo:

@@ -6,7 +6,8 @@ what they say in each state, and what they hand over. It builds on
 This page turns each range into a **sheet**. It then reads one character's story from hers,
 and the story she is part of: [the safe places](#the-safe-places), where six people can be sent
 and what becomes of them. [Four more stories](#four-more-stories) follow: Djura, Eileen, Alfred
-with the Queen of Cainhurst, and Gascoigne's daughters.
+with the Queen of Cainhurst, and Gascoigne's daughters. Then [the Old Hunters](#the-old-hunters)'
+characters, whose states live outside the 24 ranges.
 
 ```
 python -I tools/story.py ranges work/base/dvdroot_ps4 work/update/dvdroot_ps4
@@ -28,6 +29,10 @@ same character number. It also takes every script whose placement uses the same 
 (`6110` and `6113`), since one character can be several rows. Counting references alone doesn't
 work, because the chapel's residents all check on one another. The Old Woman's range is tested six
 times each by fourteen other scripts, and only three times by her own window script.
+A character number can repeat across maps for different characters, though: `t240504` is a
+Cathedral Ward script, not Simon's `t340504`. So a script matched by number alone must also read
+or set the range at least once. (An earlier version didn't check this. It gave Simon a Pebble
+from `t240504`, and put stray zero-reference scripts in three base-game sheets.)
 
 **The conversations.** A talk script is a set of state machines. Its decisions are chains of
 small states, each labelled for the developers with `c1_0("…")`: 話しかけられた ("spoken to"),
@@ -358,11 +363,88 @@ again: "What a perfect ribbon... And now it's mine..." And while the girl hersel
 there, her window can be taken over by Patches (パッチに乗っ取られている, once his flag 1439 is
 on), as the Old Woman's can.
 
+## The Old Hunters
+
+The DLC's characters aren't among the 24 ranges, because the pre-constructor doesn't set them
+up. Each DLC map's own initialization events do, in a band of their own, **1650–1789**. The
+flag index finds it by the events' working names: `時計塔の狩人`, "the Clocktower hunter",
+`会話NPCルドウイーク（頭部）`, "talking NPC: Ludwig (head)", `秘密を探る者`, "the one who seeks
+the secret", `教会の殺し屋`, "the Church's assassin", `時計塔の女医`, "the Clocktower's woman
+doctor", and `漁村の司祭`, "the Fishing Hamlet's priest". `story.py` now makes a sheet for
+these six ranges too.
+
+| Range | Character | How it is named | Talk scripts |
+|---|---|---|---|
+| 1650–1669 | Lady Maria | the `c4520` model, "Lady Maria of the Astral Clocktower" in the name text | `t350500` |
+| 1670–1689 | Ludwig's head | the `c4511` model, "Ludwig the Accursed" | `t340508` |
+| 1710–1729 | Simon | the Bowblade: "Choice weapon of Simon, one of the first Healing Church hunters" | `t340504`, `t340509`, `t350510`, `t360513` |
+| 1730–1749 | Brador | "Brador, the Healing Church assassin", the working name's own words | `t350505`; `t350511`, `t360514`–`t360516` |
+| 1750–1769 | Adeline | "Adeline, patient of the research hall", and her lines: "I am proud to have been a Blood Saint" | `t350506`; `t350512` |
+| 1770–1789 | the Fishing Hamlet priest | the working name | `t360507`, `t350560` |
+
+**One template for death.** Each DLC map has a `会話NPC汎用死亡判定_XX` ("talking NPC: generic
+death check"), started once per placement with the character's range and the flag to set. When
+that placement dies, it clears the range, sets the flag and saves. A matching
+`会話NPC汎用敵対判定_XX` ("generic hostility check") turns a character hostile at 90% health or
+less, or by a talk flag.
+
+**Simon** has a placement in each of the three maps and a death state for each: 1710 and 1711
+in the Hunter's Nightmare, 1712 in the Research Hall, 1713 in the Fishing Hamlet. His living
+states advance with your progress, and only after his first conversation in the Hunter's
+Nightmare (talk flag 73400403):
+
+| State | Reached when |
+|---|---|
+| 1720 | first met |
+| 1721 | Ludwig's head was answered **No** (73400513, with the head at 1671 or 1681), or has been destroyed (1670) |
+| 1722 | the Research Hall's `柱上昇ギミック`, "rising pillar mechanism" (13500100), has run |
+| 1723 | Maria is dead: her placement's death state (1650), or `女性ハンター_ボス撃破`, "female hunter: boss defeated" (13501800) |
+| 1713 | in the Fishing Hamlet, from 1723, after the conversation there (73600501): he dies |
+
+His lines point the way: "...Climb the Astral Clocktower, and kill Maria." and "Here, this is
+Ludwig's guiding light."
+
+**Ludwig's head** sits at 1680 until `ルドウイーク_ボス撃破`, "Ludwig: boss defeated"
+(13401800), then at 1681. What it says depends on what you wear. In other attire: "Good
+hunter, have you seen the thread of light?" Wearing Church gear (the branch
+`教会装備している`): "Tell me, good hunter of the Church... Are my Church hunters the
+honorable spartans I hoped they would be?", with **Yes** or **No**:
+
+* Yes: "Ahh, good... that is a relief... Even in this darkest of nights, I see... the
+  moonlight..." (73400512);
+* No: "Oh, my. Just as I feared. Then a beast-possessed degenerate was I..." (73400513).
+
+Its later states, 1671 and 1672, follow from the answer and from Simon's progress. Hitting
+the head ends it: `被ダメで即死`, "dies at once when damaged", sets 1670. Its body then
+holds the **Underground Cell Inner Chamber Key**.
+
+**Lady Maria's** talking placement starts at 1651 ("A visitor? How unexpected..."), and its
+death sets 1650. A state 1660 is tested, but nothing in the files sets it.
+
+**Brador** starts at 1735 with his placement **invincible**, until `教会の殺し屋_扉を開ける2`
+("the Church's assassin: open the door 2") sets 73500412. His death state is 1730, which leaves a
+body to loot. His NpcParam family has two kinds of script. One placement (row 6521) speaks:
+"Well, well, look who's here. Welcome to my quarters... Are you going to kill me?" The other
+(6520), in the Research Hall and the Fishing Hamlet, has a single line: "...unending death
+awaits those who pry into the unknown..."
+
+**Adeline** starts at 1760. Her menu is "Give Brain Fluid" or "Refuse". Giving it takes the
+Brain Fluid and moves her to 1761 (73500301), and a second time to 1762 (73500309). A second
+menu, "Accept Blood", opens from there. Her script checks whether you already hold the blood of
+a Blood Saint, Adeline's, Arianna's or Adella's. Her second placement (`c4160`) takes another
+Brain Fluid (item 4342) and sets 73500318. Then `時計塔の女医_完全死亡した`, "the Clocktower's
+woman doctor has died completely", sets 1752 and makes that placement invincible. 1750 is her
+death state.
+
+**The Fishing Hamlet priest** starts at 1780 ("Byrgenwerth... Byrgenwerth... Blasphemous
+murderers..."). 1770 is tested as his other state, but nothing in the files sets it.
+
 ## What this doesn't cover yet
 
 * **The other sheets.** They are generated. Patches (1420), the Hunter's Dream ranges (the
-  doll, Gehrman), the "headmaster" and "master of the nightmare" ranges, and the DLC characters
-  (who aren't in the 24 ranges) are still to be read.
+  doll, Gehrman), and the "headmaster" and "master of the nightmare" ranges are still to be read.
+  So are the Old Hunters' characters without a talk script: Yamamura is in the name text, but no
+  placement gives him a talk ID.
 * **Untranslated conditions.** Talk functions other than `f15` print as numbers. Some are
   pinned down by their use. `f23()` returns the number of the option chosen from a `c1_19` menu:
   Djura's "Spare the Beasts" is option 2, and `f23() == 2` leads to はい. `f22()` answers a

@@ -224,7 +224,7 @@ Several pages also give numbers to compare against:
 - 167,054 functions in each analyzed build, and 701 resolved imports;
 - 1,056 item pictures, 217 character renders and 568 equipment renders;
 - 2,685 Chalice layouts;
-- 29,290 references to event flags, 24 questline sheets and 95 weapons.
+- 29,290 references to event flags, 30 questline sheets and 95 weapons.
 
 The data readers also have `check` commands that decode every file of their kind and report any
 that don't:

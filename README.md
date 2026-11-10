@@ -65,7 +65,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   [The questlines](docs/the-questlines.md) read each range into a sheet of states,
   conversations and gifts, and tell the safe-places story from them: who can be sent to Oedon
   Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers. Then
-  Djura, Eileen, Alfred and the Queen of Cainhurst, and Gascoigne's daughters.
+  Djura, Eileen, Alfred and the Queen of Cainhurst, Gascoigne's daughters, and the Old Hunters'
+  Simon, Ludwig's head, Maria, Brador and Adeline.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"). And the
   formulas from the executable: attack rating, the requirement penalty, defense from stats, the
