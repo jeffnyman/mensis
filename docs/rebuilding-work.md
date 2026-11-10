@@ -145,7 +145,7 @@ for f in $U/map/mapstudio/*.msb.dcx; do m=$(basename $f .msb.dcx)
     python -I tools/msb.py diff $B/map/mapstudio/$m.msb.dcx $f work/msb/$m.md; done
 ```
 
-## 6. The joined results ([where the items are](the-items.md), [the Chalice Dungeons](the-chalice-dungeons.md), [event flags](the-flags.md), [the questlines](the-questlines.md))
+## 6. The joined results ([where the items are](the-items.md), [the Chalice Dungeons](the-chalice-dungeons.md), [event flags](the-flags.md), [the questlines](the-questlines.md), [combat](the-combat.md))
 
 ```
 mkdir -p work/items work/chalice work/story
@@ -154,10 +154,11 @@ python -I tools/chalice.py       work/base/dvdroot_ps4 work/update/dvdroot_ps4 w
 python -I tools/chalice_events.py work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/chalice/events-1.09.md
 python -I tools/flags.py   index work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/story/flags-1.09.tsv
 python -I tools/story.py   sheets work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/story/npcs
+python -I tools/combat.py  weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
 ```
 
-About 25 seconds each for the first three, which read every Chalice layout. The flag index and the
-questline sheets take a few seconds each.
+About 25 seconds each for the first three, which read every Chalice layout. The flag index, the
+questline sheets and the combat tables take a few seconds each.
 
 ## 7. The artwork ([textures](the-textures.md), [models](the-models.md))
 
@@ -200,7 +201,7 @@ The outputs themselves are the game's, so the repository holds only their SHA-25
 covers one tool, or one tool's output for every file of a kind:
 - the five patch diffs;
 - the readers' `check` commands;
-- the item index, the two Chalice outputs, the flag index and the questline sheets;
+- the item index, the two Chalice outputs, the flag index, the questline sheets and the combat tables;
 - `unfself` and `orbis_prep` on the 1.09 executable;
 - the build and decompiled-code diffs;
 - the item pictures;
@@ -222,7 +223,7 @@ Several pages also give numbers to compare against:
 - 167,054 functions in each analyzed build, and 701 resolved imports;
 - 1,056 item pictures, 217 character renders and 568 equipment renders;
 - 2,685 Chalice layouts;
-- 29,290 references to event flags, and 24 questline sheets.
+- 29,290 references to event flags, 24 questline sheets and 95 weapons.
 
 The data readers also have `check` commands that decode every file of their kind and report any
 that don't:

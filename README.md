@@ -50,7 +50,7 @@ and character models rendered from the game's own meshes and textures (`flver.py
 </tr>
 </table>
 
-**Together they answer real questions.** Five worked examples so far:
+**Together they answer real questions.** Six worked examples so far:
 
 * [What the 1.09 patch changed](docs/the-patch.md): developer tooling switched off, the balance
   changes, elevator, DLC and NPC fixes, and changes that span code, data, scripts and layout.
@@ -66,6 +66,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   conversations and gifts, and tell the safe-places story from them: who can be sent to Oedon
   Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers. Then
   Djura, Eileen, Alfred and the Queen of Cainhurst, and Gascoigne's daughters.
+* [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
+  letter, the stat curve, each move's motion value, stamina, poise and rally ("regain").
 * [The online boundary](docs/the-online-boundary.md): where the game stops working for itself and
   asks a server, how it finds that server, the 37 requests it can send, and what that means for
   running it off a PS4.
@@ -99,6 +101,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     through event templates and talk scripts, and the NPCs' state ranges.
 13. [The questlines](docs/the-questlines.md): each NPC's states, every conversation with the path
     that leads to it, what they hand over, and the safe places read from the data.
+14. [Combat](docs/the-combat.md): the weapon, move and curve tables, and what their own
+    descriptions say each number does.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
@@ -174,6 +178,7 @@ python -I tools/chalice.py <base dvdroot> <update dvdroot> <out.md>      # the C
 python -I tools/chalice_events.py <base dvdroot> <update dvdroot> <out.md>   # their event scripts
 python -I tools/flags.py index|show <base dvdroot> <update dvdroot> …         # where every event flag is read and set
 python -I tools/story.py ranges|sheet|sheets <base dvdroot> <update dvdroot> …  # the NPCs' questlines
+python -I tools/combat.py weapons|weapon <base dvdroot> <update dvdroot> …     # every weapon's numbers and moves
 ```
 
 **Checking**
@@ -212,6 +217,7 @@ scratch. The only generated pictures in the repository are the eight samples abo
 | `work/params/`, `work/events/`, `work/ai/`, `work/talk/`, `work/msb/` | the 1.00 → 1.09 diffs of each kind of data |
 | `work/items/`, `work/chalice/` | the generated item index, the Chalice catalog and the Chalice event-script summary |
 | `work/story/` | the event-flag index, and `npcs/`: a questline sheet per NPC |
+| `work/combat/` | every weapon's damage, scaling and moves, and the stat curves |
 | `work/pictures/` | artwork extracted as PNG: `items/` (the item pictures), `models/` (character and equipment textures; object and map textures if asked for), `renders/` (every character drawn), `equipment/` (every weapon and armor piece drawn), `hunters/` (every armor set worn) and `obj/` (exported models), each with an index |
 | `work/check/` | the regression check's outputs, recreated on each run |
 | `work/ghidra/explore/`, `work/flags/` | scratch output from exploring (string searches, decompiled functions, script dumps); not needed to rebuild anything |

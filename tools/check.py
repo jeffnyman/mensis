@@ -240,6 +240,12 @@ def checks() -> list[dict]:
             "cmds": [PY + ["tools/flags.py", "index", B, U, f"{OUT}/flags.tsv"]],
         },
         {
+            "name": "combat",
+            "needs": [B, U],
+            "texts": f"{OUT}/combat/**/*.md",
+            "cmds": [PY + ["tools/combat.py", "weapons", B, U, f"{OUT}/combat"]],
+        },
+        {
             "name": "story",
             "needs": [B, U],
             "texts": f"{OUT}/story/*.md",
@@ -382,7 +388,11 @@ def run_check(c: dict) -> str | None:
     if c.get(
         "texts"
     ):  # a glob: a folder of text outputs whose names come from the data
-        parts.append(_text_hash(sorted(glob.glob(os.path.join(ROOT, c["texts"])))))
+        parts.append(
+            _text_hash(
+                sorted(glob.glob(os.path.join(ROOT, c["texts"]), recursive=True))
+            )
+        )
     if c.get("binary"):
         h = hashlib.sha256()
         for p in c["binary"]:
