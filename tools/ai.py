@@ -237,9 +237,12 @@ class Runner:
             # or else its value from the state (by default, the value the chunk starts it at)
             if b in p.upv:
                 R[a] = p.upv[b]
+            elif f"variable{b}" in self.env:
+                R[a] = self.env[f"variable{b}"]
+            elif b < len(self.upvalues):
+                R[a] = self.upvalues[b]  # a constant the chunk set, such as a distance
             else:
-                s = self.sym(f"variable{b}")
-                R[a] = s
+                R[a] = self.sym(f"variable{b}")
         elif op == "SETUPVAL":
             p.upv[b] = R.get(a)
         elif op == "GETGLOBAL":
@@ -405,15 +408,16 @@ def outcome(
             for k, v in weights.items():
                 out[f"Act{k:02d}"] += pr * v / total
         else:
-            forced = [
-                (
-                    show(args[2])
-                    if isinstance(args[2], float)
-                    else show(args[0]).replace("GOAL_COMMON_", "")
-                )
-                for name, args in p.calls
-                if name == "AddSubGoal" and len(args) > 2
-            ]
+            forced = []
+            for name, args in p.calls:
+                if name == "AddSubGoal" and len(args) > 2:
+                    forced.append(
+                        show(args[2])
+                        if isinstance(args[2], float)
+                        else show(args[0]).replace("GOAL_COMMON_", "")
+                    )
+                elif "Approach" in name:  # Approach_Act and the like, from aicommon
+                    forced.append("approach")
             local = getattr(act, "chunk_funcs", {})
             inner = next((n for n, _ in reversed(p.calls) if n in local), None)
             if not forced and inner and depth < 3:
@@ -532,6 +536,20 @@ def load(en: enemylib.Enemies, nid: int) -> tuple[str, lua50.Func | None, dict]:
             consts[a] = main.consts[bx]
         elif OPS[op] == "LOADBOOL":
             consts[a] = bool(b)
+        elif OPS[op] in ("ADD", "SUB", "MUL", "DIV"):
+            # the chunk works out distances: reach minus the body, 4.2 - 1.1
+            c = (ins >> 6) & 0x1FF
+            x = main.consts[b - MAXSTACK] if b >= MAXSTACK else consts.get(b)
+            y = main.consts[c - MAXSTACK] if c >= MAXSTACK else consts.get(c)
+            if isinstance(x, float) and isinstance(y, float):
+                consts[a] = {
+                    "ADD": x + y,
+                    "SUB": x - y,
+                    "MUL": x * y,
+                    "DIV": x / y if y else 0.0,
+                }[OPS[op]]
+            else:
+                consts.pop(a, None)
         elif OPS[op] == "CLOSURE":
             proto = main.protos[bx]
             start = []
@@ -553,6 +571,8 @@ def load(en: enemylib.Enemies, nid: int) -> tuple[str, lua50.Func | None, dict]:
     act = next(
         (f for g, f in names.items() if str(g).endswith("Battle_Activate")), None
     )
+    if act is not None:
+        act.script_funcs = {str(g): f for g, f in names.items()}
     if act is not None:  # the script's other functions that Activate may hand over to
         act.chunk_funcs = {
             str(g): f
@@ -720,6 +740,116 @@ def report(en: enemylib.Enemies, nid: int) -> list[str]:
                 )
     if not any_change:
         out.append("Nothing found.")
+    out += inside(act, own, labels)
+    return out
+
+
+def sequence(key: str, labels: dict[int, str]) -> str:
+    """'forced 701 → 3000 → 3001' as '701 → 3000 右フック → 3001 左フック'."""
+    if key == "nothing chosen":
+        return "nothing"
+    steps = key.removeprefix("forced ").split(" → ")
+    return " → ".join(
+        f"{s} {labels.get(int(s), '')}".strip() if s.isdigit() else s for s in steps
+    )
+
+
+def inside(act: lua50.Func, own: dict, labels: dict[int, str]) -> list[str]:
+    """Each action's own choices: by distance, what it queues and how often, and what its
+    state numbers and flags change."""
+    out = [
+        "\n## Inside the actions\n",
+        (
+            "Each action is run the same way: by distance band, the animations it queues "
+            "(AddSubGoal) in order, with the chance of each sequence, in the same default state. "
+            '"approach" is a call to the common approach routine (Approach_Act).\n'
+        ),
+    ]
+    funcs = getattr(act, "script_funcs", {})
+    for g in sorted(funcs, key=lambda x: (len(x), x)):
+        m = re.search(r"_Act(\d+)$", g)
+        if not m:
+            continue
+        fn = funcs[g]
+        fn.chunk_funcs = getattr(act, "chunk_funcs", {})
+        try:
+            out += one_action(fn, own, labels, int(m.group(1)))
+        except RuntimeError as e:  # a loop, or too many paths
+            out.append(f"### Act{int(m.group(1)):02d}\n\nNot followed ({e}).\n")
+    return out
+
+
+def one_action(
+    fn: lua50.Func, own: dict, labels: dict[int, str], num: int
+) -> list[str]:
+    """One action's table: by band, the sequences it queues; then what the state changes."""
+    out: list[str] = []
+    if True:
+        bands_, seen = explore(fn, own)
+        dims = list(bands_.items())
+        grid: list[tuple] = (
+            list(itertools.product(*[b for _, b in dims])) if dims else [()]
+        )
+        rows = []
+        for combo in grid:
+            env = {d: v for (d, _), (_, v) in zip(dims, combo)}
+            env.update(own)
+            rows.append((combo, outcome(fn, env)))
+        out.append(f"### Act{num:02d}\n")
+        head = [
+            ("Distance" if d.startswith("GetDist") else "Health %") for d, _ in dims
+        ]
+        out.append("| " + " | ".join(head + ["Queues"]) + " |")
+        out.append("|" + "---|" * (len(head) + 1))
+        for combo, r in rows:
+            cell = "; ".join(
+                f"{v * 100:.0f}% {sequence(k, labels)}"
+                if v < 0.995
+                else sequence(k, labels)
+                for k, v in sorted(r.items(), key=lambda kv: -kv[1])
+            )
+            out.append(
+                "| "
+                + " | ".join([lab for lab, _ in combo] + [cell or "nothing"])
+                + " |"
+            )
+        notes = []
+        for fl in sorted(k for k in seen if k not in DIMENSIONS and k not in own):
+            base = default(Sym(fl))
+            vals = [
+                v
+                for v in sorted(
+                    {k for k in seen[fl] if isinstance(k, (float, bool))}, key=show
+                )
+                if v != base
+            ] or ([not base] if isinstance(base, bool) else [1.0])
+            for v in vals[:3]:
+                changed = []
+                for combo, r0 in rows:
+                    env = {d: x for (d, _), (_, x) in zip(dims, combo)}
+                    env.update(own)
+                    env[fl] = v
+                    r1 = outcome(fn, env)
+                    if any(
+                        abs(r1.get(k, 0) - r0.get(k, 0)) > 0.005
+                        for k in set(r1) | set(r0)
+                    ):
+                        where = ", ".join(lab for lab, _ in combo)
+                        changed.append(
+                            (f"{where}: " if where else "")
+                            + "; ".join(
+                                f"{x * 100:.0f}% {sequence(k, labels)}"
+                                if x < 0.995
+                                else sequence(k, labels)
+                                for k, x in sorted(r1.items(), key=lambda kv: -kv[1])
+                            )
+                        )
+                if changed:
+                    notes.append(f"* {fl} = {show(v)}: " + " | ".join(changed))
+        if notes:
+            out.append("")
+            out += notes
+        out.append("")
     return out
 
 

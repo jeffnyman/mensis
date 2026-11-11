@@ -861,11 +861,42 @@ Its state changes the picture:
   names the actions to choose from.
 * **Six enemies open with a fixed move**: Ludwig, Laurence, the Maneater Boar, and three others.
 
+### Inside an action
+
+Each action is a function too: it measures, rolls and queues animations with `AddSubGoal`. The
+same run, applied to the 2,173 action functions, gives each one's sequences by distance band
+with their chances. The sheets put them under "Inside the actions". Four actions loop and
+aren't followed.
+
+Two things made this work:
+* **Calls to the common approach routine** (`Approach_Act`, from `aicommon`). They become an
+  "approach" step.
+* **The script's own distances.** The action functions compare the distance with values the
+  chunk works out when it loads, such as reach minus body: the Cleric Beast's script begins
+  `4.2 − 1.1`, `6.2 − 1.1` and so on, 48 of them. The tool evaluates that arithmetic, so a
+  comparison like `GetDist(TARGET_ENE_0) <= variable1` gets its number (3.1 m).
+
+The Cleric Beast's Act01, the hook combination:
+
+| Distance | Queues |
+|---|---|
+| < 3.1 | 701 → 3000 `右フック` (right hook) → 3001 `左フック` (left hook) |
+| ≥ 3.1 | approach → 3000 → 3001 |
+
+The variations come from the state. After the event request sets number 2, the hooks end in
+a finisher: 3011 (`追加拳骨`, "extra fist") up close, 3017 (`近接掌底`, "close palm strike")
+further off. Half the time both hooks come first, and half the time only the right hook. Once
+number 1 is set, it skips the approach.
+
+Father Gascoigne's Act01 is his axe combination. After the approach it ends one of three ways:
+35% two axe blows and a gunshot (`斧コンボ（１撃目）`, `２撃目`, `銃で撃つ`), 35% three axe blows,
+and 30% three axe blows and the gunshot.
+
 ### What isn't followed
 
-* **The actions themselves.** Inside an action there are often further rolls and distance
-  checks that pick its combo or follow-up. The sheets list every attack an action can make,
-  not the odds between them.
+* **Combinations of states.** Each state number or flag is varied on its own from the default,
+  not in combination (number 1 and number 2 together, say).
+* **Four looping actions.** Their loops aren't followed.
 * **Event requests.** What the map scripts request, and when, is in the event scripts, not
   followed here. A request's value is 0 unless the sheet says otherwise.
 * **Zero weights.** Some placements end with every weight 0 in the default state (the first
@@ -1004,9 +1035,9 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
   ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
-* **Inside an enemy's actions, and the event requests.** The odds of each action are read
-  ([how an enemy chooses](#how-an-enemy-chooses)). The rolls inside an action, and what the map
-  scripts request, aren't.
+* **The event requests.** The odds of each action, and the sequences inside each, are read
+  ([how an enemy chooses](#how-an-enemy-chooses)). What the map scripts request, and when,
+  isn't.
 * **The rest of a hit on the player.** The third set of rates the hit function passes (slot
   0x238), the hunter's own effects, and what holds the Moon Presence's gaze at 1 HP
   ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)).
@@ -1023,7 +1054,7 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
 | `tools/tae.py` | each weapon's animation set, and the animations and state names behind each judge id |
-| `tools/ai.py` | runs each battle script's Activate function: the chance of each action by distance, health and state |
+| `tools/ai.py` | runs each battle script's Activate function and its actions: the chance of each action, and of each sequence an action queues, by distance, health and state |
 | `work/combat/ai.md`, `ai/` | one line per enemy; each enemy's choices |
 | `tools/status.py` | the resistance curves, the condition effects, who inflicts what, enemy resistances; `resist` for a hunter |
 | `work/combat/status.md` | those tables |

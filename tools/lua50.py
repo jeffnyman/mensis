@@ -89,6 +89,7 @@ class Func:
         # set by tools/ai.py: the upvalues' starting values, the script's other functions
         self.start_values: list = []
         self.chunk_funcs: dict = {}
+        self.script_funcs: dict = {}
 
 
 class Reader:
