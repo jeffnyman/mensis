@@ -12,12 +12,14 @@ given level wearing the named armor pieces (each a quoted EquipParamProtector na
 
 How the pieces connect (docs/the-combat.md, "Enemy movesets"):
 
-* NpcParam row r uses the model c<(r mod 1000000) // 100>: 500000 (Cleric Beast) is c5000,
-  and so is its Chalice Dungeon copy 10500000. The model's animations are in
-  chr/c5000.anibnd.dcx. Rows below 100000 (tests, and the human characters, who carry weapons)
-  aren't covered here.
-* Names: an enemy is called by the English name (NPC名) of any row with its model, or else by
-  its first row's working name. The param files name every row (params.Param.row_names), and
+* Model: where the maps place the row (MSB parts), that model; a row placed with several
+  takes the one its number names, else its most frequent. A row the maps don't place uses
+  c<(r mod 1000000) // 100>: 500000 is c5000, and so is its Chalice copy 10500000. The number
+  misleads for 282 of the 575 placed rows: the Cleric Beast fought in the game is 500241, a
+  c5000. The model's animations are in chr/c5000.anibnd.dcx. Rows below 100000 (tests, and
+  the human characters, who carry weapons) aren't covered here.
+* Names: an enemy is called by the English name (NPC名) of any row with its model and behavior
+  variation, or else by its first row's working name. Placed rows come first in a group. The param files name every row (params.Param.row_names), and
   an attack row's name says what the attack is: AtkParam_Npc 500130 is
   "c5000_教区長_踏みつけ", the Cleric Beast's stomp.
 * The archive's TAE file gives each animation's events. An "invoke attack behavior" (type 1)
@@ -105,14 +107,37 @@ class Enemies:
         self.effect_labels = w.row_names("SpEffectParam")
         self.attack_labels = w.row_names("AtkParam_Npc")
         self._scripts: dict[str, str] | None = None
-        self.english: dict[int, str] = {}
+        # the model each placed row really uses, from the maps (MSB parts): the row number
+        # alone misleads for 297 placed rows (the Cleric Beast's 500241 is c5000, not c5002)
+        # A row placed with several models (507000: the One Reborn as c5070, and once on a
+        # c1050 crowd figure) takes the one its number names, else its most frequent.
+        placements: dict[int, collections.Counter] = collections.defaultdict(
+            collections.Counter
+        )
+        for m in w.maps():
+            for part in w.layout(m).parts:
+                mod, npc = part.get("model") or "", part.get("npc", 0)
+                if npc >= 100000 and re.fullmatch(r"c\d{4}", mod):
+                    placements[npc][int(mod[1:])] += 1
+        self.placed: dict[int, int] = {
+            npc: model_of(npc) if model_of(npc) in c else c.most_common(1)[0][0]
+            for npc, c in placements.items()
+        }
+        # English names by model and behavior variation: a model can serve several enemies
+        # (the One Reborn's lower body, 507000, is placed as c1050, a common enemy's model)
+        self.english: dict[tuple[int, int], str] = {}
         for nid, r in sorted(w.npcs.items()):
             n = w.npc_names.get(r["nameId"], "").strip()
             if nid >= 100000 and n:
-                self.english.setdefault(model_of(nid), n)
+                self.english.setdefault((self.model(nid), r["behaviorVariationId"]), n)
+
+    def model(self, nid: int) -> int:
+        """The row's model: where the maps place it, else from its number."""
+        return self.placed.get(nid, model_of(nid))
 
     def name(self, nid: int) -> str:
-        return self.english.get(model_of(nid)) or self.label(nid)
+        key = (self.model(nid), self.w.npcs[nid]["behaviorVariationId"])
+        return self.english.get(key) or self.label(nid)
 
     def label(self, nid: int) -> str:
         return self.npc_labels.get(nid, "").replace("\u3000", " ").strip()
@@ -143,10 +168,13 @@ class Enemies:
         return None
 
     def groups(self) -> dict[tuple[int, int], list[int]]:
-        """{(model, behaviorVariationId): [named NpcParam rows]} for models with animations."""
+        """{(model, behaviorVariationId): [NpcParam rows]} for models with animations; the rows
+        placed in a map come first, so the first row is one the game really uses."""
         out: dict[tuple[int, int], list[int]] = collections.defaultdict(list)
-        for nid, r in sorted(self.w.npcs.items()):
-            model = model_of(nid)
+        for nid, r in sorted(
+            self.w.npcs.items(), key=lambda kv: (kv[0] not in self.placed, kv[0])
+        ):
+            model = self.model(nid)
             if nid < 100000 or not self.archive(model):
                 continue
             out[(model, r["behaviorVariationId"])].append(nid)

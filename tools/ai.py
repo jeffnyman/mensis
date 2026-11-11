@@ -35,10 +35,13 @@ import io
 import itertools
 import os
 import re
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import enemies as enemylib
+import events as evlib
+import flags as flaglib
 import items as itemlib
 import lua50
 
@@ -582,7 +585,7 @@ def load(en: enemylib.Enemies, nid: int) -> tuple[str, lua50.Func | None, dict]:
                 str(g),
             )
         }
-    model = enemylib.model_of(nid)
+    model = en.model(nid)
     _, acts = en.actions(nid, set(en.animations(model)))
     by_num = {
         int(m.group(1)): {
@@ -596,7 +599,90 @@ def load(en: enemylib.Enemies, nid: int) -> tuple[str, lua50.Func | None, dict]:
     return fname, act, by_num
 
 
-def report(en: enemylib.Enemies, nid: int) -> list[str]:
+def requested(
+    act: lua50.Func,
+    own: dict,
+    reqs: list[dict],
+    labels: dict[int, str],
+    dims: list | None = None,
+    grid: list | None = None,
+) -> list[str]:
+    """The map scripts' requests to this enemy, and what each makes its AI do."""
+    out = [
+        "\n## What the map scripts request\n",
+        (
+            "Event scripts send AI requests (AI命令要求: an entity, a command, a slot). "
+            "GetEventRequest(slot) returns the command until another request replaces it; "
+            "-1 clears it. Conditions are the ones the event waits for before the request, in "
+            "order (alternatives included).\n"
+        ),
+    ]
+    dims = dims or []
+    grid = grid or [()]
+    if not reqs:
+        return out + ["None found.\n"]
+    seen = set()
+    for q in reqs:
+        key = (q["map"], q["event"], q["slot"], q["command"], tuple(q["conditions"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        head = (
+            f"* **{q['map']} event {q['event']}** {q['name']}: "
+            + (
+                ("after " + "; ".join(q["conditions"]) + ", ")
+                if q["conditions"]
+                else ""
+            )
+            + f"command {q['command']} on slot {q['slot']}"
+        )
+        if q["command"] == -1:
+            out.append(head + ": clears the request.")
+            continue
+        ask = {f"GetEventRequest({q['slot']})": float(q["command"])}
+        if q["slot"] == 0:
+            ask["GetEventRequest()"] = float(q["command"])
+        # the request's effect, averaged over the main table's distance and health bands
+        before: dict[str, float] = collections.defaultdict(float)
+        after: dict[str, float] = collections.defaultdict(float)
+        try:
+            for combo in grid:
+                env = {d: v for (d, _), (_, v) in zip(dims, combo)}
+                env.update(own)
+                for k, v in outcome(act, env).items():
+                    before[k] += v / len(grid)
+                env.update(ask)
+                for k, v in outcome(act, env).items():
+                    after[k] += v / len(grid)
+        except RuntimeError:
+            out.append(head + ".")
+            continue
+        raised = sorted(
+            (k for k in after if after[k] - before.get(k, 0) > 0.05),
+            key=lambda k: -(after[k] - before.get(k, 0)),
+        )
+        name = lambda k: sequence(k, labels) if k.startswith("forced") else k
+        if not raised:
+            out.append(head + ": no change to the choice.")
+        else:
+            out.append(
+                head
+                + ": raises "
+                + ", ".join(
+                    f"{name(k)} from {before.get(k, 0) * 100:.0f}% to {after[k] * 100:.0f}%"
+                    for k in raised[:4]
+                )
+                + " (on average over the bands above)."
+            )
+    return out
+
+
+def report(
+    en: enemylib.Enemies,
+    nid: int,
+    rows: list[int] | None = None,
+    reqs: dict | None = None,
+) -> list[str]:
     fname, act, acts = load(en, nid)
     name = en.name(nid)
     out = [f"# How {name} chooses\n"]
@@ -613,7 +699,7 @@ def report(en: enemylib.Enemies, nid: int) -> list[str]:
         return out + [f"{fname}: not followed ({e}).\n"]
     var = en.w.npcs[nid]["behaviorVariationId"]
     labels = {}
-    for aid, hits in en.animations(enemylib.model_of(nid)).items():
+    for aid, hits in en.animations(en.model(nid)).items():
         for _, judge in hits:
             a_id = en.attack_id(var, judge)
             if a_id is not None and aid not in labels:
@@ -740,7 +826,104 @@ def report(en: enemylib.Enemies, nid: int) -> list[str]:
                 )
     if not any_change:
         out.append("Nothing found.")
+    if reqs is not None:
+        mine = [q for r in (rows or [nid]) for q in reqs.get(r, [])]
+        out += requested(act, base_state, mine, labels, dims, grid)
     out += inside(act, own, labels)
+    return out
+
+
+# The event instruction that sends an AI request, and the conditions worth naming before it.
+AI_REQUEST = {
+    (2004, 17),
+    (2004, 32),
+}  # AI命令要求 (entity, command, slot) and the flag variant
+COMPARE = {
+    0: "=",
+    1: "≠",
+    2: ">",
+    3: "<",
+    4: "≥",
+    5: "≤",
+}  # 比較タイプ, as the uses bear out
+
+
+def _args(iset: evlib.InstructionSet, key, raw: bytes) -> list:
+    layout, _ = iset.layout(key)
+    return [
+        struct.unpack_from("<" + fmt, raw, off)[0]
+        if off + struct.calcsize(fmt) <= len(raw)
+        else None
+        for _, fmt, off in layout
+    ]
+
+
+def condition(iset: evlib.InstructionSet, key, raw: bytes) -> str | None:
+    """An event instruction before a request, in words; None for ones not worth showing."""
+    a = _args(iset, key, raw)
+    if key == (4, 2):  # キャラのHP比率で判定
+        return f"its health {COMPARE.get(a[2], a[2])} {a[3] * 100:g}%"
+    if key == (4, 8):  # イベントメッセージIDが一致判定
+        return f"its AI sends event message {a[2]}"
+    if key == (4, 6):  # イベント部位＿HP
+        return f"its part {a[2]} at HP {COMPARE.get(a[4], a[4])} {a[3]}"
+    if key == (1001, 0):  # 経過秒数で待機
+        return f"after {a[0]:g} s"
+    if key == (3, 3):  # 対象同士の一定距離内外状態で判定
+        return f"{'within' if a[1] == 1 else 'beyond'} {a[4]:g} m of {a[3]}"
+    if key == (4, 9):  # 対象のAI状態で判定
+        return f"entity {a[1]} in AI state {a[2]}"
+    if key == (3, 0):  # イベントフラグ状態で判定
+        return f"flag {a[3]} {flaglib.TEST_STATE.get(a[1], a[1])}"
+    if key == (4, 5):  # 特殊効果IDがあるか
+        return f"entity {a[1]} {'has' if a[3] else 'lacks'} special effect {a[2]}"
+    if key[0] in (3, 4):
+        return iset.instr[key][0]
+    return None
+
+
+def requests(w: itemlib.World) -> dict[int, list[dict]]:
+    """{NpcParam row: [request]} from every running copy of every event: the map, the event
+    and its name, the conditions met before the request, the slot and the command."""
+    iset, evs, names, copies, concrete = flaglib.event_copies(w)
+    npc_of: dict[int, set[int]] = collections.defaultdict(set)
+    for m in w.maps():
+        for part in w.layout(m).parts:
+            if part.get("entity", -1) > 0 and part.get("npc", 0) > 0:
+                npc_of[part["entity"]].add(part["npc"])
+    out: dict[int, list[dict]] = collections.defaultdict(list)
+    seen = set()
+    for k, e in evs.items():
+        f, eid = k
+        for _, args in copies.get(k, {}):
+            conds: list[str] = []
+            for n, (c, i, raw) in enumerate(e.instructions):
+                key = (c, i)
+                if key not in iset.instr:
+                    continue
+                raw2, _ = concrete(e, n, raw, args)
+                if key in AI_REQUEST:
+                    ent, command, slot = _args(iset, key, raw2)[:3]
+                    for npc in npc_of.get(ent, ()):
+                        sig = (npc, f, eid, slot, command, tuple(conds))
+                        if sig in seen:
+                            continue
+                        seen.add(sig)
+                        out[npc].append(
+                            {
+                                "map": f,
+                                "event": eid,
+                                "name": names.get(k, ""),
+                                "conditions": list(conds),
+                                "slot": slot,
+                                "command": command,
+                            }
+                        )
+                    conds = []
+                    continue
+                cond = condition(iset, key, raw2)
+                if cond:
+                    conds.append(cond)
     return out
 
 
@@ -872,13 +1055,14 @@ def main() -> int:
             "| Enemy | Row | Script | Distance bands | Health bands | Opening | Actions it can choose |",
             "|---|---:|---|---:|---:|---|---:|",
         ]
+        reqs = requests(en.w)
         done = 0
         for (model, _), rows in sorted(
             en.groups().items(), key=lambda kv: (en.name(kv[1][0]), kv[0])
         ):
             if not en.animations(model):
                 continue
-            lines = report(en, rows[0])
+            lines = report(en, rows[0], rows, reqs)
             text = "\n".join(lines)
             if "No battle script" in text:
                 continue
@@ -950,7 +1134,8 @@ def main() -> int:
                 )
             )
         return 0
-    print("\n".join(report(en, nid)))
+    group = next((rows for rows in en.groups().values() if nid in rows), [nid])
+    print("\n".join(report(en, nid, group, requests(en.w))))
     return 0
 
 

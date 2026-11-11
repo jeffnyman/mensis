@@ -77,8 +77,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   And every enemy's moveset: each attack's timing, damage, poise damage and the AI actions that
   use it, named by the developers' own labels (the Cleric Beast's "right hook", "stomp"),
   scaled by each enemy's area level, and how each one chooses: the odds of every action by
-  distance and health, and the combos inside each, read by running its battle
-  script's bytecode. And what a hit costs a hunter: defense from level, then
+  distance and health, the combos inside each, and the health thresholds at which the map's
+  event scripts change its behavior, read by running its battle script's bytecode. And what a hit costs a hunter: defense from level, then
   the four armor pieces' damage cuts. And status buildup: which old Dark Souls slot became
   slow poison, rapid poison and frenzy, what each does, and how Endurance and Insight move a
   hunter's resistance.

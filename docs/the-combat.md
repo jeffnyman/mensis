@@ -595,15 +595,24 @@ python -I tools/enemies.py enemy  work/base/dvdroot_ps4 work/update/dvdroot_ps4 
 ```
 
 `tables` writes `work/combat/enemies.md`, one line per enemy, and a sheet per enemy in
-`work/combat/enemies/`. There are 148 sheets, with 8,364 hits between them, and 7,511 of those
+`work/combat/enemies/`. There are 148 sheets, with 8,096 hits between them, and 7,636 of those
 hits lead to an attack row.
 
 ### From an NpcParam row to its attacks
 
-* **Model.** NpcParam row *r* uses the model c<(*r* mod 1,000,000) / 100>: the Cleric Beast's
-  500000 is c5000, and so is its Chalice Dungeon copy 10500000. The model's animations are in
-  `chr/c5000.anibnd.dcx`. Rows below 100000 (tests, and the human characters, who carry
-  weapons) aren't covered.
+* **Model.** The maps say which model each placed row uses (MSB parts: a model and an
+  NpcParam row). For a row the maps don't place, the row number names it:
+  c<(*r* mod 1,000,000) / 100>, so 500000 is c5000, and so is its Chalice Dungeon copy
+  10500000. The model's animations are in `chr/c5000.anibnd.dcx`. Rows below 100000 (tests,
+  and the human characters, who carry weapons) aren't covered.
+
+  The number alone misleads more often than not. 282 of the 575 placed rows use a model their
+  number doesn't name. The Cleric Beast fought on the Great Bridge is row **500241**, placed as
+  c5000, though its number reads c5002. The first version of these sheets used the number
+  alone, so it sent such rows to the wrong animations or skipped them. It also gave the Cleric
+  Beast row 500000's figures, a copy the maps never place. Each sheet now lists its placed rows
+  first, and the representative row is a placed one. A row placed with several models takes
+  the one its number names: 507000 is the One Reborn as c5070, and also a c1050 crowd figure.
 * **Animations.** The archive's TAE file gives each animation's events, as for the player.
   The Cleric Beast's animation 3004 invokes judge 140 at 0.73 seconds, then 141, 142 and 143:
   one animation, four hits.
@@ -691,7 +700,7 @@ kill, so something else caps it. That isn't read here.
 ### What a hit costs a hunter
 
 ```
-python -I tools/enemies.py hit work/base/dvdroot_ps4 work/update/dvdroot_ps4 500000 120 30 "Hunter Hat" "Hunter Garb" "Hunter Gloves" "Hunter Trousers"
+python -I tools/enemies.py hit work/base/dvdroot_ps4 work/update/dvdroot_ps4 500241 120 30 "Hunter Hat" "Hunter Garb" "Hunter Gloves" "Hunter Trousers"
 ```
 
 Four things stand between an enemy's attack row and the hunter's health.
@@ -726,10 +735,11 @@ element's damage by them after the defense curve. The full Hunter set (hat, garb
 trousers) multiplies slash damage by 0.95 × 0.89 × 0.95 × 0.94 = 0.755.
 
 Each boss's heaviest attack ([the heaviest blows](#the-heaviest-blows)), against a hunter in the
-full Hunter set, with no buffs or runes:
+full Hunter set, with no buffs or runes. The row is the placed one:
 
 | Boss (row) | Area level effect | Row's attack | × | Attack | Level 30 | Level 100 |
 |---|---|---:|---:|---:|---:|---:|
+| Celestial Emissary (257010) | 7016, level 16: Cathedral C, second half | 540 | 2.45 | 1,323 | 1,022 | 997 |
 | Ludwig the Accursed (451000) | 7481, level 17: Cathedral Ward D, boss | 530 | 2.488 | 1,319 | 896 | 874 |
 | Laurence, the First Vicar (450000) | 7484, level 20.5: Cathedral Ward D, hidden boss | 454 | 2.771 | 1,258 | 828 | 729 |
 | Orphan of Kos (454000) | 7486, level 22: fishing village, boss | 390 | 2.839 | 1,107 | 737 | 623 |
@@ -740,14 +750,15 @@ full Hunter set, with no buffs or runes:
 | Ebrietas (251000) | 7017, level 17: Cathedral C, second half, hidden | 379 | 2.488 | 943 | 641 | 580 |
 | Darkbeast Paarl (508000) | 7009, level 9: the sacrifice town, first visit | 460 | 2.003 | 921 | 616 | 472 |
 | Rom, the Vacuous Spider (510000) | 7013, level 13: the university | 340 | 2.163 | 735 | 568 | 481 |
-| Cleric Beast (500000) | 7006, level 6-3: Cathedral A | 379 | 1.624 | 615 | 418 | 338 |
 | Vicar Amelia (502000) | 7006, level 6-3: Cathedral A | 373 | 1.624 | 606 | 412 | 331 |
-| Celestial Emissary (257000) | none | 540 | 1 | 540 | 417 | 325 |
+| Cleric Beast (500241) | 7002, level 2: Cathedral B, Cleric Beast | 379 | 1.037 | 393 | 255 | 190 |
 | Father Gascoigne, beast (272000) | 7003, level 3: Cathedral B, the Father | 333 | 1.119 | 373 | 239 | 175 |
 
-The ranking changes once the area level is in. The Celestial Emissary's 540 is the largest
-attack row, but row 257000 carries no level effect. Ludwig's row value is barely smaller, yet
-in play his attack is more than twice it. Levels help less than they seem to: from level 30 to
+The area level decides the order. The early bosses barely scale: the Cleric Beast's 2 and
+Gascoigne's 3 add 4% and 12%. The late ones more than double, and the Celestial Emissary's
+magic, at ×2.45, hits hardest of all. (An earlier version of this table used unplaced rows: the
+Emissary's 257000, which has no level effect, and the Cleric Beast's 500000, which has a later
+area's level.) Levels help less than they seem to: from level 30 to
 100, defense triples (71 to 214), but a 1,000-point attack is far above both. In the damage
 formula's terms, attack is many times defense either way, where every point of defense removes
 little. Against Ludwig, the 70 levels save 22 health.
@@ -768,9 +779,9 @@ python -I tools/ai.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/
 python -I tools/ai.py enemy  work/base/dvdroot_ps4 work/update/dvdroot_ps4 Cleric Beast
 ```
 
-`tables` writes `work/combat/ai.md`, one line per enemy, and a sheet for each of the 134
+`tables` writes `work/combat/ai.md`, one line per enemy, and a sheet for each of the 137
 enemies with a battle script in `work/combat/ai/`. Each sheet shows the chance of every action
-by distance (112 enemies) and health (27), the attacks each action makes, the timers and state
+by distance (113 enemies) and health (27), the attacks each action makes, the timers and state
 numbers each one sets, and what changes when the state does.
 
 ### The choosing function
@@ -855,7 +866,9 @@ Its state changes the picture:
   breaths (`遠ブレス`, Act11 and Act12), a quarter each.
 * **Father Gascoigne** picks from eight actions by distance while his health is at 67% or
   more. Below that he picks Act28 every time. Act28 plays animation 3028, which has no hit in
-  it: very likely his transformation.
+  it. His transformation is something else: the event script requests it below 34% health
+  ([what the map scripts ask](#what-the-map-scripts-ask)), and it is Act29, animation 3030. An
+  earlier version of this page guessed that Act28 was the transformation.
 * **Rom, the Vacuous Spider** chooses little herself. Her `Activate` picks Act11, which makes
   no attack, until the map's event script sends a request (100, 101, 110 or 111). Each request
   names the actions to choose from.
@@ -864,7 +877,7 @@ Its state changes the picture:
 ### Inside an action
 
 Each action is a function too: it measures, rolls and queues animations with `AddSubGoal`. The
-same run, applied to the 2,173 action functions, gives each one's sequences by distance band
+same run, applied to the 2,741 action functions, gives each one's sequences by distance band
 with their chances. The sheets put them under "Inside the actions". Four actions loop and
 aren't followed.
 
@@ -892,13 +905,51 @@ Father Gascoigne's Act01 is his axe combination. After the approach it ends one 
 35% two axe blows and a gunshot (`斧コンボ（１撃目）`, `２撃目`, `銃で撃つ`), 35% three axe blows,
 and 30% three axe blows and the gunshot.
 
+### What the map scripts ask
+
+Some choices come from outside the AI. The map's event script sends a request with
+`[2004:17]` `AI命令要求` ("AI command request": an entity, a command and a slot), and the battle
+script reads it with `GetEventRequest(slot)` until a request of −1 clears it. The tool finds
+every request in every running copy of every event, fills in the template arguments as the
+flag index does, and joins each request to the enemy whose placement has that entity ID. Each
+AI sheet's "What the map scripts request" lists the event, its working name, the conditions it
+waits for before the request, and what the command does to its choices, averaged over the
+sheet's distance and health bands.
+
+* **The Cleric Beast's heat-up** (`ボスヒートアップ_教区長`, "boss heat-up: Cleric Beast"). When its
+  health drops below 70%, the event sends command 1 on slot 1. That is the forced combo
+  (3010 → 3016, the left-arm rush) that sets numbers 1–3 and makes it fight harder. When its
+  AI answers with event message 100, the event clears the request. Its part breaks
+  (`ボス部位損傷_教区長_XX`) each send command 1 on slot 0 thirty seconds after the part's HP
+  reaches 0, which picks Act27.
+* **Rom's two stages** (`ヒートアップ_白痴の蜘蛛`, "heat-up: the idiot spider"). Command 100 at
+  75% health and 110 at 50%, which her AI answers with Act10. After it reports back (message
+  10) and 3 seconds pass, 101 or 111 opens her attacks: half Act02 and half Act11 after the
+  first, a spread of four after the second.
+* **Father Gascoigne.** `ボス変身_ガスコイン神父` ("boss transformation: Father Gascoigne")
+  sends command 40, his Act29, below 34% health. `ガスコイン（ボス部屋）オルゴールで特殊アニメ再生`
+  ("Gascoigne (boss room): play a special animation with the music box") sends command 60, his
+  Act27, while he has the music box's effect (4640, `m24_01聖堂街B_オルゴール`) and 34% health or
+  more. Below 34%, the same event sends 40.
+* **Ludwig's four heat-ups** (`ルドウイーク_ヒートアップ0`–`3`) send commands 100–103 at falling
+  health. Each one tips his choices toward one move, averaged over his bands: 100 the biting
+  advance (Act10, 4% to 16%), 101 the left-arm breath (Act12, 11% to 33%), 102 the strong charge
+  (`突撃（強）`, Act15, 8% to 79%) and 103 the vanishing leap (Act16, 9% to 50%).
+  `ルドウイーク_人モード崩れ` ("Ludwig: human mode collapses") sends 110 below 35%.
+  Each heat-up has two sets of thresholds, chosen by flag 13400999: 90, 80, 70 and 50% when
+  it is on, 90, 85, 80 and 75% when off. Nothing sets that flag. The one other event that tests
+  it is `TGS版と通常版の切り替え`, "switching between the TGS version and the normal version":
+  the Tokyo Game Show demo. The game as sold uses the second set, and so does Ludwig's own
+  `Activate`, which tests the same flag.
+
 ### What isn't followed
 
 * **Combinations of states.** Each state number or flag is varied on its own from the default,
   not in combination (number 1 and number 2 together, say).
 * **Four looping actions.** Their loops aren't followed.
-* **Event requests.** What the map scripts request, and when, is in the event scripts, not
-  followed here. A request's value is 0 unless the sheet says otherwise.
+* **Request timing in full.** The conditions before a request are listed in order, but the
+  event's condition groups (which conditions are alternatives, which are required together)
+  aren't untangled.
 * **Zero weights.** Some placements end with every weight 0 in the default state (the first
   row of the fallen hunters, the Executioner beyond 20 m). What `Common_Battle_Activate` does
   then isn't read.
@@ -1005,12 +1056,11 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
   ("frenzy damage 1: resistance shaving") add a little every interval; what applies them isn't
   followed here.
 * **Enemy resistance.** Most bosses have 999 in slow poison, rapid poison and frenzy. Among
-  the ones that don't (by each one's first row):
+  the ones that don't (by each one's placed row):
 
   | Boss | Slow Poison | Rapid Poison |
   |---|---:|---:|
   | Loran Darkbeast | 70 | 999 |
-  | Keeper of the Old Lords | 120 | 210 |
   | Blood-starved Beast | 999 | 180 |
   | The Witch of Hemwick | 200 | 180 |
   | Living Failures | 250 | 180 |
@@ -1035,9 +1085,10 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
   ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
-* **The event requests.** The odds of each action, and the sequences inside each, are read
-  ([how an enemy chooses](#how-an-enemy-chooses)). What the map scripts request, and when,
-  isn't.
+* **The event requests' condition groups.** The odds of each action, the sequences inside
+  each, and what the map scripts request are read
+  ([how an enemy chooses](#how-an-enemy-chooses)). Which of a request's conditions are
+  alternatives isn't untangled.
 * **The rest of a hit on the player.** The third set of rates the hit function passes (slot
   0x238), the hunter's own effects, and what holds the Moon Presence's gaze at 1 HP
   ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)).

@@ -147,7 +147,11 @@ def _u(raw: bytes, fo) -> int | None:
     return struct.unpack_from("<" + fmt, raw, off)[0]
 
 
-def event_refs(w: itemlib.World) -> list[Ref]:
+def event_copies(w: itemlib.World):
+    """Every event and every copy of it that runs: (instruction set, {(file, id): event},
+    {(file, id): name}, {(file, id): {(slot, args): first caller}}, concrete), where
+    concrete(event, instruction index, raw, args) fills a copy's parameters into an
+    instruction's arguments. Root events (started by no other) run once with no arguments."""
     iset = evlib.InstructionSet(souls.load(w.path("event/common.emedf.dcx")))
     files = sorted(
         f[: -len(".emevd.dcx")]
@@ -216,7 +220,11 @@ def event_refs(w: itemlib.World) -> list[Ref]:
             if key not in copies[t]:
                 copies[t][key] = f"{f} {eid}"
                 work.append((t, slot, raw2[8:]))
+    return iset, evs, names, copies, concrete
 
+
+def event_refs(w: itemlib.World) -> list[Ref]:
+    iset, evs, names, copies, concrete = event_copies(w)
     refs: set[Ref] = set()
     flagargs: dict = {}
     for k, e in evs.items():
