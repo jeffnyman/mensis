@@ -302,6 +302,17 @@ def checks() -> list[dict]:
             + [PY + ["tools/enemies.py", "hit", B, U, "271000", "140", "10"]],
         },
         {
+            "name": "status",
+            "needs": [B, U],
+            "stdout": True,
+            "text": [f"{OUT}/status/status.md"],
+            "cmds": [PY + ["tools/status.py", "tables", B, U, f"{OUT}/status"]]
+            + [
+                PY + ["tools/status.py", "resist", B, U, "10", "0"],
+                PY + ["tools/status.py", "resist", B, U, "40", "30", *HUNTER_SET],
+            ],
+        },
+        {
             "name": "effects",
             "needs": [B, U],
             "text": [f"{OUT}/effects/gems.md", f"{OUT}/effects/ngplus.md"],

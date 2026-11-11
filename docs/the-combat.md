@@ -8,7 +8,8 @@ curve, attack rating, the requirement penalty, defense from stats, the cost of a
 HP, how rally wins health back, and how a hit's attack meets the target's defense. Which button
 plays each move comes from the [animations](#which-button-plays-which-move). Then [the
 effects](#effects-blood-gems-buffs-and-new-game) behind blood gems, buffs and New Game+, and
-last [the enemies' movesets](#enemy-movesets): every enemy's attacks, by name.
+[the enemies' movesets](#enemy-movesets): every enemy's attacks, by name. And last, [status
+buildup](#status-buildup): slow poison, rapid poison, frenzy and beasthood.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -759,6 +760,123 @@ The numbers assume a few things not yet read:
 
 They are the hit's damage before those.
 
+## Status buildup
+
+```
+python -I tools/status.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
+python -I tools/status.py resist work/base/dvdroot_ps4 work/update/dvdroot_ps4 40 30 "Hunter Hat" "Hunter Garb" "Hunter Gloves" "Hunter Trousers"
+```
+
+`tables` writes `work/combat/status.md`. It holds the resistance curves, every effect that
+builds a condition up, what a hunter can inflict, and each enemy's resistances with what its
+attacks build up. The enemy sheets now note a hit's buildup too.
+
+### Old names, new conditions
+
+The data keeps Dark Souls' names for the conditions, and Bloodborne shows them under new ones.
+Three things tie them together:
+* **The menu's own rows.** `MenuPropertySpecParam` 410–413 are labelled `【防具】毒耐性` ("[armor]
+  poison resistance"), `出血耐性` ("bleeding resistance"), `発狂耐性` ("frenzy resistance") and
+  `獣化耐性` ("beasthood resistance"). Their captions are "Slow Poison RES", "Rapid Poison RES",
+  "Frenzy RES" and "Beasthood".
+* **The blood gems' text.** All 472 gem effects that add `registBlood` ("bleeding") read "Add
+  rapid poison effect", and the 468 that add `poizonAttackPower` read "Add slow poison effect".
+* **The level-sync curves.** Curve 122 is `遅効毒耐性値` ("slow-acting poison resistance") and
+  123 `劇毒耐性値` ("virulent poison resistance"). They begin at 30 and 40 at stat 10, as curve 110
+  `毒` ("poison") and curve 112 `出血` ("bleeding") do.
+
+| In the data | Buildup field | Armor field | Bloodborne |
+|---|---|---|---|
+| 毒, poison | `poizonAttackPower` | `resistPoison` | Slow Poison |
+| 出血, bleeding | `registBlood` | `resistBlood` | Rapid Poison |
+| 呪, curse (`呪（発狂）`, "curse (frenzy)", in the curve's name) | `registCurse` | `resistCurse` | Frenzy |
+| 獣化, beasthood | `registTherianthrope` | `resistTherianthrope` | Beasthood |
+| 疫病 or 猛毒, plague or deadly poison | `registIllness` | `resistDisease` (always 0) | none |
+
+The fifth slot is half there. Effects build it up (`猛毒ダメージ`, "deadly poison damage", up to
+1,280 points per tick) and enemies have `resist_desease` values. But it has no menu row, no
+armor gives it, and no code asks for its curve (111). The player can't resist it. Many of its
+sources are Dark Souls leftovers, such as the Bullet table's `ドラゴンゾンビ　アッシドブレス` (the
+Dragon Zombie's acid breath) and `白竜シース` (White Dragon Seath's breath).
+
+### How a condition builds up
+
+A hit applies special effects: an enemy attack row's `spEffectId0`–`4` and a bullet's own, a
+blood gem's on-hit effect (`speffectId_forAtk`), or a weapon's `spEffectBehaviorId`. An effect
+that builds up holds an amount in its field. The field's description reads "the value added to
+the target's [poison resistance value] when it hits". When the gauge reaches the target's
+resistance, the condition sets in. The same effect then says what it does: a share of max HP
+(`changeHpRate`) and a number of points (`changeHpPoint`), each tick (`motionInterval`) for a
+duration (`effectEndurance`). The fields' descriptions say "per second", but frenzy's
+70% applied over 0.03 seconds only makes sense as one tick, so the amounts are per tick.
+
+| Condition | A typical effect | Buildup | What it does |
+|---|---|---:|---|
+| Slow Poison | 5250 `毒ダメージ１` ("poison damage 1") | 40 | 12 points + 0.1% of max HP every second for 40 seconds |
+| Rapid Poison | 5271 `出血ダメージ２` ("bleeding damage 2") | 35 | 250 points + 3% of max HP, in a 2-second effect with a 3-second tick |
+| Rapid Poison | 6401 `出血_2` ("bleeding 2") | 33 | 30% of max HP, the same way |
+| Frenzy | 5230 `発狂ダメージ１　本体` ("frenzy damage 1, main body") | — | 70% of max HP, at once |
+| Beasthood | 6650 `獣化_小` ("beasthood, small") | 9 | no damage; carried by the bullets of a beasthood roar (`獣化_L2咆哮`, "beasthood: L2 roar") |
+
+Slow poison wears you down. Rapid poison and frenzy strike once, for a large share of max HP.
+
+### A hunter's resistance
+
+Four functions compute it (`01e97e90`, `01e97fd0`, `01e98110` and `01e98250` in the 1.09
+executable), one per condition. Each one adds three things:
+* the four armor pieces' values, each times its `ReinforceParamProtector` rate. Every piece
+  uses reinforce type 0, whose rates are 1.0, so in practice the values just add.
+* a flat amount kept on the character, presumably from effects such as runes;
+* a stat curve: **110 of Endurance** for Slow Poison and **112 of Endurance** for Rapid Poison.
+  Frenzy and Beasthood use **113** and **114** of a value at `+0x124` of the stat block.
+
+The stat block's layout comes from the functions beside these. Max HP reads Vigor at `+0x108`,
+and defense sums `+0x108` to `+0x11c`, the six stats in the menu's order. So `+0x10c` is
+Endurance. `+0x124` lies past the six stats, and its curves start at 0 rather than 1 and fall
+as it rises. That is very likely **Insight**, though no code here was found naming it.
+
+| Stat | Slow Poison | Rapid Poison | Frenzy | Beasthood |
+|---:|---:|---:|---:|---:|
+| 0 | | | 100 | 300 |
+| 10 | 30 | 40 | 100 | 213.3 |
+| 20 | 73.3 | 73.3 | 86.7 | 146.7 |
+| 30 | 100 | 100 | 60 | 100 |
+| 50 | 114.5 | 114.5 | 33.3 | 40 |
+| 99 | 150 | 150 | 10 | 5 |
+
+Insight costs resistance quickly. Frenzy resistance from Insight falls from 100 to 60 between
+15 and 30 Insight. The Hunter set adds 119 frenzy resistance, more than the curve gives past
+Insight 20. A hunter with Endurance 40 and Insight 30 in the full Hunter set resists slow poison
+to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
+
+### Who inflicts what
+
+* **A hunter.** Poison Throwing Knives (`毒投げナイフ`) add 70 slow poison. Blood gems add up to 30
+  slow poison or 22 rapid poison per hit. Of the weapons, only the Chikage carries a buildup
+  effect, 30 rapid poison, in an effect labelled `刀メニュー表示用ダミー出血効果` ("dummy bleeding
+  effect for the katana's menu display").
+* **Enemies.** 227 enemy attack rows build up slow poison, 120 rapid poison and 13 the unused
+  deadly poison. Only 3 build up frenzy, all `発狂（確定）` ("frenzy (certain)", 99,999), the
+  throw of the large Amygdala-type enemy (`c5140_邪神（大）_ゆっくり投げ`, "evil god (large): slow
+  throw"). Other frenzy sources aren't attacks. Effects such as `発狂ダメージ１　耐性削り`
+  ("frenzy damage 1: resistance shaving") add a little every interval; what applies them isn't
+  followed here.
+* **Enemy resistance.** Most bosses have 999 in slow poison, rapid poison and frenzy. Among
+  the ones that don't (by each one's first row):
+
+  | Boss | Slow Poison | Rapid Poison |
+  |---|---:|---:|
+  | Loran Darkbeast | 70 | 999 |
+  | Keeper of the Old Lords | 120 | 210 |
+  | Blood-starved Beast | 999 | 180 |
+  | The Witch of Hemwick | 200 | 180 |
+  | Living Failures | 250 | 180 |
+  | Celestial Emissary | 300 | 180 |
+
+  Common enemies mostly resist slow poison at 120 (680 of the 1,291 story rows) and rapid
+  poison at 180 (873). 5,723 of all 6,064 NpcParam rows have frenzy 999, so frenzy is almost
+  only the player's problem.
+
 ## What this doesn't cover yet
 
 * **The hit's flags and multipliers.** What the 1.4, 1.125 and 0.8 multipliers in
@@ -779,6 +897,9 @@ They are the hit's damage before those.
 * **The rest of a hit on the player.** The third set of rates the hit function passes (slot
   0x238), the hunter's own effects, and what holds the Moon Presence's gaze at 1 HP
   ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)).
+* **The rest of status.** How a gauge drains between hits, whether a resistance of 999 is
+  immunity or only a number no hit reaches, and what applies the frenzy "resistance shaving"
+  effects ([status buildup](#status-buildup)).
 * **The attacker's effect gathering, and elemental conversion.** How an attacker's own
   attack rates combine, and what a converted weapon's attack rating does, aren't read yet
   ([effects](#effects-blood-gems-buffs-and-new-game)).
@@ -789,6 +910,8 @@ They are the hit's damage before those.
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
 | `tools/tae.py` | each weapon's animation set, and the animations and state names behind each judge id |
+| `tools/status.py` | the resistance curves, the condition effects, who inflicts what, enemy resistances; `resist` for a hunter |
+| `work/combat/status.md` | those tables |
 | `tools/enemies.py` | every enemy's attacks: animation, time, judge id, labelled attack row, AI actions, area level; `hit` applies one to a hunter |
 | `work/combat/enemies.md`, `enemies/` | one line per enemy; each enemy's attacks |
 | `tools/effects.py` | the gem and New Game+ tables, and any special effect's changes |

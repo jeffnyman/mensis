@@ -203,6 +203,29 @@ class Enemies:
             return self.attacks_param.get(b["refId"]), ""
         return None, f"refType {b['refType']}"
 
+    def status(self, variation: int, judge: int) -> list[tuple[str, int]]:
+        """[(condition, buildup)] a hit carries: the effects of its attack row and, for a
+        bullet, the bullet's own (tools/status.py)."""
+        import status as statuslib
+
+        ids = []
+        b = self.behaviors.get(200000000 + variation * 1000 + judge)
+        if b is None:
+            return []
+        if b["refType"] == 1:
+            bullet = self.bullets.get(b["refId"])
+            if bullet:
+                ids += [bullet[f"spEffectId{i}"] for i in range(5)]
+        a_id = self.attack_id(variation, judge)
+        a = self.attacks_param.get(a_id) if a_id is not None else None
+        if a:
+            ids += [a[f"spEffectId{i}"] for i in range(5)]
+        out: list[tuple[str, int]] = []
+        for i in ids:
+            if i > 0:
+                out += statuslib.buildup(self.effects.get(i))
+        return out
+
     def script_index(self) -> dict[str, str]:
         """{script file name: luabnd path}, the update's archives over the base's."""
         if self._scripts is None:
@@ -337,7 +360,16 @@ def sheet(
                 f"| {aid if k == 0 else ''} | {time:g} | {judge} | "
                 f"{labels.get(judge, '')[len(prefix) :].replace(chr(0x3000), ' ')} | "
                 + " | ".join(attack_cells(a))
-                + f" | {', '.join(used_by.get(aid, [])) if k == 0 else ''} | {via} |"
+                + f" | {', '.join(used_by.get(aid, [])) if k == 0 else ''} | "
+                + "; ".join(
+                    x
+                    for x in (
+                        via,
+                        ", ".join(f"{n} +{v}" for n, v in en.status(variation, judge)),
+                    )
+                    if x
+                )
+                + " |"
             )
     return out, stats
 
