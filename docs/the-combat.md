@@ -330,6 +330,43 @@ Three more things are in the same code:
 | +0 | 94.9 | | | 17.8 |
 | +10 | | 270.0 | 360.0 | |
 
+### Elemental conversion
+
+The elemental gems ("Add fire ATK", "Add bolt ATK", "Add arcane ATK") and effects such as 79989,
+`物理→炎属性変換` ("physical → fire conversion"), set `weaponConvertAttribute`, 武器の属性変更
+("change of weapon attribute"): 1 arcane, 2 fire, 3 bolt. The attacker's effect gatherer
+(`SpEffect_AttackRates`) settles one value from all active effects. A new one replaces the
+current one by precedence, **arcane over fire over bolt**: a fire gem and a bolt gem together
+give fire. The gatherer writes the result into the attack's context, and `AttackRating_Compute`
+reads it there.
+
+Only an **attribute weapon** converts: `isAttributeWep`, 属性武器か ("is it an attribute
+weapon?"). Thirteen weapons are, with their Uncanny and Lost forms: the Saw Cleaver, Saw Spear,
+Hunter Axe, Threaded Cane, Kirkhammer, Ludwig's Holy Blade, Beast Claw and Stake Driver, and
+the DLC's Beasthunter Saif, Beast Cutter, Church Pick, Rakuyo and Whirligig Saw. The weapons with
+their own element or Bloodtinge scaling (the Chikage, Tonitrus, Logarius' Wheel, the Holy
+Moonlight Sword, the Burial Blade and the rest) aren't, so a gem's conversion does nothing to
+them.
+
+For an attribute weapon, every damage type is decided by the conversion:
+
+* **physical** is `attackBasePhysics` with Strength and Skill, but **0 once converted**;
+* the converted element's base is the weapon's **`attackBasePhysics`**, scaled like any element,
+  by **Arcane** alone (`correctFaith`);
+* the other elements are 0. An attribute weapon's own element bases are never read, and all are
+  0 in the data anyway.
+
+So conversion moves the whole physical base into one element and swaps Strength and Skill for
+Arcane. The plain weapons already carry an Arcane scaling for this: the Saw Cleaver's is 33.
+At +10 with Strength and Skill 25, its 270 physical becomes 264.1 fire at Arcane 50:
+
+```
+python -I tools/combat.py ar work/base/dvdroot_ps4 work/update/dvdroot_ps4 Saw Cleaver +10 25 25 9 50 fire
+```
+
+The gem's own flat "Add … ATK" value is an attack bonus on top
+([how an attacker's effects combine](#how-an-attackers-effects-combine)).
+
 ### Defense
 
 `Defense_StatSum` (`0197b180`) adds up six stats (with weights, all 1.0 in the file). In the
@@ -546,9 +583,9 @@ The text is presentation, and the effect row is what applies:
 * **The "Add … ATK" gems are whole numbers in the data.** "Add blood ATK +0.5" stores 0, so the
   rank-1 gem adds nothing. "+1.1" stores 1, "+1.5" stores 2, "+2.5" stores 2, "+2.8" stores 3.
   The elemental "Add" gems are the same: "Add arcane ATK +3.5" stores 4. Those elemental gems
-  also set `weaponConvertAttribute` (1 arcane, 2 fire, 3 bolt), which marks a weapon as
-  converted. In attack rating, an attribute weapon (`isAttributeWep`) can lose its physical
-  base under a context flag, but that path isn't followed here.
+  also set `weaponConvertAttribute` (1 arcane, 2 fire, 3 bolt), which converts an attribute
+  weapon's whole physical damage into that element ([elemental
+  conversion](#elemental-conversion)).
 * **The percentage gems mostly match.** Of 6,279 effects whose text gives one percentage and
   whose row changes one rate, 6,036 agree to a twentieth of a percent. "Physical ATK UP +2.7%"
   is ×1.027. "Blunt ATK UP +0.4%" is ×1.0036, which the text rounds.
@@ -1163,9 +1200,10 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
 * **The rest of status.** How a gauge drains between hits, whether a resistance of 999 is
   immunity or only a number no hit reaches, and what applies the frenzy "resistance shaving"
   effects ([status buildup](#status-buildup)).
-* **Elemental conversion, and the flat-bonus factors.** What a converted weapon's attack
-  rating does, and the four factors that scale a positive flat attack bonus, aren't read yet
-  ([how an attacker's effects combine](#how-an-attackers-effects-combine)).
+* **The flat-bonus factors, and Bloodtinge under conversion.** The four factors that scale
+  a positive flat attack bonus aren't identified
+  ([how an attacker's effects combine](#how-an-attackers-effects-combine)). Whether the
+  Bloodtinge ("blood", mode 4) value changes with conversion isn't followed.
 
 ## Files
 

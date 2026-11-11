@@ -3,7 +3,7 @@
 
     python -I tools/combat.py weapons <base dvdroot> <update dvdroot> <out dir>
     python -I tools/combat.py weapon  <base dvdroot> <update dvdroot> <name>
-    python -I tools/combat.py ar      <base dvdroot> <update dvdroot> <name> <level> <str> <skl> <blt> <arc>
+    python -I tools/combat.py ar      <base dvdroot> <update dvdroot> <name> <level> <str> <skl> <blt> <arc> [arcane|fire|bolt]
     python -I tools/combat.py levels  <base dvdroot> <update dvdroot> [<from> <to>]
     python -I tools/combat.py hit     <base dvdroot> <update dvdroot> <name> <level> <str> <skl> <blt> <arc> <judge id> <NpcParam row>
 
@@ -276,21 +276,37 @@ def stat_factor(correct: float, stat: int, requirement: int, row: dict) -> float
     return (100 - a * k * a + m * k * m) / 100
 
 
-def attack_rating(ws: Weapons, rid: int, stats: tuple[int, int, int, int]) -> dict:
+# weaponConvertAttribute (SpEffectParam +0x186): what an elemental gem turns a weapon into
+CONVERT = {1: "arcane", 2: "fire", 3: "bolt"}
+
+
+def attack_rating(
+    ws: Weapons, rid: int, stats: tuple[int, int, int, int], convert: int = 0
+) -> dict:
     """AttackRating_Compute (01976df0) for one weapon row at a 100% motion value, no buffs, no
     throw: physical (Strength and Skill), blood (physical with Bloodtinge alone, the mode-4
-    call), and arcane, fire and bolt (Arcane)."""
+    call), and arcane, fire and bolt (Arcane).
+
+    Conversion (convert 1 arcane, 2 fire, 3 bolt: the attacker's weaponConvertAttribute, put
+    in the attack context's +0xbf by SpEffect_AttackRates): an attribute weapon
+    (isAttributeWep) then has no physical base, and its attackBasePhysics becomes the base of
+    the one element, scaled by Arcane like any element. An attribute weapon's own element
+    bases are never used. A weapon without the flag isn't converted."""
     r = ws.rows[rid]
     graph = ws.w.rows("CalcCorrectGraph")[r["correctType"]]
     f = [stat_factor(r[c], s, r[p], graph) for (c, p, _), s in zip(STATS, stats)]
     phys = min(f[0], f[1]) if f[0] < 1 or f[1] < 1 else f[0] - 1 + f[1] - 1 + 1
+    converted = CONVERT.get(convert) if r["isAttributeWep"] else None
     out = {
-        "physical": r["attackBasePhysics"] * phys,
+        "physical": 0.0 if converted else r["attackBasePhysics"] * phys,
         # only for a weapon with Bloodtinge scaling: otherwise the factor is 1
         "blood": r["attackBasePhysics"] * f[2] if r["correctMagic"] > 0 else 0,
     }
     for base, _, name in DAMAGE[1:]:
-        out[name] = r[base] * f[3]
+        if r["isAttributeWep"]:
+            out[name] = r["attackBasePhysics"] * f[3] if name == converted else 0.0
+        else:
+            out[name] = r[base] * f[3]
     return out
 
 
@@ -419,6 +435,10 @@ def main() -> int:
         print(f"total   {total:7.1f}")
         return 0
     if a[1] == "ar":
+        convert = 0
+        if a[-1] in CONVERT.values():  # an elemental conversion, as a gem gives
+            convert = next(k for k, v in CONVERT.items() if v == a[-1])
+            a = a[:-1]
         name, level = " ".join(a[4:-5]), a[-5]
         s = [int(x) for x in a[-4:]]
         stats = (s[0], s[1], s[2], s[3])
@@ -429,7 +449,7 @@ def main() -> int:
             print(f"no weapon {name!r}")
             return 1
         rid = ws.families()[hit][int(level.lstrip("+"))]
-        for k, v in attack_rating(ws, rid, stats).items():
+        for k, v in attack_rating(ws, rid, stats, convert).items():
             if v:
                 print(f"{k:9} {v:7.1f}")
         return 0

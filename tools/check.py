@@ -258,6 +258,9 @@ def checks() -> list[dict]:
                     "Saw Cleaver +0 5 10 9 9",
                     "Chikage +10 10 14 50 9",
                     "Holy Moonlight Sword +10 16 12 9 50",
+                    "Saw Cleaver +10 25 25 9 50 fire",
+                    "Hunter Axe +10 30 15 9 40 arcane",
+                    "Chikage +10 10 14 50 9 fire",
                 )
             ]
             + [PY + ["tools/combat.py", "levels", B, U, "1", "120"]]
