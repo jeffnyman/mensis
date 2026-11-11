@@ -11,6 +11,11 @@ wear the Mensis Cage, an iron cage around the head that, in the game's own words
 will of the self, allowing one to see the profane world for what it is". Seeing past the surface
 of the thing to how it works is what this project is about.
 
+**Looking for an answer?** [Questions and answers](docs/questions-and-answers.md) answers what
+people ask (how attack rating works, what Ludwig does below 75% health, whether the Chalice
+Dungeons are random, what Insight does to frenzy), each with the number and a link to where it
+is worked out.
+
 ## What's here
 
 **The package opens all the way down.** It is a *fake* (homebrew re-signed) PKG, so its keys are
@@ -126,6 +131,9 @@ and character models rendered from the game's own meshes and textures (`flver.py
     descriptions say each number does, and the formulas that combine them.
 15. [Leftovers](docs/the-leftovers.md): other games, prototypes, event builds and tests, as the
     rows' working names tell them.
+
+For short answers that point into all of these, start with [questions and
+answers](docs/questions-and-answers.md).
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
