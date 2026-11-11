@@ -212,6 +212,8 @@ covers one tool, or one tool's output for every file of a kind:
 - the build and decompiled-code diffs;
 - the item pictures;
 - four renders, one of them a whole hunter.
+- every link in `README.md` and `docs/`, which needs no game data at all (`tools/doclinks.py`;
+  run it on its own to see which link broke).
 
 The checks take about four minutes. A check whose inputs you haven't built is reported as
 `SKIP`; for example, the code diffs need step 4, and so Ghidra. Text is compared after

@@ -311,6 +311,12 @@ def checks() -> list[dict]:
             "cmds": [PY + ["tools/ai.py", "tables", B, U, f"{OUT}/ai-choices"]],
         },
         {
+            "name": "doclinks",  # every link in README.md and docs/ resolves; needs no game data
+            "needs": ["README.md", "docs"],
+            "stdout": True,
+            "cmds": [PY + ["tools/doclinks.py"]],
+        },
+        {
             "name": "leftovers",
             "needs": [B, U],
             "text": [f"{OUT}/leftovers.md"],
