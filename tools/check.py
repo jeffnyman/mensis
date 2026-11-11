@@ -308,6 +308,12 @@ def checks() -> list[dict]:
             "cmds": [PY + ["tools/ai.py", "tables", B, U, f"{OUT}/ai-choices"]],
         },
         {
+            "name": "leftovers",
+            "needs": [B, U],
+            "text": [f"{OUT}/leftovers.md"],
+            "cmds": [PY + ["tools/leftovers.py", B, U, f"{OUT}/leftovers.md"]],
+        },
+        {
             "name": "status",
             "needs": [B, U],
             "stdout": True,

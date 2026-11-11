@@ -67,6 +67,12 @@ and character models rendered from the game's own meshes and textures (`flver.py
   Chapel or Iosefka's Clinic, the beggar's killings, and the clinic's moon messengers. Then
   Djura, Eileen, Alfred and the Queen of Cainhurst, Gascoigne's daughters, and the Old Hunters'
   Simon, Ludwig's head, Maria, Brador and Adeline.
+* [Leftovers](docs/the-leftovers.md): what the tables carry from elsewhere, read from every
+  row's working name: 3,517 rows for 116 enemy models that have no files (Dark Souls' Seath,
+  Quelaag, the Gaping Dragon, Gwyn's title), a second game's prototype ("a knight who loves
+  ladders"), the Tokyo Game Show and gamescom builds, the DLC review's characters, Dark Souls
+  words kept for Bloodborne's own things (the Hunter's Mark is the Darksign), and every
+  weapon's working name.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
@@ -118,6 +124,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     that leads to it, what they hand over, and the safe places read from the data.
 14. [Combat](docs/the-combat.md): the weapon, move and curve tables, what their own
     descriptions say each number does, and the formulas that combine them.
+15. [Leftovers](docs/the-leftovers.md): other games, prototypes, event builds and tests, as the
+    rows' working names tell them.
 
 Each page says how its results were obtained, including the wrong turns that were corrected on
 the way, so the method can be followed and checked. To reproduce everything from your own copy
@@ -198,6 +206,7 @@ python -I tools/tae.py sets|moves <base dvdroot> <update dvdroot> [<weapon>]  # 
 python -I tools/enemies.py tables|enemy|hit <base dvdroot> <update dvdroot> …  # every enemy's attacks; one against a hunter
 python -I tools/status.py tables|resist <base dvdroot> <update dvdroot> …  # status buildup; a hunter's resistances
 python -I tools/ai.py tables|enemy|paths <base dvdroot> <update dvdroot> …  # how each enemy chooses its actions
+python -I tools/leftovers.py <base dvdroot> <update dvdroot> <out.md>  # every leftover row, by kind
 python -I tools/effects.py tables|effect <base dvdroot> <update dvdroot> …  # blood gem effects, New Game+, any special effect
 ```
 
