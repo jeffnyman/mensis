@@ -505,8 +505,9 @@ python -I tools/effects.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 
 python -I tools/effects.py effect work/base/dvdroot_ps4 work/update/dvdroot_ps4 7421
 ```
 
-`tables` writes `work/combat/gems.md` (every gem effect, by category and rank) and `ngplus.md`
-(the New Game+ effects). A field counts as **changed** when it differs from the value most rows
+`tables` writes `work/combat/gems.md` (every gem effect, by category and rank), `ngplus.md`
+(the New Game+ effects), `runes.md` (every rune's gem effects) and `buffs.md` (the
+consumables). A field counts as **changed** when it differs from the value most rows
 hold: 1.0 for a rate, 0 or −1 for most others. A few gem effects show no changed number; their
 work is done through a state ID (`stateInfo`) or by code, not by a field.
 
@@ -528,8 +529,8 @@ The effect fields keep attack and damage apart, and their own names say so:
 defense rates of every active effect and sums the flat defenses. `SpEffect_DamageCutRates`
 (`01be7a80`) multiplies the damage-cut rates for the damage type at hand, skipping effects of
 a few categories (110, and in one mode 158 and 204). So two gems of ×1.10 give ×1.21, not ×1.20.
-The attacker's own attack-rate gathering isn't read yet, so attack rates are only likely to
-stack the same way.
+The attacker's own gatherer does the same with attack rates
+([how an attacker's effects combine](#how-an-attackers-effects-combine)).
 
 ### Blood gems
 
@@ -555,6 +556,55 @@ The text is presentation, and the effect row is what applies:
   and 241 of the 244 rally effects are within rounding of 4×.
 * **"Falling damage reduced 30%" stores ×0.5**, a 50% reduction; "50%" stores ×0.25 and "100%"
   ×0.
+
+### Runes
+
+Caryll runes are gems too: the ones that go in the body's slots (`GemGenParam` rows with
+`equipableSegmentBody` set) rather than a weapon's. Each carries gem effects, and each gem
+effect's name is the gem-name text (`魔石名`) at 11,000,000 plus its `gemNameIdOffset`. The
+Caryll Rune items in the inventory (goods 1600–1612) only point at effects labelled `原石`, "raw
+stone", which change nothing. `runes.md` lists all 83 gem effects a rune can carry:
+
+| Rune | Text | What the effect holds |
+|---|---|---|
+| Clockwise Metamorphosis | Boosts max HP +5% / +10% / +15% | `maxHpRate` ×1.05 / 1.1 / 1.15 |
+| Anti-Clockwise Metamorphosis | Boosts max stamina +10% / +15% / +20% | `maxStaminaRate` ×1.1 / 1.15 / 1.2 |
+| Clawmark | Ups visceral attack ATK +10% / +20% / +30% | the four damage rates ×1.1 / 1.2 / 1.3, for throws only (`throwAttackParamChange`) |
+| Great Lake | All DMG reduction +3% / +4% / +5% | every damage-cut rate ×0.97 / 0.96 / 0.95 |
+| Arcane Lake | Arcane DMG reduction +5% / +7% / +10% | `magicDamageCutRate` ×0.95 / 0.93 / 0.9 |
+| Moon | More echoes from slain enemies | `soulRate` ×1.1 / 1.2 / 1.3 |
+
+Clawmark raises the visceral attack's **damage** rates (攻撃側：ダメージ倍率), not its attack
+power, so it multiplies after defense.
+
+### Consumables
+
+An item whose use applies an effect is an `EquipParamGoods` row with `refCategory` 2 and the
+effect in `refId`. `buffs.md` lists the 37 that change something:
+
+* **Blood Vial** (`HP回復【40%】`, "HP recovery 40%") restores 40% of max HP (`transfusionHpRate`
+  −40). Iosefka's restores 70%. The bloods of Arianna and Adella restore 25%, and
+  Adeline's 50%.
+* **Fire Paper** and **Bolt Paper** (`武器強化【炎】`, `【雷】`, "weapon buff: fire, bolt") add a
+  **flat** 80 fire or bolt attack for 60 seconds. They are flagged `bAdjustFaithAblity`, scaling
+  with Arcane ("faith" being Arcane's old name, as in the [scaling](#scaling-and-its-letter)
+  fields). The **Empty Phantasm Shell** adds 80 arcane the same way.
+* **Bone Marrow Ash** (`武器強化【銃】`, "weapon buff: gun") holds no number: it flags guns
+  (`wepParamChange` 2) and Bloodtinge (`bAdjustMagicAblity`), and the boost is the code's.
+* **Blue Elixir** cuts how far enemies see (`sightSearchEnemyCut` 70) and hear (×0.7) for 30
+  seconds.
+
+### How an attacker's effects combine
+
+The attacker's gatherer is `SpEffect_AttackRates` (`01be5a30`). For each active effect it takes
+the attack-power rates (physical, slash, blunt, thrust, neutral, and the elements) and
+**multiplies** them into a running product. It adds the flat attack values into a running sum,
+after scaling each positive one by a product of four factors held elsewhere (not identified
+here; the papers' stat scaling is the likely use). Effects marked `bGameClearBonus` are first
+scaled by the New Game+ table, as on the defense side. So attack rates stack like defense
+rates: two effects of ×1.10 give ×1.21. The enemy numbers in [what a hit costs a
+hunter](#what-a-hit-costs-a-hunter) were computed that way, and the assumption now has its
+code.
 
 ### New Game+
 
@@ -763,10 +813,9 @@ area's level.) Levels help less than they seem to: from level 30 to
 formula's terms, attack is many times defense either way, where every point of defense removes
 little. Against Ludwig, the 70 levels save 22 health.
 
-The numbers assume a few things not yet read:
-* that the attacker's attack-power rates multiply across effects, as the defense and damage-cut
-  gatherers were seen to do;
-* nothing for the third set of rates the hit function passes (character slot 0x238);
+The attacker's rates multiply across effects ([how an attacker's effects
+combine](#how-an-attackers-effects-combine)). The numbers leave out a few things:
+* the third set of rates the hit function passes (character slot 0x238);
 * nothing for the hunter's own effects (runes, buffs, and the 1.4, 1.125 and 0.8 multipliers
   of [attack against defense](#attack-against-defense)).
 
@@ -1114,9 +1163,9 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
 * **The rest of status.** How a gauge drains between hits, whether a resistance of 999 is
   immunity or only a number no hit reaches, and what applies the frenzy "resistance shaving"
   effects ([status buildup](#status-buildup)).
-* **The attacker's effect gathering, and elemental conversion.** How an attacker's own
-  attack rates combine, and what a converted weapon's attack rating does, aren't read yet
-  ([effects](#effects-blood-gems-buffs-and-new-game)).
+* **Elemental conversion, and the flat-bonus factors.** What a converted weapon's attack
+  rating does, and the four factors that scale a positive flat attack bonus, aren't read yet
+  ([how an attacker's effects combine](#how-an-attackers-effects-combine)).
 
 ## Files
 

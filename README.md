@@ -74,6 +74,7 @@ and character models rendered from the game's own meshes and textures (`flver.py
   cost of a level, max HP, how rally's "grace HP" wins health back, and the damage formula: an
   attack against an enemy's defense, slash, blunt and thrust included. And the effects behind
   blood gems and New Game+: what each gem really stores, and how much each enemy grows per cycle.
+  The Caryll runes and the consumables, and how effects stack: rates multiply, flat bonuses add.
   And every enemy's moveset: each attack's timing, damage, poise damage and the AI actions that
   use it, named by the developers' own labels (the Cleric Beast's "right hook", "stomp"),
   scaled by each enemy's area level, and how each one chooses: the odds of every action by

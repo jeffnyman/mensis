@@ -321,7 +321,12 @@ def checks() -> list[dict]:
         {
             "name": "effects",
             "needs": [B, U],
-            "text": [f"{OUT}/effects/gems.md", f"{OUT}/effects/ngplus.md"],
+            "text": [
+                f"{OUT}/effects/gems.md",
+                f"{OUT}/effects/ngplus.md",
+                f"{OUT}/effects/runes.md",
+                f"{OUT}/effects/buffs.md",
+            ],
             "cmds": [PY + ["tools/effects.py", "tables", B, U, f"{OUT}/effects"]],
         },
         {
