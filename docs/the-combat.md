@@ -8,8 +8,9 @@ curve, attack rating, the requirement penalty, defense from stats, the cost of a
 HP, how rally wins health back, and how a hit's attack meets the target's defense. Which button
 plays each move comes from the [animations](#which-button-plays-which-move). Then [the
 effects](#effects-blood-gems-buffs-and-new-game) behind blood gems, buffs and New Game+, and
-[the enemies' movesets](#enemy-movesets): every enemy's attacks, by name. And last, [status
-buildup](#status-buildup): slow poison, rapid poison, frenzy and beasthood.
+[the enemies' movesets](#enemy-movesets): every enemy's attacks, by name, and [how an enemy
+chooses](#how-an-enemy-chooses) between them. And last, [status buildup](#status-buildup): slow
+poison, rapid poison, frenzy and beasthood.
 
 ```
 python -I tools/combat.py weapons work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
@@ -760,6 +761,117 @@ The numbers assume a few things not yet read:
 
 They are the hit's damage before those.
 
+## How an enemy chooses
+
+```
+python -I tools/ai.py tables work/base/dvdroot_ps4 work/update/dvdroot_ps4 work/combat
+python -I tools/ai.py enemy  work/base/dvdroot_ps4 work/update/dvdroot_ps4 Cleric Beast
+```
+
+`tables` writes `work/combat/ai.md`, one line per enemy, and a sheet for each of the 134
+enemies with a battle script in `work/combat/ai/`. Each sheet shows the chance of every action
+by distance (112 enemies) and health (27), the attacks each action makes, the timers and state
+numbers each one sets, and what changes when the state does.
+
+### The choosing function
+
+The enemy movesets above list, for each attack, the battle-script actions (`…_Act01`,
+`…_Act02`) that can make it. One function picks between those actions: `<name>Battle_Activate`.
+It fills a table of **weights**, one per action, and hands it to `Common_Battle_Activate` in
+`aicommon.luabnd` (`common_battle_func.lua`). That common function adds the weights up, rolls
+`GetRandam_Int(1, total)` and walks the table. **Each action's chance is its weight divided by
+the sum.**
+
+What decides the weights is whatever `Activate` asks the game:
+* the distance to the player, `GetDist(TARGET_ENE_0)`;
+* its own health, `GetHpRate(TARGET_SELF)`;
+* where the player is, `IsInsideTarget(TARGET_ENE_0, AI_DIR_TYPE_B, 140)` meaning "in the 140°
+  behind me";
+* state it keeps: `GetNumber`/`SetNumber`, timers (`IsFinishTimer`), and variables of the
+  script itself that persist between calls;
+* special effects it carries (`HasSpecialEffectId`), requests from the map's event script
+  (`GetEventRequest`), and its own random rolls.
+
+### Reading it
+
+The scripts are compiled Lua 5.0 with no source. `tools/ai.py` runs `Activate` on the bytecode
+for one state of the world at a time. Everything the game would answer is fixed by that state,
+and only the script's own random rolls fork the run, each branch weighted by its roll's range.
+The tool finds the distance and health bands from the thresholds the runs compare against,
+running again until no new ones appear. Then it fills each band's table and tries each other
+answer the script tests for, to show what it changes.
+
+The default state is the fight in progress. Timers have finished, state numbers are 0, no
+special effects are active, no event request is pending, and the player is in front (inside the
+"front" cones, outside the "back" and side ones). The enemy's own placement
+(`GetNpcThinkParamID`) is its row's `aiThinkId`. Each assumption is stated on every sheet. A
+few results the tool had to be taught, each found by checking a sheet against its bytecode:
+* **Calls into the script's own functions.** Father Gascoigne's `Activate` hands over to
+  `Gascoyne271000Battle`.
+* **Script variables** that keep state between calls (`GETUPVAL`/`SETUPVAL`). They start at the
+  value the script gives them, which the tool reads from the chunk's own code.
+* **Opening moves.** When every band gives one action, a state number usually holds the enemy
+  to its opener. The tool then shows the table for the value that opens the choice up, and
+  names the action that sets it.
+
+### The Cleric Beast
+
+| Distance | Act01 | Act02 | Act03 | Act04 | Act05 | Act07 | Act08 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| < 3 | 20% | 30% | | | | 30% | 20% |
+| 3–6 | 20% | 20% | 20% | | 10% | 20% | 10% |
+| 6–10 | 36% | 9% | 27% | 9% | 18% | | |
+| 10–15 | 25% | | 38% | 25% | 12% | | |
+| ≥ 15 | 25% | | 25% | 38% | 12% | | |
+
+Act01 is the hook combination (`右フック`, `左フック`, "right hook", "left hook"). Act03 is the slam
+(`叩きつけ`), Act04 the stomp (`踏みつけ`) and Act05 the left-right rush. Act07 and Act08 are the
+close punch and the close grab (`近接投げ`). Up close it grabs and punches; at range it stomps and
+slams. Hand-checking the bytecode at 15 m or more: the weights are 10, 10, 15 and 5, so
+25%, 25%, 37.5% and 12.5%.
+
+Its state changes the picture:
+* **Cooldowns.** Act04 starts timer 0 and Act05 timer 1, both for 10 seconds. While a timer
+  runs, its action's weight is 0, so the beast doesn't stomp or rush twice in a row.
+* **The player behind it** (`AI_DIR_TYPE_B`, 140°). On a roll of 70 or less it turns with
+  Act20, so 70% in every band.
+* **A broken part.** Effects 480–484 are `ボス 部位損傷 その1`–`5` ("boss part damage 1–5").
+  Any of 480, 483 or 484 sets state number 3, which brings in Act12–Act15: the moving lariat
+  (`移動ラリアット`), the pole-vault leaps (`棒高跳び`) and a back-step attack. At range the lariat
+  and the leaps then take most of the weight.
+* **The event request** (`GetEventRequest(1)`, from the map's event script) skips the table.
+  The beast queues 3010 and 3016 directly (with a back step, 701, when within 5 m) and sets
+  numbers 1, 2 and 3. From then on, the hooks (Act01) and the slam (Act03) weigh half as much.
+  Act06 (the super slam, `超叩きつけ`), Act09, Act10, Act16 and Act17 (the left-arm rush) join in.
+
+### Other bosses
+
+* **Ludwig the Accursed** opens with Act04, the jump slam (`ジャンプ叩きつけ`), every time.
+  While state number 1 is 0, his `Activate` offers nothing else, and Act04 sets it to 1. From
+  then on his options grow as his health falls. Above 90% health and within 1.5 m, it's only
+  Act13 (`顔面でぶん殴る`, "smash with the face"). Below 75%, Act16 (`大ジャンプで消える`, "vanishes
+  with a big jump", on a 45-second timer) takes 40–67% of the choices within 6 m. At 8–10 m and above 85% health, the big jump stomp (Act07,
+  `大ジャンプ踏みつけ`) takes 57%. Below 85%, it shares the range with the two long-range
+  breaths (`遠ブレス`, Act11 and Act12), a quarter each.
+* **Father Gascoigne** picks from eight actions by distance while his health is at 67% or
+  more. Below that he picks Act28 every time. Act28 plays animation 3028, which has no hit in
+  it: very likely his transformation.
+* **Rom, the Vacuous Spider** chooses little herself. Her `Activate` picks Act11, which makes
+  no attack, until the map's event script sends a request (100, 101, 110 or 111). Each request
+  names the actions to choose from.
+* **Six enemies open with a fixed move**: Ludwig, Laurence, the Maneater Boar, and three others.
+
+### What isn't followed
+
+* **The actions themselves.** Inside an action there are often further rolls and distance
+  checks that pick its combo or follow-up. The sheets list every attack an action can make,
+  not the odds between them.
+* **Event requests.** What the map scripts request, and when, is in the event scripts, not
+  followed here. A request's value is 0 unless the sheet says otherwise.
+* **Zero weights.** Some placements end with every weight 0 in the default state (the first
+  row of the fallen hunters, the Executioner beyond 20 m). What `Common_Battle_Activate` does
+  then isn't read.
+
 ## Status buildup
 
 ```
@@ -892,8 +1004,9 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
   ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
-* **Enemy AI choices.** The sheets list which AI actions can make each attack, but not the
-  distances, odds and health thresholds the battle script uses to choose an action.
+* **Inside an enemy's actions, and the event requests.** The odds of each action are read
+  ([how an enemy chooses](#how-an-enemy-chooses)). The rolls inside an action, and what the map
+  scripts request, aren't.
 * **The rest of a hit on the player.** The third set of rates the hit function passes (slot
   0x238), the hunter's own effects, and what holds the Moon Presence's gaze at 1 HP
   ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)).
@@ -910,6 +1023,8 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
 |---|---|
 | `tools/combat.py` | the weapon, move and curve tables; `ar` and `levels` compute with the formulas |
 | `tools/tae.py` | each weapon's animation set, and the animations and state names behind each judge id |
+| `tools/ai.py` | runs each battle script's Activate function: the chance of each action by distance, health and state |
+| `work/combat/ai.md`, `ai/` | one line per enemy; each enemy's choices |
 | `tools/status.py` | the resistance curves, the condition effects, who inflicts what, enemy resistances; `resist` for a hunter |
 | `work/combat/status.md` | those tables |
 | `tools/enemies.py` | every enemy's attacks: animation, time, judge id, labelled attack row, AI actions, area level; `hit` applies one to a hunter |

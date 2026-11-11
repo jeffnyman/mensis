@@ -85,6 +85,10 @@ class Func:
         self.protos: list[Func] = []
         self.code: list[int] = []
         self.nparams = self.vararg = 0
+        self.nups = 0
+        # set by tools/ai.py: the upvalues' starting values, the script's other functions
+        self.start_values: list = []
+        self.chunk_funcs: dict = {}
 
 
 class Reader:
@@ -120,7 +124,7 @@ class Reader:
         f = Func()
         f.source = self.string()
         self.i32()  # line defined
-        self.u8()  # nups
+        f.nups = self.u8()
         f.nparams, f.vararg = self.u8(), self.u8()
         self.u8()  # max stack
         n = self.i32()
