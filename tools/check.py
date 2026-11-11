@@ -304,8 +304,8 @@ def checks() -> list[dict]:
         {
             "name": "ai",
             "needs": [B, U],
-            "texts": f"{OUT}/ai/**/*.md",
-            "cmds": [PY + ["tools/ai.py", "tables", B, U, f"{OUT}/ai"]],
+            "texts": f"{OUT}/ai-choices/**/*.md",
+            "cmds": [PY + ["tools/ai.py", "tables", B, U, f"{OUT}/ai-choices"]],
         },
         {
             "name": "status",
