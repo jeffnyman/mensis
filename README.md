@@ -78,6 +78,10 @@ and character models rendered from the game's own meshes and textures (`flver.py
   ladders"), the Tokyo Game Show and gamescom builds, the DLC review's characters, Dark Souls
   words kept for Bloodborne's own things (the Hunter's Mark is the Darksign), and every
   weapon's working name.
+* [The loader](docs/the-loader.md): running the game's start-up under a CPU emulator. Before it
+  stops on its first AVX instruction it makes 26,631 system calls to 30 functions: a 116 MiB
+  allocator, 1,106 static objects and 1,320 mutexes. That call log is an emulator's first to-do
+  list, and the AVX wall is why an emulator has to run the game's code natively.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
@@ -131,6 +135,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     descriptions say each number does, and the formulas that combine them.
 15. [Leftovers](docs/the-leftovers.md): other games, prototypes, event builds and tests, as the
     rows' working names tell them.
+16. [The loader](docs/the-loader.md): the game's own start-up run under a CPU emulator, every
+    system call it makes, and the AVX instruction that stops it: what an emulator has to do first.
 
 For short answers that point into all of these, start with [questions and
 answers](docs/questions-and-answers.md).

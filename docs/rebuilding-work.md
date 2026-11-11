@@ -186,6 +186,15 @@ python -I tools/flver.py    hunters work/base/dvdroot_ps4 work/update/dvdroot_ps
 Map and object textures are optional (`models … map,obj`); all 56 map packs come to roughly 7–8
 GB. Like everything in `work/`, the pictures stay out of the repository.
 
+## 8. Watch the start-up ([the loader](the-loader.md))
+
+```
+python -I tools/loader.py work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eboot-1.09.symbols.tsv work/loader
+```
+
+About 5 seconds. Writes `work/loader/calls.log`, every system call the start-up makes, and
+`work/loader/summary.md`. Needs step 3's prepared executable.
+
 ## Checking the result
 
 **The regression check** reruns the tools and compares every output with the result this
