@@ -912,16 +912,34 @@ Some choices come from outside the AI. The map's event script sends a request wi
 script reads it with `GetEventRequest(slot)` until a request of −1 clears it. The tool finds
 every request in every running copy of every event, fills in the template arguments as the
 flag index does, and joins each request to the enemy whose placement has that entity ID. Each
-AI sheet's "What the map scripts request" lists the event, its working name, the conditions it
-waits for before the request, and what the command does to its choices, averaged over the
-sheet's distance and health bands.
+AI sheet's "What the map scripts request" lists the event, its working name, the path through
+the event to the request, and what the command does to its choices, averaged over the sheet's
+distance and health bands.
 
-* **The Cleric Beast's heat-up** (`ボスヒートアップ_教区長`, "boss heat-up: Cleric Beast"). When its
-  health drops below 70%, the event sends command 1 on slot 1. That is the forced combo
+**Reading the path.** An event's conditions work in groups. Each condition instruction (class
+3 and 4) registers into a numbered group. A negative group holds when any of its conditions
+does, and a positive group when all do. `[0:00]` puts one group inside another. Registering
+into group 0 makes the event wait there and then. After that wait, the groups start empty
+again, but the event can still ask how a group finished (`[1000:07]`, `[1000:08]`,
+`[1000:107]`). Skips, ends and label jumps test those groups, a flag, the multiplayer state or
+two numbers, and that is how an event branches.
+
+The tool walks every path through each copy of each event. A wait becomes "wait for" with its
+groups written out as and/or. A branch becomes "if" or "unless", and a request reached on the
+path is reported with everything before it. A jump back to an earlier label is a loop, which
+isn't followed. A flag that is an event's own (its ID) is shown with that event's working
+name. A flag tested relative to the event (`基準イベントフラグIDタイプ` 1, "base event-flag ID
+type") reads as the event's own flag: the event is running for the first time or not. 55 AI
+sheets have requests, on 2,079 paths.
+
+* **The Cleric Beast's heat-up** (`ボスヒートアップ_教区長`, "boss heat-up: Cleric Beast"). Unless
+  flag 12411700 (`ボス撃破_教区長`, "boss defeated: Cleric Beast") is on, it waits for the
+  beast's health to drop below 70%, then sends command 1 on slot 1. That is the forced combo
   (3010 → 3016, the left-arm rush) that sets numbers 1–3 and makes it fight harder. When its
-  AI answers with event message 100, the event clears the request. Its part breaks
-  (`ボス部位損傷_教区長_XX`) each send command 1 on slot 0 thirty seconds after the part's HP
-  reaches 0, which picks Act27.
+  AI answers with event message 100, the event clears the request. Each part break
+  (`ボス部位損傷_教区長_XX`) waits for (the part's HP at 0 **or** the beast's health at 0). Unless
+  it was the beast's death that ended the wait, the event sends command 1 on slot 0 thirty
+  seconds later, which picks Act27.
 * **Rom's two stages** (`ヒートアップ_白痴の蜘蛛`, "heat-up: the idiot spider"). Command 100 at
   75% health and 110 at 50%, which her AI answers with Act10. After it reports back (message
   10) and 3 seconds pass, 101 or 111 opens her attacks: half Act02 and half Act11 after the
@@ -936,8 +954,11 @@ sheet's distance and health bands.
   advance (Act10, 4% to 16%), 101 the left-arm breath (Act12, 11% to 33%), 102 the strong charge
   (`突撃（強）`, Act15, 8% to 79%) and 103 the vanishing leap (Act16, 9% to 50%).
   `ルドウイーク_人モード崩れ` ("Ludwig: human mode collapses") sends 110 below 35%.
-  Each heat-up has two sets of thresholds, chosen by flag 13400999: 90, 80, 70 and 50% when
-  it is on, 90, 85, 80 and 75% when off. Nothing sets that flag. The one other event that tests
+  Each heat-up waits for (its health threshold **and** his AI's event message 10 **and** the
+  previous heat-up's flag) **or** a message of its own (20, 30, 40, 50). It sends its command
+  only if the threshold, not that message, ended the wait. So the heat-ups go in order, and
+  only when his AI says it is ready. Each has two sets of thresholds, chosen by flag 13400999:
+  90, 80, 70 and 50% when it is on, 90, 85, 80 and 75% when off. Nothing sets that flag. The one other event that tests
   it is `TGS版と通常版の切り替え`, "switching between the TGS version and the normal version":
   the Tokyo Game Show demo. The game as sold uses the second set, and so does Ludwig's own
   `Activate`, which tests the same flag.
@@ -947,9 +968,8 @@ sheet's distance and health bands.
 * **Combinations of states.** Each state number or flag is varied on its own from the default,
   not in combination (number 1 and number 2 together, say).
 * **Four looping actions.** Their loops aren't followed.
-* **Request timing in full.** The conditions before a request are listed in order, but the
-  event's condition groups (which conditions are alternatives, which are required together)
-  aren't untangled.
+* **Event loops.** A path that jumps back to an earlier label stops there. What a looping
+  event does on later rounds isn't listed.
 * **Zero weights.** Some placements end with every weight 0 in the default state (the first
   row of the fallen hunters, the Executioner beyond 20 m). What `Common_Battle_Activate` does
   then isn't read.
@@ -1085,10 +1105,9 @@ to 148, rapid poison to 187, frenzy to 179 and beasthood to 212.
   ([which button plays which move](#which-button-plays-which-move)).
 * **Throws and visceral attacks.** `ThrowParam` (221 rows) links an attacker's and a victim's
   animations, but its damage path isn't followed here.
-* **The event requests' condition groups.** The odds of each action, the sequences inside
-  each, and what the map scripts request are read
-  ([how an enemy chooses](#how-an-enemy-chooses)). Which of a request's conditions are
-  alternatives isn't untangled.
+* **Looping events.** The odds of each action, the sequences inside each, and the paths by
+  which the map scripts request them are read ([how an enemy chooses](#how-an-enemy-chooses)).
+  Events that loop back are followed only up to the loop.
 * **The rest of a hit on the player.** The third set of rates the hit function passes (slot
   0x238), the hunter's own effects, and what holds the Moon Presence's gaze at 1 HP
   ([what a hit costs a hunter](#what-a-hit-costs-a-hunter)).

@@ -354,7 +354,9 @@ class Runner:
 def probability(p: Path) -> float:
     """The chance of a path's random rolls, given its other conditions."""
     prob = 1.0
-    for s in {s for s, *_ in p.cons if s.rand}:
+    for s in sorted(
+        {s for s, *_ in p.cons if s.rand}, key=lambda x: x.text
+    ):  # a fixed order: same float product every run
         if s.rand is None:
             continue
         lo, hi = s.rand
@@ -613,8 +615,9 @@ def requested(
         (
             "Event scripts send AI requests (AI命令要求: an entity, a command, a slot). "
             "GetEventRequest(slot) returns the command until another request replaces it; "
-            "-1 clears it. Conditions are the ones the event waits for before the request, in "
-            "order (alternatives included).\n"
+            "-1 clears it. Before each request: the path through the event that reaches it, in "
+            'order. "wait for" is a condition the event waits on (its condition groups as '
+            'and/or); "if" and "unless" are the branches taken on the way.\n'
         ),
     ]
     dims = dims or []
@@ -629,11 +632,7 @@ def requested(
         seen.add(key)
         head = (
             f"* **{q['map']} event {q['event']}** {q['name']}: "
-            + (
-                ("after " + "; ".join(q["conditions"]) + ", ")
-                if q["conditions"]
-                else ""
-            )
+            + ("; ".join(q["conditions"]) + "; then " if q["conditions"] else "")
             + f"command {q['command']} on slot {q['slot']}"
         )
         if q["command"] == -1:
@@ -874,7 +873,7 @@ def condition(iset: evlib.InstructionSet, key, raw: bytes) -> str | None:
     if key == (4, 9):  # 対象のAI状態で判定
         return f"entity {a[1]} in AI state {a[2]}"
     if key == (3, 0):  # イベントフラグ状態で判定
-        return f"flag {a[3]} {flaglib.TEST_STATE.get(a[1], a[1])}"
+        return flag_text(a[3], a[1], a[2])
     if key == (4, 5):  # 特殊効果IDがあるか
         return f"entity {a[1]} {'has' if a[3] else 'lacks'} special effect {a[2]}"
     if key[0] in (3, 4):
@@ -882,10 +881,225 @@ def condition(iset: evlib.InstructionSet, key, raw: bytes) -> str | None:
     return None
 
 
+# Event control flow (class 1000, 1003, 1014): what each instruction tests, and what it does
+SKIP, END, JUMP = "skip", "end", "jump"
+GROUP_NOW = {
+    (1000, 1): SKIP,
+    (1000, 2): END,
+    (1000, 101): JUMP,
+}  # a group, evaluated now
+GROUP_DONE = {
+    (1000, 7): SKIP,
+    (1000, 8): END,
+    (1000, 107): JUMP,
+}  # a group as it finished
+FLAG_TEST = {(1003, 1): SKIP, (1003, 2): END, (1003, 101): JUMP}  # one event flag
+MULTI_TEST = {(1003, 5): SKIP, (1003, 6): END, (1003, 105): JUMP}  # multiplayer state
+PARAM_TEST = {
+    (1000, 5): SKIP,
+    (1000, 6): END,
+    (1000, 105): JUMP,
+}  # two numbers compared
+UNCONDITIONAL = {(1000, 3): SKIP, (1000, 4): END, (1000, 103): JUMP}
+LABEL_CLASS = 1014  # [1014:n]: label n
+# an event's own flag is its id (+ slot): {flag: the event's working name}, filled by requests()
+FLAG_NAMES: dict[int, str] = {}
+
+
+def flag_text(flag: int, state, base: int = 0) -> str:
+    """A flag test in words. Base type 1 (基準イベントフラグIDタイプ) makes the flag relative to
+    the event's own: 0 is the event's own flag, set once it has run to the end."""
+    if base == 1:
+        what = "this event's own flag" if flag == 0 else f"its own flag + {flag}"
+        return f"{what} {flaglib.TEST_STATE.get(state, state)}"
+    name = FLAG_NAMES.get(flag)
+    return (
+        f"flag {flag}"
+        + (f" ({name})" if name else "")
+        + f" {flaglib.TEST_STATE.get(state, state)}"
+    )
+
+
+def group_text(groups: dict[int, list[str]], g: int, depth: int = 0) -> str:
+    """A condition group as an expression: positive groups need all their conditions, negative
+    groups any one."""
+    parts = groups.get(g, [])
+    if not parts:
+        return f"group {g}"
+    joined = (" and " if g > 0 else " or ").join(parts)
+    return f"({joined})" if len(parts) > 1 and depth else joined
+
+
+def fork(
+    todo: list,
+    labels: dict,
+    end: int,
+    kind: str,
+    text: str,
+    target: int,
+    pc: int,
+    steps: tuple[str, ...],
+    groups: dict,
+    done: dict,
+) -> tuple[str, ...]:
+    """A conditional skip / end / jump: queue the path where the test holds, and return the
+    steps of the one where it doesn't (which goes on)."""
+    if kind == END:
+        todo.append((end, steps + (f"if {text}: the event ends",), groups, done))
+    elif kind == SKIP:
+        todo.append((pc + 1 + target, steps + (f"if {text}",), groups, done))
+    else:  # jump to the label: forward only; a jump back is a loop, not followed
+        later = [n for n in labels.get(target, []) if n > pc]
+        if later:
+            todo.append((later[0] + 1, steps + (f"if {text}",), groups, done))
+    return steps + (f"unless {text}",)
+
+
+def walk(iset, e, args, concrete, limit: int = 4000):
+    """Every path through one copy of an event: yields (instruction index, arguments, steps),
+    steps being the waits and branch assumptions met so far, in order."""
+    ins = e.instructions
+    labels = {}
+    for n, (c, i, _) in enumerate(ins):
+        if c == LABEL_CLASS:
+            labels.setdefault(i, []).append(n)
+    todo: list = [(0, (), {}, {})]  # pc, steps, groups, finished groups
+    paths = 0
+    while todo:
+        pc, steps, groups, done = todo.pop()
+        paths += 1
+        if paths > limit:
+            return
+        while pc < len(ins):
+            c, i, raw = ins[pc]
+            key = (c, i)
+            if key not in iset.instr:
+                pc += 1
+                continue
+            raw2, _ = concrete(e, pc, raw, args)
+            a = _args(iset, key, raw2)
+
+            if key in AI_REQUEST:
+                yield pc, a, steps
+                pc += 1
+                continue
+            if key == (0, 0) or key[0] in (3, 4):
+                g = a[0]
+                if key == (0, 0):
+                    inner = group_text(groups, a[2], 1)
+                    cond = inner if a[1] else f"not {inner}"
+                else:
+                    cond = condition(iset, key, raw2) or iset.instr[key][0]
+                if g == 0:  # the event waits here
+                    steps = steps + (f"wait for {cond}",)
+                    done = {**groups}
+                    groups = {}
+                else:
+                    groups = {**groups, g: groups.get(g, []) + [cond]}
+                pc += 1
+                continue
+            if key[0] == 1001:
+                txt = condition(iset, key, raw2)
+                if txt:
+                    steps = steps + (txt,)
+                pc += 1
+                continue
+            if key in UNCONDITIONAL:
+                kind = UNCONDITIONAL[key]
+                if kind == END:
+                    break
+                if kind == SKIP:
+                    pc += 1 + a[0]
+                    continue
+                later = [n for n in labels.get(a[0], []) if n > pc]
+                if not later:  # back to an earlier label: the event loops; not followed
+                    break
+                pc = later[0] + 1
+                continue
+            if key in GROUP_NOW or key in GROUP_DONE:
+                kind = (GROUP_NOW | GROUP_DONE)[key]
+                state, g = a[-2], a[-1]
+                src = groups if key in GROUP_NOW else done
+                text = group_text(src, g, 1)
+                text = text if state else f"not {text}"
+                if key in GROUP_DONE:
+                    text = f"the wait ended on {text}"
+                steps = fork(
+                    todo,
+                    labels,
+                    len(ins),
+                    kind,
+                    text,
+                    a[0] if kind != END else 0,
+                    pc,
+                    steps,
+                    groups,
+                    done,
+                )
+                pc += 1
+                continue
+            if key in FLAG_TEST:
+                kind = FLAG_TEST[key]
+                text = flag_text(a[3], a[1], a[2])
+                steps = fork(
+                    todo,
+                    labels,
+                    len(ins),
+                    kind,
+                    text,
+                    a[0] if kind != END else 0,
+                    pc,
+                    steps,
+                    groups,
+                    done,
+                )
+                pc += 1
+                continue
+            if key in MULTI_TEST:
+                kind = MULTI_TEST[key]
+                steps = fork(
+                    todo,
+                    labels,
+                    len(ins),
+                    kind,
+                    f"multiplayer state {a[1]}",
+                    a[0] if kind != END else 0,
+                    pc,
+                    steps,
+                    groups,
+                    done,
+                )
+                pc += 1
+                continue
+            if key in PARAM_TEST:
+                kind = PARAM_TEST[key]
+                text = f"{a[2]} {COMPARE.get(a[1], a[1])} {a[3]}"
+                steps = fork(
+                    todo,
+                    labels,
+                    len(ins),
+                    kind,
+                    text,
+                    a[0] if kind != END else 0,
+                    pc,
+                    steps,
+                    groups,
+                    done,
+                )
+                pc += 1
+                continue
+            pc += 1
+
+
 def requests(w: itemlib.World) -> dict[int, list[dict]]:
-    """{NpcParam row: [request]} from every running copy of every event: the map, the event
-    and its name, the conditions met before the request, the slot and the command."""
+    """{NpcParam row: [request]} from every path through every running copy of every event:
+    the map, the event and its name, the waits and branches on the way to the request, the
+    slot and the command."""
     iset, evs, names, copies, concrete = flaglib.event_copies(w)
+    FLAG_NAMES.clear()
+    FLAG_NAMES.update(
+        {eid: n for (_, eid), n in sorted(names.items()) if n and eid > 0}
+    )
     npc_of: dict[int, set[int]] = collections.defaultdict(set)
     for m in w.maps():
         for part in w.layout(m).parts:
@@ -894,36 +1108,27 @@ def requests(w: itemlib.World) -> dict[int, list[dict]]:
     out: dict[int, list[dict]] = collections.defaultdict(list)
     seen = set()
     for k, e in evs.items():
+        if not any((c, i) in AI_REQUEST for c, i, _ in e.instructions):
+            continue
         f, eid = k
         for _, args in copies.get(k, {}):
-            conds: list[str] = []
-            for n, (c, i, raw) in enumerate(e.instructions):
-                key = (c, i)
-                if key not in iset.instr:
-                    continue
-                raw2, _ = concrete(e, n, raw, args)
-                if key in AI_REQUEST:
-                    ent, command, slot = _args(iset, key, raw2)[:3]
-                    for npc in npc_of.get(ent, ()):
-                        sig = (npc, f, eid, slot, command, tuple(conds))
-                        if sig in seen:
-                            continue
-                        seen.add(sig)
-                        out[npc].append(
-                            {
-                                "map": f,
-                                "event": eid,
-                                "name": names.get(k, ""),
-                                "conditions": list(conds),
-                                "slot": slot,
-                                "command": command,
-                            }
-                        )
-                    conds = []
-                    continue
-                cond = condition(iset, key, raw2)
-                if cond:
-                    conds.append(cond)
+            for _, a, steps in walk(iset, e, args, concrete):
+                ent, command, slot = a[:3]
+                for npc in npc_of.get(ent, ()):
+                    sig = (npc, f, eid, slot, command, steps)
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    out[npc].append(
+                        {
+                            "map": f,
+                            "event": eid,
+                            "name": names.get(k, ""),
+                            "conditions": list(steps),
+                            "slot": slot,
+                            "command": command,
+                        }
+                    )
     return out
 
 
