@@ -153,7 +153,10 @@ class Machine:
         uc.mem_write(PARAMS + 0x100, b"eboot.bin\0")
         uc.mem_write(PARAMS, struct.pack("<iiQQQ", 1, 0, PARAMS + 0x100, 0, 0))
         uc.mem_write(EXIT_STUB, b"\xc3")
-        sp = STACK_TOP - 0x1000
+        # _start is an ordinary function: it expects to have been called, with a return address
+        # on top of a 16-byte-aligned stack. The exit handler serves as that return address.
+        sp = STACK_TOP - 0x1000 - 8
+        uc.mem_write(sp, struct.pack("<Q", EXIT_STUB))
         uc.reg_write(UC_X86_REG_RSP, sp)
         uc.reg_write(UC_X86_REG_RDI, PARAMS)
         uc.reg_write(UC_X86_REG_RSI, EXIT_STUB)
@@ -365,7 +368,7 @@ def _guard_acquire(m: Machine, a):
 
 
 def _guard_release(m: Machine, a):
-    m.uc.mem_write(a[0], b"")
+    m.uc.mem_write(a[0], b"\x01")
     return 0
 
 

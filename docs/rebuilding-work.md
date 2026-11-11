@@ -195,6 +195,15 @@ python -I tools/loader.py work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eboot-1.
 About 5 seconds. Writes `work/loader/calls.log`, every system call the start-up makes, and
 `work/loader/summary.md`. Needs step 3's prepared executable.
 
+The native loader goes further, in under a second. On Windows it needs the Visual Studio 2022
+Build Tools with the "Desktop development with C++" workload and its "C++ Clang tools for
+Windows" component ([building it on Linux](the-loader.md#running-it-natively)):
+
+```
+pwsh native/build.ps1
+work/native/windows/mensis-loader.exe work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eboot-1.09.symbols.tsv work/loader-native
+```
+
 ## Checking the result
 
 **The regression check** reruns the tools and compares every output with the result this
