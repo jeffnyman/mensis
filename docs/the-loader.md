@@ -110,7 +110,9 @@ work/native/linux/mensis-loader work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eb
 ```
 
 It writes the same `calls.log` and `summary.md` into `work/loader-native/`, plus `stdout.txt`,
-whatever the game printed, and `files/`, the folders the game may write to. The two builds run
+whatever the game printed, `files/`, the folders the game may write to, and `gpu/`, what the
+game asked the GPU to do. Add `--frames 60` to stop after 60 frames, or `--seconds 20` to run
+longer than the default 10. The two builds run
 the same code: up to the point where the game's threads started running, they made the same
 calls, from the same places, with the same results.
 
@@ -197,6 +199,10 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   state and last call (and, for a thread waiting in a call, what it waits on). Any thread can
   stop the run; so can the main thread's `_start` returning, a time limit (`--seconds`, 10 by
   default), a call limit (`--calls`) and a frame limit (`--frames`, flips shown).
+* **The log.** `calls.log` keeps the first 5 million calls whole (`--log` changes how
+  many), which covers the start-up and the first frames; after that, the last 10,000. The
+  summary still counts every call, and shows each thread's last. Most of a call takes no
+  lock: the stand-in runs, and only the log entry, made once it is done, is shared.
 * **Repeatable, as far as threads allow.** Anything the stand-ins hand the game lives at a
   fixed address. Once the game's threads run, the order in which they make their calls, and
   how often a thread polling the clock does so, varies from run to run.
@@ -320,6 +326,13 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     flips a second and gets about 20 here: the loader logs every call, and the log alone
     (`calls.log`) is 2.5 GB after 20 seconds. Linux runs the same way, more slowly, reading
     the game's files across WSL's file system.
+20. **At the game's own pace.** With the log kept short, a call costs little more than the
+    stand-in itself: the same 20 seconds make 260 million calls rather than 30 million, and
+    show 534 frames. Between the tenth second and the twentieth the game shows 301, 30 a
+    second, the rate Bloodborne runs at on a PS4, so the flips are now paced by the game rather
+    than by the loader. The time between frames goes where it goes on the console: the main
+    thread reads the clock in a loop (`gettimeofday`, 238 million of the calls) until its next
+    frame is due. Linux shows 504 frames in the same time.
 
 ## Files
 

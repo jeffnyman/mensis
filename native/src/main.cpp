@@ -4,7 +4,7 @@
 // logged (docs/the-loader.md).
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
-//                   [--frames N] [--app0 DIR]...
+//                   [--frames N] [--log N] [--app0 DIR]...
 //
 // --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
 // lay folders over each other, first match wins. By default: work/update, then work/base (the
@@ -81,18 +81,23 @@ std::string hex(i64 v) {
 
 // Under M.log_lock. The main thread's calls are written as tools/loader.py writes them; another
 // thread's carry its number: "[t3] name(...)".
-void log_call(GameThread* t, const Frame* f, const std::string& name, const std::string& tail) {
-    std::string who = t && t->id ? std::format("[t{}] ", t->id) : "";
-    std::string line = std::format("{:6} 0x{:08x} {}{}(0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}) {}",
-                                   M.calls.size(), f->caller, who, name, f->args[0], f->args[1],
-                                   f->args[2], f->args[3], tail);
-    M.calls.push_back(line);
-    M.last_calls.push_back(line);
-    if (M.last_calls.size() > 12) M.last_calls.pop_front();
+std::string format_call(const Call& c) {
+    std::string who = c.thread ? std::format("[t{}] ", c.thread) : "";
+    return std::format("{:6} 0x{:08x} {}{}(0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}) -> {}{}", c.n,
+                       c.caller, who, M.imports[c.import].name, c.args[0], c.args[1], c.args[2],
+                       c.args[3], hex(c.ret), c.note.empty() ? "" : " " + c.note);
+}
+
+// Under M.log_lock: a finished call, into the log.
+void log_call(GameThread* t, const Frame* f, i64 ret, std::string&& note) {
+    Call c{M.total_calls++, f->caller, {f->args[0], f->args[1], f->args[2], f->args[3]}, ret,
+           u32(f->index), t ? t->id : 0, std::move(note)};
+    if (c.n < M.log_limit) M.calls.push_back(format_call(c));
     if (t) {
-        t->last_call = line;
+        t->last = c;
         t->calls++;
     }
+    M.recent[c.n % Machine::RECENT] = std::move(c);
 }
 
 // ---- loading ------------------------------------------------------------------------------
@@ -124,6 +129,11 @@ void load_symbols(const std::string& path) {
         auto it = table.find(imp.name);
         M.standin.push_back(it == table.end() ? nullptr : it->second);
     }
+    size_t n = M.imports.size() + 1;  // and the exit handler
+    M.counts = std::make_unique<std::atomic<u64>[]>(n);
+    M.seen = std::make_unique<std::atomic<bool>[]>(n);
+    M.unhandled.assign(n, 0);
+    M.recent.resize(Machine::RECENT);
 }
 
 void load_elf(const std::string& path) {
@@ -253,17 +263,28 @@ void write_outputs(const std::string& reason) {
     double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count();
     std::filesystem::create_directories(dir);
     {
+        // the first log_limit calls, then the last RECENT of the rest
         std::ofstream f(dir + "/calls.log", std::ios::binary);
         for (const auto& line : M.calls) f << line << "\n";
+        u64 from = std::max<u64>(M.calls.size(),
+                                 M.total_calls > Machine::RECENT ? M.total_calls - Machine::RECENT : 0);
+        if (from > M.calls.size())
+            f << std::format("... {} calls not kept (--log {}) ...\n", from - M.calls.size(),
+                             M.log_limit);
+        for (u64 n = from; n < M.total_calls; n++)
+            f << format_call(M.recent[n % Machine::RECENT]) << "\n";
     }
     std::ofstream(dir + "/stdout.txt", std::ios::binary) << M.stdout_text;
-    u64 unhandled_calls = 0;
-    for (const auto& [n, c] : M.unhandled) unhandled_calls += c;
+    u64 unhandled_calls = 0, unhandled_imports = 0;
+    for (u64 c : M.unhandled) {
+        unhandled_calls += c;
+        unhandled_imports += c != 0;
+    }
     std::vector<std::string> s = {
         "# Native loader run\n",
         std::format("Stopped: {}. {} import calls, {} distinct; {} calls to {} imports without a "
                     "stand-in; {} threads. Ran for {:.2f} s.\n",
-                    reason, M.calls.size(), M.counts.size(), unhandled_calls, M.unhandled.size(),
+                    reason, M.total_calls, M.first_use.size(), unhandled_calls, unhandled_imports,
                     M.threads.size(), seconds),
     };
     for (const auto& n : M.notes) s.push_back(n + "\n");
@@ -295,25 +316,28 @@ void write_outputs(const std::string& reason) {
     s.insert(s.end(), {"```\n", "## Threads\n", "| # | Name | Calls | State | Last call |",
                        "|---:|---|---:|---|---|"});
     for (const auto& t : M.threads) {
-        std::string last = t->last_call;
+        std::string last = t->calls ? format_call(t->last) : "";
         std::replace(last.begin(), last.end(), '|', '/');
         auto first = last.find_first_not_of(' ');
         std::string state = t->state;
-        if (t->frame && t->state.starts_with("in "))  // in a call: with what
-            state += std::format("({:#x}, {:#x}, {:#x})", t->frame->args[0], t->frame->args[1],
-                                 t->frame->args[2]);
+        u32 in = t->in_call.load();
+        const Frame* fr = t->frame.load();
+        if (in && fr && state == "running game code")  // in a call: which, and with what
+            state = std::format("in {}({:#x}, {:#x}, {:#x})", M.imports[in - 1].name, fr->args[0],
+                                fr->args[1], fr->args[2]);
         s.push_back(std::format("| {} | {} | {} | {} | `{}` |", t->id, t->name, t->calls,
                                 state, first == std::string::npos ? "" : last.substr(first)));
     }
     s.push_back("");
     for (const auto& line : gpu_report()) s.push_back(line);
     s.insert(s.end(), {"Last calls:\n", "```"});
-    s.insert(s.end(), M.last_calls.begin(), M.last_calls.end());
+    for (u64 n = M.total_calls > 12 ? M.total_calls - 12 : 0; n < M.total_calls; n++)
+        s.push_back(format_call(M.recent[n % Machine::RECENT]));
     s.insert(s.end(), {"```\n", "## Imports by first use\n", "| Import | Calls | Stand-in |",
                        "|---|---:|---|"});
-    for (const auto& n : M.first_use)
-        s.push_back(std::format("| {} | {} | {} |", n, M.counts[n],
-                                standins().contains(n) ? "yes" : ""));
+    for (u32 i : M.first_use)
+        s.push_back(std::format("| {} | {} | {} |", M.imports[i].name, M.counts[i].load(),
+                                M.standin[i] ? "yes" : ""));
     std::ofstream f(dir + "/summary.md", std::ios::binary);
     for (const auto& line : s) f << line << "\n";
     f.close();
@@ -453,36 +477,34 @@ extern "C" i64 mensis_dispatch(Frame* f) {
     t_frame = f;
     if (f->index >= M.imports.size())
         stop(std::format("exit handler called with {:#x}", f->args[0]));
-    const std::string& name = M.imports[f->index].name;
-    bool over = false;
-    {
+    // Most of a call happens without the lock: only an import's first call, and the log entry
+    // once a call is done, take it.
+    u32 index = u32(f->index);
+    if (M.max_calls && M.started++ >= M.max_calls)
+        stop(std::format("call budget ({}) used up", M.max_calls));
+    M.counts[index]++;
+    if (!M.seen[index].exchange(true)) {
         std::lock_guard lock(M.log_lock);
-        if (M.max_calls && M.calls.size() >= M.max_calls) {
-            over = true;
-        } else {
-            if (M.counts[name]++ == 0) M.first_use.push_back(name);
-            if (t) {
-                t->state = "in " + name;
-                t->frame = f;
-            }
-        }
+        M.first_use.push_back(index);
     }
-    if (over) stop(std::format("call budget ({}) used up", M.max_calls));
+    if (t) {
+        t->frame = f;
+        t->in_call = index + 1;
+    }
     std::string note;
     i64 ret = 0;
-    if (Standin fn = M.standin[f->index]) {
+    Standin fn = M.standin[index];
+    if (fn)
         ret = fn(f->args, note);
-    } else {
-        std::lock_guard lock(M.log_lock);
-        M.unhandled[name]++;
+    else
         note = "unhandled";
-    }
-    std::lock_guard lock(M.log_lock);
-    log_call(t, f, name, "-> " + hex(ret) + (note.empty() ? "" : " " + note));
     if (t) {
-        t->state = "running game code";
+        t->in_call = 0;
         t->frame = nullptr;
     }
+    std::lock_guard lock(M.log_lock);
+    if (!fn) M.unhandled[index]++;
+    log_call(t, f, ret, std::move(note));
     return ret;
 }
 
@@ -492,10 +514,12 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
-        } else if ((a == "--seconds" || a == "--calls" || a == "--frames") && i + 1 < argc) {
+        } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
+                   i + 1 < argc) {
             u64 v = std::stoull(argv[++i]);
             if (a == "--seconds") M.seconds = unsigned(v);
             else if (a == "--calls") M.max_calls = v;
+            else if (a == "--log") M.log_limit = v;
             else M.max_flips = v;
         } else {
             pos.push_back(a);
@@ -503,7 +527,7 @@ int main(int argc, char** argv) {
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N] [--frames N] [--app0 DIR]...\n";
+                     "[--seconds N] [--calls N] [--frames N] [--log N] [--app0 DIR]...\n";
         return 2;
     }
     M.out_dir = pos[2];

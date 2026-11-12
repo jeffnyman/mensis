@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -78,6 +79,17 @@ struct Fault {
     u64 rip = 0, rsp = 0, rbp = 0, rax = 0, rdi = 0, rsi = 0;
 };
 
+// One import call, as the log keeps it: formatted only when written out.
+struct Call {
+    u64 n = 0;  // its number, in the order calls finish
+    u64 caller = 0;
+    u64 args[4] = {};
+    i64 ret = 0;
+    u32 import = 0;
+    u32 thread = 0;
+    std::string note;  // the stand-in's, or "unhandled"
+};
+
 // One of the game's threads, run on a thread of the loader's own.
 struct GameThread {
     u32 id = 0;  // 0 is the main thread
@@ -89,9 +101,12 @@ struct GameThread {
 
     // guarded by M.log_lock
     std::string state = "starting";
-    std::string last_call;
+    Call last;  // its last finished call (last.n == 0 and no import: none yet)
     u64 calls = 0;
-    const Frame* frame = nullptr;  // the call it's in, if any
+    // The call it's in, if any: the import's index + 1 (0 = none), and its frame. Set by the
+    // thread without the lock; read for the summary.
+    std::atomic<u32> in_call{0};
+    std::atomic<const Frame*> frame{nullptr};
 
     // set by the thread itself on its way out
     bool faulted = false;
@@ -117,12 +132,21 @@ struct Machine {
     std::vector<std::pair<u64, u64>> code;  // the game's executable ranges
     struct { u64 vaddr = 0, filesz = 0, memsz = 0, align = 16; } tls;
 
-    // The log and everything below it, shared by all threads: under log_lock.
+    // The log and everything below it, shared by all threads: under log_lock. The first
+    // log_limit calls are kept whole (formatted); after that only the last RECENT, the counts,
+    // and each thread's last call, so a long run costs little more than the calls themselves.
     std::mutex log_lock;
-    std::vector<std::string> calls;
-    std::deque<std::string> last_calls;
-    std::unordered_map<std::string, u64> counts, unhandled;
-    std::vector<std::string> first_use;
+    u64 log_limit = 5'000'000;
+    static constexpr size_t RECENT = 10'000;
+    std::vector<std::string> calls;  // the first log_limit, formatted
+    std::vector<Call> recent;  // a ring of the last RECENT
+    u64 total_calls = 0;  // finished
+    std::vector<u64> unhandled;  // by import index
+    std::vector<u32> first_use;  // import indexes, in the order first called
+    // By import index, without the lock: calls started, and whether it has been called yet.
+    std::unique_ptr<std::atomic<u64>[]> counts;
+    std::unique_ptr<std::atomic<bool>[]> seen;
+    std::atomic<u64> started{0};  // calls started (for --calls)
     std::vector<std::string> notes;  // how the platform prepared the run, for the summary
     std::string stdout_text;  // what the game printed
     std::deque<std::unique_ptr<GameThread>> threads;

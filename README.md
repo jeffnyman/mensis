@@ -84,8 +84,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   list, and the AVX wall is why an emulator has to run the game's code natively. Run natively,
   on Windows or Linux, the game gets past an engine panic, through 4.8 GiB of memory claimed
   up front, into 48 running threads and its own files, with sound up, and on past its
-  splash screen: in 20 seconds it shows 335 frames, 1,697 draws whose commands are followed
-  but not yet drawn.
+  splash screen, to 30 frames a second, its pace on a PS4, with the commands for its draws
+  followed but not yet drawn.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
