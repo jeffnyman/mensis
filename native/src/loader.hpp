@@ -24,7 +24,10 @@ using i64 = std::int64_t;
 // same pointers. Each is 64 KiB aligned, as Windows needs.
 constexpr u64 PAGE = 0x1000;
 constexpr u64 STACK_TOP = 0x7F0000000000, STACK_SIZE = 16 << 20;  // the main thread's stack
-constexpr u64 HEAP_BASE = 0x200000000, HEAP_RESERVE = 64ull << 30;  // reserved, committed as used
+// The game's heap: reserved, committed as used. At HEAP_BASE (tools/loader.py's) if it's free;
+// Windows sometimes has something of its own there already, and then the next of these.
+constexpr u64 HEAP_BASES[] = {0x200000000, 0x6000000000, 0xA000000000, 0xE000000000};
+constexpr u64 HEAP_BASE = HEAP_BASES[0], HEAP_RESERVE = 16ull << 30;
 constexpr u64 HEAP_STEP = 64 << 20;  // how much more is committed at a time
 constexpr u64 TLS_BASE = 0x7E0000000000;  // each thread's TLS block, 64 KiB apart
 constexpr u64 TLS_SLOT = 0x10000, MAX_THREADS = 256;
@@ -46,8 +49,11 @@ struct Frame {
     u64 ret2;  // returned in rdx: the second half of a 16-byte result (ldiv)
     alignas(16) unsigned char xmm0[16], xmm1[16];  // the first two floating-point arguments
     alignas(16) unsigned char fret[16];  // returned in xmm0
+    alignas(16) unsigned char xmm2_7[6][16];  // the other floating-point arguments
+    u64 stack_args;  // where the caller's arguments past the registers are
+    u64 pad;
 };
-static_assert(sizeof(Frame) == 128, "enter_*.S lays the frame out by hand");
+static_assert(sizeof(Frame) == 240, "enter_*.S lays the frame out by hand");
 
 // mensis_enter_game's argument (enter_*.S lays it out by hand).
 struct EnterArgs {
@@ -92,6 +98,7 @@ struct GameThread {
     std::string stop_reason;  // a stand-in asked the whole run to stop
     bool exited = false;  // scePthreadExit
     u64 result = 0;
+    u64 errno_at = 0;  // its errno (__error), in the loader's own area
 
     // joining
     std::mutex m;
@@ -120,12 +127,13 @@ struct Machine {
 
     // The game's heap: under heap_lock.
     std::mutex heap_lock;
-    u64 heap_top = HEAP_BASE, heap_committed = HEAP_BASE;
+    u64 heap_base = HEAP_BASE, heap_top = HEAP_BASE, heap_committed = HEAP_BASE;
     std::unordered_map<u64, u64> allocs;  // address: size
 
     u64 max_calls = 0;
     unsigned seconds = 10;
     std::string out_dir;
+    std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
     std::chrono::steady_clock::time_point t0;
     Fault fault;  // the first fault, if a fault stopped the run
 };
@@ -141,6 +149,12 @@ u64 alloc(u64 size, u64 align = 16);
 [[noreturn]] void finish(const std::string& reason);
 const std::unordered_map<std::string, Standin>& standins();
 void add_thread_standins(std::unordered_map<std::string, Standin>& t);  // threads.cpp
+void add_file_standins(std::unordered_map<std::string, Standin>& t);  // files.cpp
+// printf's formatting, reading the arguments from a System V va_list at va (standins.cpp)
+std::string format_sysv(const char* format, u64 va);
+// Write to one of the game's FILE*s; false if it isn't one the loader opened (files.cpp)
+bool stream_write(u64 file, const std::string& text);
+void set_errno(int e);  // the calling game thread's errno (FreeBSD's values)
 bool is_submit(const std::string& name);
 void init_libc_data();  // after LIBC_DATA is mapped
 Frame* current_frame();  // the call in progress on this thread, for stand-ins that need more
@@ -153,6 +167,7 @@ u64 sync_alloc(u64 size, u64 align);  // memory for the loader's own objects, at
 // What differs between Linux and Windows (platform_linux.cpp, platform_windows.cpp).
 namespace platform {
 void reserve(u64 addr, u64 size);  // address space at exactly addr; dies if it's taken
+bool try_reserve(u64 addr, u64 size);  // the same, but says whether it could
 void commit(u64 addr, u64 size);  // make reserved memory usable (read, write, execute)
 // After loading: whatever the CPU needs before the game's code runs. Returns the
 // displacement the thread-pointer loads are rewritten to read through gs.

@@ -62,9 +62,33 @@ namespace mensis::platform {
 void reserve(u64 addr, u64 size) {
     void* p = VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE,
                            PAGE_EXECUTE_READWRITE);
-    if (p != reinterpret_cast<void*>(addr))
-        die(std::format("can't reserve {:#x} bytes at {:#x} (already in use?): error {}", size,
-                        addr, GetLastError()));
+    if (p != reinterpret_cast<void*>(addr)) {
+        DWORD error = GetLastError();
+        // what is in the way: the first allocation inside the range
+        std::string in_way;
+        for (u64 at = addr; at < addr + size;) {
+            MEMORY_BASIC_INFORMATION mi{};
+            if (!VirtualQuery(reinterpret_cast<void*>(at), &mi, sizeof mi)) break;
+            if (mi.State != MEM_FREE) {
+                in_way = std::format(
+                    "; in the way: {:#x} bytes at {:#x} ({}), allocated at {:#x}", mi.RegionSize,
+                    u64(mi.BaseAddress),
+                    mi.Type == MEM_IMAGE ? "a loaded module"
+                    : mi.Type == MEM_MAPPED ? "a mapped file"
+                                            : "private memory",
+                    u64(mi.AllocationBase));
+                break;
+            }
+            at = u64(mi.BaseAddress) + mi.RegionSize;
+        }
+        die(std::format("can't reserve {:#x} bytes at {:#x}: error {}{}", size, addr, error,
+                        in_way));
+    }
+}
+
+bool try_reserve(u64 addr, u64 size) {
+    return VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE,
+                        PAGE_EXECUTE_READWRITE) == reinterpret_cast<void*>(addr);
 }
 
 void commit(u64 addr, u64 size) {

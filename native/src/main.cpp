@@ -4,6 +4,11 @@
 // logged (docs/the-loader.md).
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
+//                   [--app0 DIR]...
+//
+// --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
+// lay folders over each other, first match wins. By default: work/update, then work/base (the
+// 1.09 update's files over the base game's), where they exist.
 //
 // <prepared.elf> and <symbols.tsv> are orbis_prep.py's outputs (work/ghidra/eboot-1.09.ghidra.elf
 // and .symbols.tsv). Writes <out dir>/calls.log, <out dir>/summary.md (in the same form as
@@ -219,7 +224,16 @@ void map(u64 addr, u64 size) {
 // The main stack, heap, TLS area, entry parameters, thread stacks and sync objects.
 void setup() {
     map(STACK_TOP - STACK_SIZE, STACK_SIZE);
-    platform::reserve(HEAP_BASE, HEAP_RESERVE);
+    bool heap = false;
+    for (u64 base : HEAP_BASES)
+        if (platform::try_reserve(base, HEAP_RESERVE)) {
+            M.heap_base = M.heap_top = M.heap_committed = base;
+            heap = true;
+            break;
+        }
+    if (!heap) platform::reserve(HEAP_BASE, HEAP_RESERVE);  // says what is in the way
+    if (M.heap_base != HEAP_BASE)
+        M.notes.push_back(std::format("Heap: at {:#x} ({:#x} was taken).", M.heap_base, HEAP_BASE));
     platform::reserve(TLS_BASE, TLS_SLOT * MAX_THREADS);
     platform::reserve(THREAD_STACKS, THREAD_STACK_SLOT * MAX_THREADS);
     platform::reserve(SYNC_BASE, SYNC_RESERVE);
@@ -313,7 +327,7 @@ u64 alloc(u64 size, u64 align) {
     {
         std::lock_guard lock(M.heap_lock);
         addr = up(M.heap_top, std::max<u64>(align, 16));
-        if (addr + size <= HEAP_BASE + HEAP_RESERVE) {
+        if (addr + size <= M.heap_base + HEAP_RESERVE) {
             while (addr + size > M.heap_committed) {
                 platform::commit(M.heap_committed, HEAP_STEP);
                 M.heap_committed += HEAP_STEP;
@@ -465,7 +479,9 @@ int main(int argc, char** argv) {
     std::vector<std::string> pos;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if ((a == "--seconds" || a == "--calls") && i + 1 < argc) {
+        if (a == "--app0" && i + 1 < argc) {
+            M.app0.push_back(argv[++i]);
+        } else if ((a == "--seconds" || a == "--calls") && i + 1 < argc) {
             u64 v = std::stoull(argv[++i]);
             (a == "--seconds" ? (void)(M.seconds = unsigned(v)) : (void)(M.max_calls = v));
         } else {
@@ -474,10 +490,17 @@ int main(int argc, char** argv) {
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N]\n";
+                     "[--seconds N] [--calls N] [--app0 DIR]...\n";
         return 2;
     }
     M.out_dir = pos[2];
+    if (M.app0.empty())
+        for (const char* d : {"work/update", "work/base"})
+            if (std::filesystem::is_directory(d)) M.app0.push_back(d);
+    std::string folders;
+    for (const auto& d : M.app0) folders += (folders.empty() ? "" : ", then ") + d;
+    M.notes.push_back("/app0/: " + (folders.empty() ? std::string("(no folders)") : folders) +
+                      ".");
 
     load_symbols(pos[1]);
     load_elf(pos[0]);

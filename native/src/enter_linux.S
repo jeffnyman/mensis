@@ -14,16 +14,24 @@
 
 # struct Frame (loader.hpp):
 #     0 args[6]   48 index   56 caller   64 unused   72 ret2 (-> rdx)
-#    80 xmm0     96 xmm1    112 fret (-> xmm0)
+#    80 xmm0     96 xmm1    112 fret (-> xmm0)   128 xmm2..xmm7   224 stack_args
     .globl mensis_import_common
     .type mensis_import_common, @function
 mensis_import_common:
     push rbp
     mov rbp, rsp
-    sub rsp, 128
+    sub rsp, 240
     and rsp, -16
     movdqa [rsp + 80], xmm0
     movdqa [rsp + 96], xmm1
+    movdqa [rsp + 128], xmm2
+    movdqa [rsp + 144], xmm3
+    movdqa [rsp + 160], xmm4
+    movdqa [rsp + 176], xmm5
+    movdqa [rsp + 192], xmm6
+    movdqa [rsp + 208], xmm7
+    lea rax, [rbp + 16]
+    mov [rsp + 224], rax
     pxor xmm0, xmm0
     movdqa [rsp + 112], xmm0
     mov qword ptr [rsp + 72], 0

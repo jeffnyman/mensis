@@ -110,14 +110,22 @@ work/native/linux/mensis-loader work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eb
 ```
 
 It writes the same `calls.log` and `summary.md` into `work/loader-native/`, plus `stdout.txt`,
-whatever the game printed. The two builds make the same calls, from the same places, with the
-same results.
+whatever the game printed, and `files/`, the folders the game may write to. The two builds run
+the same code: up to the point where the game's threads started running, they made the same
+calls, from the same places, with the same results.
+
+The game's own files (`/app0/`) are read from `work/update`, then `work/base`: the 1.09
+update's files over the base game's, as [the package](the-package.md) extracts them. Run from
+the repository's root, or name the folders with `--app0` (more than once, first match wins).
 
 ### How it works
 
 * **The game's memory** is reserved at the addresses it was linked for (0x400000 up), and the
   stack, heap, thread-local storage and entry parameters at the same fixed addresses as
   `loader.py`'s. Both loaders hand the game the same pointers, so their logs can be compared.
+  The heap is the one exception: Windows places some memory of its own at random addresses
+  before the loader starts, now and then inside the heap's range. Then the heap moves to the
+  next of a few fixed places, and the summary says so.
 * **Each import stub** (eight bytes) is overwritten with a jump to a small thunk, which loads
   the import's number and jumps to one shared routine (`enter_windows.S`, `enter_linux.S`).
   That routine gathers the argument registers into a frame, calls the C++ dispatcher, and puts
@@ -146,6 +154,15 @@ same results.
   area of its own, so the game's heap is laid out as in a run without threads. Function-level
   statics (`__cxa_guard_acquire`) are constructed once, with a second thread waiting for the
   first.
+* **Files.** The PS4 gives a game a few places: `/app0/`, its own package, read-only, here
+  the folders named above; and `/download0/`, `/temp0/` and `/data/`, which it may write, here
+  folders in the run's output (`files/download0/`, ...). Any other path doesn't exist. Three
+  families of calls reach them, sharing one table of open files: the kernel's (`sceKernelOpen`,
+  `Read`, `Lseek`, `Stat`, `Getdirentries`, ...), POSIX's (`stat`, `mkdir`, with `errno`
+  through `__error`), and the C library's streams (`fopen`, `fread`, `fgets`, ...). Each logged
+  open and stat shows which file answered. The `printf` family writes to `stdout.txt`; the
+  variadic ones read their arguments the way the called function's own `va_start` would, from
+  the registers and the caller's stack.
 * **Stopping**: a fault is caught (Linux: a signal, on a stack of the thread's own; Windows: a
   vectored exception handler), recorded, and the thread resumes on its own stack, from where
   the outputs are written and the process ends. The summary shows the instructions at the fault
@@ -210,8 +227,18 @@ same results.
    and exits. The main thread goes on without sound into graphics set-up (the function that
    creates the default render target and depth stencil) and faults on the same null pointer
    as before, in a call made with a null object. `/app0/` is the game's own directory, and
-   its files are those [the package](the-package.md) extracts into `work/`: giving the game
-   its files is the next step.
+   its files are those [the package](the-package.md) extracts into `work/`.
+10. **With its files, sound starts.** The sound start-up finds `sprj_mixer.fev` and its
+    companions (`sprj_multirpc.rpc`, `sprj_multimix.mix`, `sprj_multich.mch`) in the base
+    game, opens and reads them, reads its settings as wide text ("0.60", "0.02", ...), and
+    stays up: FMOD's mixer and audio-out threads run, handing sound to `sceAudioOutOutput`
+    (which has no stand-in, so nothing is heard).
+11. **Graphics are the next wall.** The main thread still faults on the same null object, so
+    the missing sound wasn't its cause. Meanwhile the render thread has made its first calls
+    into the graphics driver (`sceGnmMapComputeQueue`, `sceGnmValidateCommandBuffers`, the
+    tessellation ring's address), all without stand-ins. Which thread faults first varies
+    from run to run; both are setting up graphics. The PS4's graphics driver and the GPU
+    behind it are the next step, and the biggest.
 
 ## Files
 
@@ -221,4 +248,4 @@ same results.
 | `native/` | the native loader: `main.cpp` (loading, dispatch, output), `standins.cpp`, and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md` and `stdout.txt` |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt` and `files/` |

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <map>
@@ -68,6 +69,10 @@ i64 s_memcmp(const u64* a, std::string&) {
 
 i64 s_memchr(const u64* a, std::string&) {
     return i64(std::memchr(ptr<void>(a[0]), int(a[1] & 0xff), a[2]));
+}
+
+i64 s_strrchr(const u64* a, std::string&) {
+    return i64(std::strrchr(ptr<char>(a[0]), int(a[1] & 0xff)));
 }
 
 i64 s_strlen(const u64* a, std::string&) { return i64(strnlen(ptr<char>(a[0]), 1 << 16)); }
@@ -131,14 +136,6 @@ i64 s_query_protection(const u64* a, std::string& note) {
     if (a[3]) *ptr<u32>(a[3]) = u32(it->second.second);
     note = std::format("{:#x}-{:#x} prot {:#x}", it->first, it->second.first, it->second.second);
     return 0;
-}
-
-// ---- files: none yet ----
-
-// sceKernelStat(const char *path, SceKernelStat *sb): no file system yet, so nothing exists
-i64 s_stat(const u64* a, std::string& note) {
-    note = std::format("'{}': no file system yet", a[0] ? ptr<char>(a[0]) : "");
-    return i64(std::int32_t(0x80020002));  // SCE_KERNEL_ERROR_ENOENT
 }
 
 // __cxa_guard_acquire(guard): a function's static object, constructed once. 1 = "construct it
@@ -318,8 +315,8 @@ std::string format_sysv(const char* f, SysvVaList* v) {
 }
 
 // vprintf(format, va_list): the text goes to the log and to stdout.txt.
-i64 s_vprintf(const u64* a, std::string& note) {
-    std::string text = format_sysv(ptr<char>(a[0]), ptr<SysvVaList>(a[1]));
+// What the game printed: to stdout.txt, and the line to the log.
+i64 printed(std::string text, std::string& note) {
     i64 n = i64(text.size());
     {
         std::lock_guard lock(M.log_lock);
@@ -328,6 +325,65 @@ i64 s_vprintf(const u64* a, std::string& note) {
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
     note = std::format("\"{}\"", text);
     return n;
+}
+
+i64 s_vprintf(const u64* a, std::string& note) {
+    return printed(format_sysv(ptr<char>(a[0]), ptr<SysvVaList>(a[1])), note);
+}
+
+// The variadic ones (printf, sprintf, ...) get their arguments as any call does. A va_list is
+// built over them as the callee's own va_start would: the six integer registers and xmm0-xmm7
+// in a register save area, the first `fixed` integer arguments already used, and the rest on
+// the caller's stack.
+std::string format_variadic(int fixed, u64 format) {
+    Frame* f = current_frame();
+    alignas(16) unsigned char save[176];
+    std::memcpy(save, f->args, 48);
+    std::memcpy(save + 48, f->xmm0, 16);
+    std::memcpy(save + 64, f->xmm1, 16);
+    std::memcpy(save + 80, f->xmm2_7, sizeof f->xmm2_7);
+    SysvVaList v{u32(8 * fixed), 48, f->stack_args, reinterpret_cast<u64>(save)};
+    return format_sysv(ptr<char>(format), &v);
+}
+
+// Copies text into the game's buffer of n bytes (n = 0: nothing), 0-terminated; returns the
+// whole text's length, as snprintf does.
+i64 into(u64 buf, u64 n, const std::string& text) {
+    if (n) {
+        u64 k = std::min<u64>(text.size(), n - 1);
+        std::memcpy(ptr<void>(buf), text.data(), k);
+        ptr<char>(buf)[k] = 0;
+    }
+    return i64(text.size());
+}
+
+i64 s_printf(const u64* a, std::string& note) { return printed(format_variadic(1, a[0]), note); }
+
+// fprintf(FILE*, format, ...), vfprintf(FILE*, format, va_list): to a file the game opened,
+// or else stdout or stderr
+i64 to_stream(u64 file, const std::string& text, std::string& note) {
+    if (stream_write(file, text)) return i64(text.size());
+    return printed(text, note);
+}
+i64 s_fprintf(const u64* a, std::string& note) {
+    return to_stream(a[0], format_variadic(2, a[1]), note);
+}
+i64 s_vfprintf(const u64* a, std::string& note) {
+    return to_stream(a[0], format_sysv(ptr<char>(a[1]), ptr<SysvVaList>(a[2])), note);
+}
+
+// sprintf(buf, format, ...), snprintf(buf, n, format, ...), and their va_list forms
+i64 s_sprintf(const u64* a, std::string&) {
+    std::string text = format_variadic(2, a[1]);
+    return into(a[0], text.size() + 1, text);
+}
+i64 s_snprintf(const u64* a, std::string&) { return into(a[0], a[1], format_variadic(3, a[2])); }
+i64 s_vsprintf(const u64* a, std::string&) {
+    std::string text = format_sysv(ptr<char>(a[1]), ptr<SysvVaList>(a[2]));
+    return into(a[0], text.size() + 1, text);
+}
+i64 s_vsnprintf(const u64* a, std::string&) {
+    return into(a[0], a[1], format_sysv(ptr<char>(a[2]), ptr<SysvVaList>(a[3])));
 }
 
 i64 s_strncpy(const u64* a, std::string&) {
@@ -566,6 +622,31 @@ i64 s_exp2f(const u64*, std::string&) {
     return 0;
 }
 
+// powf(float x, float y): in through xmm0 and xmm1, out through xmm0
+i64 s_powf(const u64*, std::string&) {
+    float x, y;
+    std::memcpy(&x, current_frame()->xmm0, 4);
+    std::memcpy(&y, current_frame()->xmm1, 4);
+    float r = std::pow(x, y);
+    std::memcpy(current_frame()->fret, &r, 4);
+    return 0;
+}
+
+// _WStof(const wchar_t *s, wchar_t **end, long pw): Dinkumware's wide text to float, scaled by
+// 10 to the pw; the PS4's wchar_t is 16 bits. Out through xmm0.
+i64 s_wstof(const u64* a, std::string& note) {
+    const auto* s = ptr<char16_t>(a[0]);
+    std::string text;
+    for (u64 i = 0; s[i] && s[i] < 0x80 && i < 256; i++) text += char(s[i]);
+    char* end = nullptr;
+    float r = std::strtof(text.c_str(), &end);
+    if (i64(a[2])) r *= std::pow(10.0f, float(i64(a[2])));
+    if (a[1]) *ptr<u64>(a[1]) = a[0] + u64(end - text.c_str()) * 2;
+    std::memcpy(current_frame()->fret, &r, 4);
+    note = std::format("\"{}\" -> {}", text, r);
+    return 0;
+}
+
 // ---- system settings ----
 
 // sceSystemServiceParamGetInt(id, int *value): the console's settings
@@ -589,6 +670,10 @@ i64 s_app_param(const u64* a, std::string& note) {
 }
 
 }  // namespace
+
+std::string format_sysv(const char* format, u64 va) {
+    return format_sysv(format, ptr<SysvVaList>(va));
+}
 
 const std::unordered_map<std::string, Standin>& standins() {
     static const std::unordered_map<std::string, Standin> table = [] {
@@ -619,6 +704,13 @@ const std::unordered_map<std::string, Standin>& standins() {
             {"__cxa_guard_abort", s_guard_abort},
             {"sceKernelGetDirectMemorySize", s_direct_size},
             {"vprintf", s_vprintf},
+            {"printf", s_printf},
+            {"fprintf", s_fprintf},
+            {"vfprintf", s_vfprintf},
+            {"sprintf", s_sprintf},
+            {"snprintf", s_snprintf},
+            {"vsprintf", s_vsprintf},
+            {"vsnprintf", s_vsnprintf},
             {"strncpy", s_strncpy},
             {"ldiv", s_ldiv},
             {"_FSin", s_fsin},
@@ -643,9 +735,11 @@ const std::unordered_map<std::string, Standin>& standins() {
             {"time", s_time},
             {"clock", s_clock},
             {"exp2f", s_exp2f},
+            {"powf", s_powf},
+            {"_WStof", s_wstof},
+            {"strrchr", s_strrchr},
             {"srand", s_zero},
             {"sceKernelQueryMemoryProtection", s_query_protection},
-            {"sceKernelStat", s_stat},
             {"sceSystemServiceParamGetInt", s_system_param},
             {"sceAppContentAppParamGetInt", s_app_param},
         };
@@ -654,6 +748,7 @@ const std::unordered_map<std::string, Standin>& standins() {
         for (const char* n : {"_init_env", "atexit", "__cxa_atexit"})
             t.emplace(n, s_zero);
         add_thread_standins(t);
+        add_file_standins(t);
         return t;
     }();
     return table;

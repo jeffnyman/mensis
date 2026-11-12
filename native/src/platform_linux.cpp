@@ -61,6 +61,14 @@ void reserve(u64 addr, u64 size) {
                         std::strerror(errno)));
 }
 
+bool try_reserve(u64 addr, u64 size) {
+    void* p = mmap(reinterpret_cast<void*>(addr), size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
+    if (p == reinterpret_cast<void*>(addr)) return true;
+    if (p != MAP_FAILED) munmap(p, size);  // an old kernel placed it elsewhere
+    return false;
+}
+
 void commit(u64, u64) {}
 
 u32 prepare() {
