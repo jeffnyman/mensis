@@ -317,8 +317,9 @@ void trigger_event(int filter, u64 ident, i64 data) {
 
 // The buffer on screen, as a 32-bit BMP, with its bytes as they are in memory: the PS4's
 // A8R8G8B8 is B, G, R, A in memory, as a BMP's pixels are. A tiled buffer (tiling mode 0) is
-// written as if it weren't, so a picture in it would come out scrambled. Returns how many of
-// its pixels aren't 0. Under g_display.m.
+// one the console's GPU would arrange in tiles; the loader's GPU (draw.cpp) keeps such buffers
+// in rows, so it is written as it is. Returns how many of its pixels aren't 0. Under
+// g_display.m.
 u64 save_frame(const std::string& path) {
     const Display& d = g_display;
     u64 at = d.buffers[size_t(d.current)];
@@ -377,7 +378,7 @@ std::vector<std::string> video_report() {
         std::filesystem::create_directories(M.out_dir);
         u64 lit = save_frame(M.out_dir + "/frame.bmp");
         s += std::format(" (saved to frame.bmp: {}x{}, {}; {} of its {} pixels not 0)", d.width, d.height,
-                         d.tiling == 0 ? "tiled, written as if linear" : "linear", lit,
+                         d.tiling == 0 ? "tiled: kept in rows by the loader's GPU" : "linear", lit,
                          u64(d.width) * d.height);
     }
     return {s + ".\n"};

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -130,6 +131,7 @@ struct Machine {
     u64 entry = 0;
     u64 stubs_lo = 0, stubs_hi = 0, thunks = 0;
     std::vector<std::pair<u64, u64>> code;  // the game's executable ranges
+    std::vector<std::pair<u64, u64>> image;  // all of its loaded segments
     struct { u64 vaddr = 0, filesz = 0, memsz = 0, align = 16; } tls;
 
     // The log and everything below it, shared by all threads: under log_lock. The first
@@ -159,6 +161,7 @@ struct Machine {
     u64 max_calls = 0;
     u64 max_flips = 0;  // --frames: stop after this many flips
     unsigned seconds = 10;  // 0: no time limit
+    bool draw = true;  // run the draws and dispatches (--no-draw: only follow the commands)
     std::string out_dir;
     std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
     std::chrono::steady_clock::time_point t0;
@@ -198,6 +201,20 @@ struct GcnListing {
     std::vector<int> calls;  // s_swappc_b64 / s_setpc_b64 to an SGPR pair: its first SGPR
 };
 GcnListing gcn_disassemble(const u32* code, u32 dwords);
+// Drawing (draw.cpp): the registers a queue has set (SH: the shaders'; context: the rest of
+// a draw's state; user config: the primitive type), and what the index packets said.
+struct GpuRegs {
+    std::array<u32, 0x400> sh{}, ctx{}, uc{};
+    std::array<bool, 0x400> ctx_set{};  // set since the last CLEAR_STATE (else: the default)
+    u32 index_size = 2;  // bytes
+    u64 index_base = 0;
+    u32 instances = 1;
+};
+// A draw of `count` vertices (indices: their address, or 0 for 0, 1, 2...) and a dispatch of
+// x * y * z groups, run on the CPU; each says what it did, for the listing.
+std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first);
+std::string gpu_dispatch(const GpuRegs& r, u32 x, u32 y, u32 z);
+std::vector<std::string> draw_report();
 // Events (video.cpp): the kevent filters and idents the display and the GPU report
 constexpr int EVENT_VIDEO_OUT = -13, EVENT_GRAPHICS = -14;
 constexpr u64 VIDEO_OUT_FLIP = 6, GRAPHICS_EOP = 0x40;

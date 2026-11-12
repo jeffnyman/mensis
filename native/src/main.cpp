@@ -4,7 +4,7 @@
 // logged (docs/the-loader.md).
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
-//                   [--frames N] [--log N] [--window] [--app0 DIR]...
+//                   [--frames N] [--log N] [--window] [--no-draw] [--app0 DIR]...
 //
 // --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
 // lay folders over each other, first match wins. By default: work/update, then work/base (the
@@ -165,6 +165,7 @@ void load_elf(const std::string& path) {
         platform::commit(a, up(ph->vaddr + ph->memsz) - a);
         std::memcpy(reinterpret_cast<void*>(ph->vaddr), data.data() + ph->offset, ph->filesz);
         if (ph->flags & PF_X) M.code.emplace_back(ph->vaddr, ph->vaddr + ph->filesz);
+        M.image.emplace_back(ph->vaddr, ph->vaddr + ph->memsz);
     }
 }
 
@@ -330,6 +331,7 @@ void write_outputs(const std::string& reason) {
     }
     s.push_back("");
     for (const auto& line : gpu_report()) s.push_back(line);
+    for (const auto& line : draw_report()) s.push_back(line);
     s.insert(s.end(), {"Last calls:\n", "```"});
     for (u64 n = M.total_calls > 12 ? M.total_calls - 12 : 0; n < M.total_calls; n++)
         s.push_back(format_call(M.recent[n % Machine::RECENT]));
@@ -515,6 +517,8 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--window") {
             window = true;
+        } else if (a == "--no-draw") {
+            M.draw = false;
         } else if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
@@ -530,7 +534,7 @@ int main(int argc, char** argv) {
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--app0 DIR]...\n";
+                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--app0 DIR]...\n";
         return 2;
     }
     M.out_dir = pos[2];

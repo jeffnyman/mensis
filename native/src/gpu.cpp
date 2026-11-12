@@ -171,7 +171,7 @@ struct Queue {
     u64 submissions = 0, packets = 0, draws = 0, dispatches = 0;
     std::string waiting;  // the wait it's in now, if any
 
-    std::array<u32, 0x400> sh{};  // the SH registers as SET_SH_REG left them (the worker's own)
+    GpuRegs regs;  // the registers as the packets left them (the worker's own)
 };
 
 // A shader program a draw or dispatch used: where, its resource words (register and other
@@ -196,17 +196,17 @@ std::map<std::pair<std::string, u64>, Shader> g_shaders;  // under g_stats_lock
 // The program a stage's registers point at (lo: the address >> 8, and its top bits), noted
 // as used; returns its address, 0 if none.
 u64 note_shader(Queue& q, const char* stage, u32 lo, u32 rsrc, u32 user) {
-    u64 addr = (u64(q.sh[lo]) << 8) | (u64(q.sh[lo + 1] & 0xff) << 40);
+    u64 addr = (u64(q.regs.sh[lo]) << 8) | (u64(q.regs.sh[lo + 1] & 0xff) << 40);
     if (!addr) return 0;
     std::lock_guard lock(g_stats_lock);
     Shader& s = g_shaders[{stage, addr}];
     if (!s.uses++) {
         s.stage = stage;
         s.addr = addr;
-        s.rsrc1 = q.sh[rsrc];
-        s.rsrc2 = q.sh[rsrc + 1];
-        std::copy_n(q.sh.begin() + user, 16, s.user.begin());
-        if (s.stage == "cs") s.threads = {q.sh[0x207] & 0xffff, q.sh[0x208] & 0xffff, q.sh[0x209] & 0xffff};
+        s.rsrc1 = q.regs.sh[rsrc];
+        s.rsrc2 = q.regs.sh[rsrc + 1];
+        std::copy_n(q.regs.sh.begin() + user, 16, s.user.begin());
+        if (s.stage == "cs") s.threads = {q.regs.sh[0x207] & 0xffff, q.regs.sh[0x208] & 0xffff, q.regs.sh[0x209] & 0xffff};
         s.order = g_shaders.size();
         s.from = q.name;
     }
@@ -258,15 +258,43 @@ struct Walk {
             }
             std::string what = list_only ? describe(op, b, body) : execute(op, b, body, depth, list_only);
             if (!list_only) {
-                if (op == 0x76 && body >= 2)  // SET_SH_REG: kept, for the draws and dispatches
-                    for (u32 k = 1; k < body && (b[0] & 0xffff) + k - 1 < q.sh.size(); k++)
-                        q.sh[(b[0] & 0xffff) + k - 1] = b[k];
+                GpuRegs& r = q.regs;
+                u32 reg = b[0] & 0xffff;
+                auto set = [&](std::array<u32, 0x400>& space, bool context) {  // SET_*_REG: kept
+                    for (u32 k = 1; k < body && reg + k - 1 < space.size(); k++) {
+                        space[reg + k - 1] = b[k];
+                        if (context) r.ctx_set[reg + k - 1] = true;
+                    }
+                };
+                switch (op) {
+                    case 0x76: if (body >= 2) set(r.sh, false); break;
+                    case 0x69: if (body >= 2) set(r.ctx, true); break;
+                    case 0x79:
+                        if (body >= 2) set(r.uc, false);
+                        if (reg <= 0x243 && reg + body - 1 > 0x243) r.index_size = (r.uc[0x243] & 3) == 1 ? 4 : 2;
+                        break;
+                    case 0x12: r.ctx.fill(0), r.ctx_set.fill(false); break;  // CLEAR_STATE
+                    case 0x2a: r.index_size = (b[0] & 3) == 1 ? 4 : 2; break;  // INDEX_TYPE
+                    case 0x26: if (body >= 2) r.index_base = (b[0] & ~1u) | (u64(b[1] & 0xffff) << 32); break;
+                    case 0x2f: r.instances = b[0]; break;  // NUM_INSTANCES
+                    default: break;
+                }
                 if (is_draw(op)) {
                     u64 vs = note_shader(q, "vs", 0x48, 0x4a, 0x4c), ps = note_shader(q, "ps", 0x08, 0x0a, 0x0c);
                     what += std::format(" [vs {:#x}, ps {}]", vs, ps ? std::format("{:#x}", ps) : "none");
+                    std::string done;
+                    if (op == 0x2d && body >= 1) done = gpu_draw(r, b[0], 0, 0);
+                    else if (op == 0x27 && body >= 4) done = gpu_draw(r, b[3], b[1] | (u64(b[2] & 0xffff) << 32), 0);
+                    else if (op == 0x35 && body >= 3) done = gpu_draw(r, b[2], r.index_base, b[1]);
+                    else if (M.draw) done = "(this kind of draw isn't run yet)";
+                    if (!done.empty()) what += ": " + done;
                 }
-                if (op == 0x15 || op == 0x16)
+                if (op == 0x15 || op == 0x16) {
                     what += std::format(" [cs {:#x}]", note_shader(q, "cs", 0x20c, 0x212, 0x240));
+                    std::string done = op == 0x15 && body >= 3 ? gpu_dispatch(r, b[0], b[1], b[2])
+                                       : M.draw ? "(indirect dispatches aren't run yet)" : "";
+                    if (!done.empty()) what += ": " + done;
+                }
             }
             line(depth, std::format("{:5} {}{}", i, label, what.empty() ? "" : " " + what));
             if ((op == 0x3f || op == 0x33) && body >= 3) {  // an indirect buffer: its packets, in place

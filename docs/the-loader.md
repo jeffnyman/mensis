@@ -112,10 +112,12 @@ work/native/linux/mensis-loader work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eb
 It writes the same `calls.log` and `summary.md` into `work/loader-native/`, plus `stdout.txt`,
 whatever the game printed, `files/`, the folders the game may write to, `gpu/`, what the
 game asked the GPU to do, `shaders/`, the GPU programs its draws and dispatches used,
-disassembled, and `frame.bmp`, the frame on screen when it stopped. Add `--frames
-60` to stop after 60 frames, or `--seconds 20` to run longer than the default 10. On Windows,
-`--window` opens a window on the display, whose title counts the frames as they are shown; the
-run then goes on until the window is closed. The two builds run
+disassembled, `draws/`, what the first draws of each pixel shader drew, and `frame.bmp`, the
+frame on screen when it stopped. Add `--frames 60` to stop after 60 frames, or `--seconds 20`
+to run longer than the default 10. On Windows, `--window` opens a window on the display, whose
+title counts the frames as they are shown; the run then goes on until the window is closed.
+The game's title screen comes after about 90 seconds (`--seconds 100`). `--no-draw` leaves the
+drawing out, and the game runs at its own 30 frames a second, to a black screen. The two builds run
 the same code: up to the point where the game's threads started running, they made the same
 calls, from the same places, with the same results.
 
@@ -180,7 +182,8 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   submits, short of drawing. The graphics queue (`sceGnmSubmitCommandBuffers`) and each compute
   queue (a ring of packets; `sceGnmDingDong` says how far it is written, and the read pointer
   tells the game how far the GPU has got) has a thread of its own that walks the packets in
-  order. Draws and dispatches are counted, not run: there are no shaders yet. What a packet
+  order, and hands each draw and dispatch to the CPU's stand-in for the GPU's cores
+  (`draw.cpp`, below). What a packet
   writes to memory is written (`WRITE_DATA`, `EVENT_WRITE_EOP`, `RELEASE_MEM`, `DMA_DATA`), and
   a wait on memory (`WAIT_REG_MEM`) waits, because the game and the GPU keep in step through
   memory: a label written when some work is done, which the CPU or another queue waits to
@@ -195,13 +198,30 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   it calls a fetch shader (`s_swappc_b64`), whose address is in its user data, and those are
   written out too. LLVM's disassembler (`llvm-mc`) only reads later GCN generations, so the
   listings were checked by hand against the reference, not against another tool.
+* **Drawing**, on the CPU. `shade.cpp` runs the shaders: an interpreter for the same
+  instruction set, a wave of 64 threads at a time, as the GPU runs them, with each
+  instruction's lanes switched on and off by its exec mask; with the buffer, image and sampler
+  descriptors the shaders read their memory through (formats, filtering, wrapping), and the
+  local memory a compute group shares. `draw.cpp` does what the GPU's fixed-function parts do
+  around them: a draw's vertices through the vertex shader; triangles (lists, strips, fans and
+  the "rectangles" a full-screen pass uses) through the viewport and the scissor; their
+  pixels, in 2×2 quads (a shader compares its neighbours in a quad to pick a texture's level
+  of detail), through the pixel shader; and its colour to the render target, in the target's
+  format and blended. A dispatch runs each group's waves in turn, from barrier to barrier. The
+  pixels are shared out by rows among the CPU's threads (up to 16). Most of the game's
+  textures are compressed as BC7 (`bc7.cpp`). Textures in the micro-tiled modes, the ones the
+  game's files hold, are read in the PS4's arrangement, as [the textures](the-textures.md) are
+  extracted; surfaces in the macro-tiled modes (render targets, the display) are only ever
+  written and read by the GPU, and the loader keeps those in rows instead, the console's
+  arrangement of them not being reproduced. Not done yet: depth and stencil, mip levels past
+  the first, a triangle with a vertex behind the eye, multisampling; the summary counts
+  whatever a run met that wasn't done.
 * **The display** keeps the timing: one flip at each vertical blank, 60 a second or the rate
   the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
   queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
   flip chose: in the window (`--window`, Windows; a copy 30 times a second, scaled to the
-  window, through GDI) and, at the end, in `frame.bmp`. The buffers are tiled, the GPU's own
-  arrangement of pixels, and both show them as if they weren't, which will need undoing once
-  there is a picture in them.
+  window, through GDI) and, at the end, in `frame.bmp`. The buffers are in one of the GPU's
+  macro-tiled modes, which the loader's drawing keeps in rows, so both show them as they are.
 * **Sound** is taken and discarded, at the pace of a real audio port: `sceAudioOutOutput`
   waits until the port's next buffer is due (256 samples at 48 kHz, every 5.3 ms), as the
   sound library's audio thread expects.
@@ -370,13 +390,38 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     shader for two or three attributes and multiply the position by a 2×4 matrix from their
     constants: flat shapes, as a splash screen and its text would be. Linux, slower to reach
     the later screens, used 27 of them in the same time, with the same listings.
+23. **The first pictures.** Run, the shaders drew the splash screen ("Sony Computer
+    Entertainment presents", fading in, `draws/`), but the screen stayed black: the last pass
+    of each frame, a triangle over the whole screen, copies that picture to the display
+    through a colour correction, each of red, green and blue through a curve kept in a
+    texture, and the curves were 0. Compute shaders fill them, from a buffer; they ran, and
+    skipped every thread, because the count they compare with came from the wrong address. A
+    buffer's descriptor holds its address in 44 bits, not 48: the 4 bits above are set
+    (`0xb`) in every one of the game's, and read as part of the address they pointed at
+    nothing. With 44 bits, the splash screen shows.
+24. **BC7, checked.** Most of the game's textures are BC7, a block compression with eight
+    modes and tables of how a block's 16 pixels divide among up to three colour ranges. The
+    decoder was checked against Pillow's, which `tools/textures.py` uses: 69,615 blocks
+    sampled from 170 textures, all modes 4, 5 and 6, came out the same, pixel for pixel. Of
+    the game's 65,462 BC7 textures, only 763 blocks use another mode (0, 1 and 3, the ones
+    with partition tables); those came out the same too. Modes 2 and 7 aren't used at all.
+    The one difference is a block that isn't valid (no mode bit), all 0 in the game's padding:
+    Pillow makes it opaque black, Direct3D's specification transparent black, and the loader
+    follows the specification.
+25. **The title screen.** In 90 seconds the game shows 534 frames, past the splash screen to
+    its title: the Hunter, the logo, and "Play Online" and "Play Offline", the game's own
+    menu, drawn by its own shaders (3,792 draws, 4 billion pixels, 3,825 dispatches). It
+    runs at about 6 frames a second (5.8 in the window, at frame 596): the game waits on its
+    GPU, which is now the CPU, and the time it took is the time the game sees. Nothing it
+    used in that time was counted as not done. Linux draws the same splash screen (211
+    frames in 30 seconds).
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled) and `frame.bmp` (the screen when it stopped) |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled), `draws/` (the first draws of each pixel shader, as drawn) and `frame.bmp` (the screen when it stopped) |
