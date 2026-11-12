@@ -15,7 +15,7 @@
     .text
 
 # struct Frame (loader.hpp):
-#     0 args[6]   48 index   56 caller   64 game_fs (unused)   72 ret2 (-> rdx)
+#     0 args[6]   48 index   56 caller   64 unused   72 ret2 (-> rdx)
 #    80 xmm0     96 xmm1    112 fret (-> xmm0)
     .globl mensis_import_common
 mensis_import_common:
@@ -47,14 +47,17 @@ mensis_import_common:
     leave
     ret
 
-# void mensis_enter_game(u64 entry, u64 params, u64 exit_handler, u64 stack)
+# u64 mensis_enter_game(EnterArgs *a)
+#     EnterArgs: 0 entry, 8 arg0, 16 arg1, 24 stack_top, 32 stack_limit, 40 saved_rsp
 #
-# Saves the loader's callee-saved registers and the thread's stack bounds (in the TEB at gs:8
-# and gs:16, which Windows checks when it handles an exception), switches to the game's stack
-# and bounds, and jumps to entry with the System V arguments. Returns only through mensis_bail.
+# Saves the loader's callee-saved registers (with xmm6-xmm15) and the thread's stack bounds
+# (in the TEB at gs:8 and gs:16, which Windows checks when it handles an exception), records
+# where (a->saved_rsp), sets the bounds to the game's stack, and calls entry(arg0, arg1) there.
+# The game's frame starts at stack_top - 24, eight bytes off 16-byte alignment as after a call:
+# [0] the return address, mensis_game_returned, and [8] the loader's stack pointer.
 #
-# Saved block, at mensis_host_rsp: 0..159 xmm6-xmm15, 160 stack base, 168 stack limit,
-# then the eight pushed registers and the return address.
+# Saved block: 0..159 xmm6-xmm15, 160 stack base, 168 stack limit, then the eight pushed
+# registers and the return address.
     .globl mensis_enter_game
 mensis_enter_game:
     push rbx
@@ -80,27 +83,39 @@ mensis_enter_game:
     mov [rsp + 160], rax
     mov rax, qword ptr gs:[0x10]
     mov [rsp + 168], rax
-    mov [rip + mensis_host_rsp], rsp
-    mov rax, [rip + mensis_game_stack_base]
+    mov [rcx + 40], rsp
+    mov r11, rsp
+    mov rax, [rcx + 24]
     mov qword ptr gs:[0x8], rax
-    mov rax, [rip + mensis_game_stack_limit]
-    mov qword ptr gs:[0x10], rax
-    mov rax, rcx
-    mov rdi, rdx
-    mov rsi, r8
-    mov rsp, r9
+    mov rdx, [rcx + 32]
+    mov qword ptr gs:[0x10], rdx
+    lea rsp, [rax - 24]
+    lea rdx, [rip + mensis_game_returned]
+    mov [rsp], rdx
+    mov [rsp + 8], r11
+    mov rax, [rcx]
+    mov rdi, [rcx + 8]
+    mov rsi, [rcx + 16]
     xor ebp, ebp
     jmp rax
 
-# Back to the loader's stack and state, returning from mensis_enter_game. Reached by a call
-# from a stand-in (stop), or by an exception handler or the watchdog setting rip to it.
-    .globl mensis_bail
-mensis_bail:
-    mov rsp, [rip + mensis_host_rsp]
-    mov rax, [rsp + 160]
-    mov qword ptr gs:[0x8], rax
-    mov rax, [rsp + 168]
-    mov qword ptr gs:[0x10], rax
+# Back to the loader from anywhere in the game (a stand-in that stops the run or ends the
+# thread, or the exception handler setting rip here): mensis_enter_game returns 0.
+    .globl mensis_restore
+mensis_restore:
+    mov rsp, rcx
+    xor eax, eax
+    jmp 1f
+
+# Where the game's function returns to: mensis_enter_game returns its result.
+    .globl mensis_game_returned
+mensis_game_returned:
+    mov rsp, [rsp]
+1:
+    mov rdx, [rsp + 160]
+    mov qword ptr gs:[0x8], rdx
+    mov rdx, [rsp + 168]
+    mov qword ptr gs:[0x10], rdx
     movdqu xmm6, [rsp + 0]
     movdqu xmm7, [rsp + 16]
     movdqu xmm8, [rsp + 32]

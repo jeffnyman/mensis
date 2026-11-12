@@ -1,56 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Windows: 64-bit Windows doesn't let a program set fs, so the game's thread pointer can't go
-// there. Instead, every place the game's code reads it is rewritten before the run. In this
-// executable that is one instruction, 17,127 times:
+// Windows: 64-bit Windows doesn't let a program set fs, and gs points at each thread's own
+// information block (TEB). The game's thread-pointer loads are rewritten to read gs:[0x1480 +
+// 8 * slot]: the TEB's thread-local slots start at 0x1480, so this reads Windows TLS slot `slot`
+// (from TlsAlloc), where each game thread keeps its thread pointer. No stack, flag or other
+// register is touched.
 //
-//     64 48 8B 04 25 00 00 00 00      mov rax, qword ptr fs:[0]
-//
-// which, under TLS variant II, loads the thread pointer (fs:[0] holds the thread pointer
-// itself). It becomes, at the same length:
-//
-//     65 48 8B 04 25 <0x1480 + 8*slot>  mov rax, qword ptr gs:[0x1480 + 8*slot]
-//
-// gs points at the thread's TEB, whose TlsSlots array starts at 0x1480: the instruction reads
-// Windows thread-local slot `slot` (from TlsAlloc), where each thread keeps its game thread
-// pointer. Nothing else changes: no stack is touched, no flags, no other register.
-//
-// Faults are caught by a vectored exception handler, which records the registers and resumes
-// at mensis_bail (enter_windows.S), back on the loader's stack. The time limit is a watchdog
-// thread that does the same to the main thread from outside.
+// A fault is caught by a vectored exception handler, which records it and resumes the thread in
+// mensis_restore, back on the loader's stack.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
-#include <condition_variable>
-#include <cstring>
 #include <format>
-#include <mutex>
-#include <thread>
 
 #include "loader.hpp"
 
 using namespace mensis;
 
-extern "C" {
-u64 mensis_host_rsp = 0;  // enter_windows.S
-u64 mensis_game_stack_base = 0, mensis_game_stack_limit = 0;
-void mensis_enter_game(u64 entry, u64 params, u64 exit, u64 stack);
-[[noreturn]] void mensis_bail();
-}
-
 namespace {
 
 DWORD g_slot = TLS_OUT_OF_INDEXES;
-volatile LONG g_running = 0;
-
-void record(const CONTEXT& c) {
-    M.fault = {true, c.Rip, c.Rsp, c.Rbp, c.Rax, c.Rdi, c.Rsi};
-}
 
 LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
-    if (!g_running) return EXCEPTION_CONTINUE_SEARCH;
+    GameThread* t = current_thread();
+    if (!t || !t->enter.saved_rsp) return EXCEPTION_CONTINUE_SEARCH;
     const EXCEPTION_RECORD* r = e->ExceptionRecord;
     std::string what;
     switch (r->ExceptionCode) {
@@ -71,10 +46,12 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
         case EXCEPTION_STACK_OVERFLOW: what = "stack overflow"; break;
         default: return EXCEPTION_CONTINUE_SEARCH;  // not a fault of the game's (a C++ throw)
     }
-    g_running = 0;
-    record(*e->ContextRecord);
-    M.stop_reason = what;
-    e->ContextRecord->Rip = reinterpret_cast<DWORD64>(&mensis_bail);
+    const CONTEXT& c = *e->ContextRecord;
+    t->fault = {true, c.Rip, c.Rsp, c.Rbp, c.Rax, c.Rdi, c.Rsi};
+    t->fault_reason = what;
+    t->faulted = true;
+    e->ContextRecord->Rip = reinterpret_cast<DWORD64>(&mensis_restore);
+    e->ContextRecord->Rcx = t->enter.saved_rsp;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -96,91 +73,16 @@ void commit(u64 addr, u64 size) {
                         GetLastError()));
 }
 
-void prepare() {
+u32 prepare() {
     g_slot = TlsAlloc();
     if (g_slot == TLS_OUT_OF_INDEXES || g_slot >= 64)
         die("no Windows TLS slot below 64 is free (the TEB holds only the first 64)");
-    static const unsigned char load_fs[9] = {0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0};
-    u32 disp = 0x1480 + 8 * g_slot;
-    u64 patched = 0;
-    for (auto [lo, hi] : M.code) {
-        auto* p = reinterpret_cast<unsigned char*>(lo);
-        auto* end = reinterpret_cast<unsigned char*>(hi) - sizeof load_fs;
-        while (p <= end) {
-            p = static_cast<unsigned char*>(std::memchr(p, 0x64, size_t(end - p) + 1));
-            if (!p) break;
-            if (std::memcmp(p, load_fs, sizeof load_fs) == 0) {
-                p[0] = 0x65;  // fs -> gs
-                std::memcpy(p + 5, &disp, 4);
-                patched++;
-                p += sizeof load_fs;
-            } else {
-                p++;
-            }
-        }
-    }
-    FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
-    M.notes.push_back(std::format(
-        "Thread pointer: {} loads of fs:[0] rewritten to read Windows TLS slot {} "
-        "(gs:[{:#x}]).",
-        patched, g_slot, disp));
+    return 0x1480 + 8 * g_slot;
 }
 
-void run(u64 entry, u64 params, u64 exit, u64 sp, u64 tp) {
-    TlsSetValue(g_slot, reinterpret_cast<void*>(tp));
-    mensis_game_stack_base = STACK_TOP;
-    mensis_game_stack_limit = STACK_TOP - STACK_SIZE;
-    PVOID handler = AddVectoredExceptionHandler(1, on_exception);
+void install_fault_handler() { AddVectoredExceptionHandler(1, on_exception); }
 
-    // The watchdog: after M.seconds, stop the main thread wherever it is.
-    HANDLE main_thread = nullptr;
-    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &main_thread,
-                    0, FALSE, DUPLICATE_SAME_ACCESS);
-    std::mutex mu;
-    std::condition_variable cv;
-    bool done = false;
-    std::thread watchdog([&] {
-        std::unique_lock lock(mu);
-        if (cv.wait_for(lock, std::chrono::seconds(M.seconds), [&] { return done; })) return;
-        if (!g_running) return;
-        if (g_in_loader) {  // inside a stand-in: stop at the end of the call
-            g_alarm = 1;
-            return;
-        }
-        SuspendThread(main_thread);
-        if (g_running && !g_in_loader) {
-            CONTEXT c{};
-            c.ContextFlags = CONTEXT_FULL;
-            GetThreadContext(main_thread, &c);
-            g_running = 0;
-            record(c);
-            M.stop_reason = std::format("time limit ({} s) reached", M.seconds);
-            c.Rip = reinterpret_cast<DWORD64>(&mensis_bail);
-            SetThreadContext(main_thread, &c);
-        } else if (g_running) {
-            g_alarm = 1;
-        }
-        ResumeThread(main_thread);
-    });
-
-    g_running = 1;
-    mensis_enter_game(entry, params, exit, sp);
-    g_running = 0;
-
-    {
-        std::lock_guard lock(mu);
-        done = true;
-    }
-    cv.notify_one();
-    watchdog.join();
-    CloseHandle(main_thread);
-    RemoveVectoredExceptionHandler(handler);
-}
-
-void leave() {
-    g_running = 0;
-    mensis_bail();
-}
+void enter_thread(u64 tp) { TlsSetValue(g_slot, reinterpret_cast<void*>(tp)); }
 
 // The bytes at rip (Windows has no objdump to hand): look the address up in Ghidra.
 std::vector<std::string> disassemble(u64 rip) {

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Linux: the game's thread pointer goes in fs, as on the PS4. The loader's own C library keeps
-// its own fs, so mensis_import_common (enter_linux.S) swaps the two at every import call, with
-// wrfsbase (allowed since Linux 5.9). Faults arrive as signals, which jump back out of the run.
+// Linux: the game's thread-pointer loads were rewritten to read gs:[0], and each game thread's
+// gs base is set to its thread pointer (wrgsbase, allowed since Linux 5.9). The loader itself
+// never uses gs, and keeps fs for its own C library. A fault arrives as a signal, on a stack of
+// the thread's own; the handler records it and resumes the thread in mensis_restore, back on the
+// loader's stack.
 
-#include <setjmp.h>
 #include <signal.h>
 #include <sys/auxv.h>
 #include <sys/mman.h>
@@ -21,36 +22,30 @@
 
 using namespace mensis;
 
-extern "C" {
-u64 mensis_host_fs = 0;  // read by enter_linux.S
-[[noreturn]] void mensis_enter_game(u64 entry, u64 params, u64 exit, u64 stack, u64 fs);
-}
-
 namespace {
 
-sigjmp_buf g_jump;
-
 void on_signal(int sig, siginfo_t* si, void* ctx) {
-    // The game's fs may be live: switch to ours before anything can use it.
-    asm volatile("wrfsbase %0" ::"r"(mensis_host_fs));
-    if (sig == SIGALRM && g_in_loader) {  // inside a stand-in: stop at the end of the call
-        g_alarm = 1;
+    GameThread* t = current_thread();
+    auto* uc = static_cast<ucontext_t*>(ctx);
+    auto* g = uc->uc_mcontext.gregs;
+    if (!t || !t->enter.saved_rsp) {  // the loader's own fault: nothing to return to
+        signal(sig, SIG_DFL);
         return;
     }
-    const auto* g = static_cast<ucontext_t*>(ctx)->uc_mcontext.gregs;
-    M.fault = {true, u64(g[REG_RIP]), u64(g[REG_RSP]), u64(g[REG_RBP]), u64(g[REG_RAX]),
-               u64(g[REG_RDI]), u64(g[REG_RSI])};
     u64 addr = u64(si->si_addr);
     switch (sig) {
-        case SIGSEGV: M.stop_reason = std::format("memory fault (SIGSEGV) at {:#x}", addr); break;
-        case SIGBUS: M.stop_reason = std::format("bus error (SIGBUS) at {:#x}", addr); break;
-        case SIGILL: M.stop_reason = std::format("invalid instruction (SIGILL) at {:#x}", addr); break;
-        case SIGFPE: M.stop_reason = std::format("arithmetic fault (SIGFPE) at {:#x}", addr); break;
-        case SIGTRAP: M.stop_reason = "breakpoint (SIGTRAP)"; break;
-        case SIGALRM: M.stop_reason = std::format("time limit ({} s) reached", M.seconds); break;
-        default: M.stop_reason = std::format("signal {}", sig);
+        case SIGSEGV: t->fault_reason = std::format("memory fault (SIGSEGV) at {:#x}", addr); break;
+        case SIGBUS: t->fault_reason = std::format("bus error (SIGBUS) at {:#x}", addr); break;
+        case SIGILL: t->fault_reason = std::format("invalid instruction (SIGILL) at {:#x}", addr); break;
+        case SIGFPE: t->fault_reason = std::format("arithmetic fault (SIGFPE) at {:#x}", addr); break;
+        case SIGTRAP: t->fault_reason = "breakpoint (SIGTRAP)"; break;
+        default: t->fault_reason = std::format("signal {}", sig);
     }
-    siglongjmp(g_jump, 1);
+    t->fault = {true, u64(g[REG_RIP]), u64(g[REG_RSP]), u64(g[REG_RBP]), u64(g[REG_RAX]),
+                u64(g[REG_RDI]), u64(g[REG_RSI])};
+    t->faulted = true;
+    g[REG_RIP] = i64(reinterpret_cast<u64>(&mensis_restore));
+    g[REG_RDI] = i64(t->enter.saved_rsp);
 }
 
 }  // namespace
@@ -68,33 +63,29 @@ void reserve(u64 addr, u64 size) {
 
 void commit(u64, u64) {}
 
-void prepare() {
+u32 prepare() {
     constexpr unsigned long HWCAP2_FSGSBASE_BIT = 1ul << 1;
     if (!(getauxval(AT_HWCAP2) & HWCAP2_FSGSBASE_BIT))
-        die("this CPU or kernel doesn't allow wrfsbase (FSGSBASE); Linux 5.9 or later is needed");
-    asm volatile("rdfsbase %0" : "=r"(mensis_host_fs));
-    M.notes.push_back("Thread pointer: in fs, swapped with the loader's own at each call.");
+        die("this CPU or kernel doesn't allow wrgsbase (FSGSBASE); Linux 5.9 or later is needed");
+    return 0;  // gs:[0]: gs is the thread pointer, and [tp] holds the thread pointer
 }
 
-void run(u64 entry, u64 params, u64 exit, u64 sp, u64 tp) {
-    static unsigned char altstack[1 << 16];
-    stack_t ss{};
-    ss.ss_sp = altstack;
-    ss.ss_size = sizeof altstack;
-    sigaltstack(&ss, nullptr);
+void install_fault_handler() {
     struct sigaction sa{};
     sa.sa_sigaction = on_signal;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
-    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGALRM}) sigaction(sig, &sa, nullptr);
-    if (sigsetjmp(g_jump, 1) == 0) {
-        alarm(M.seconds);
-        mensis_enter_game(entry, params, exit, sp, tp);
-    }
-    alarm(0);
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP}) sigaction(sig, &sa, nullptr);
 }
 
-void leave() { siglongjmp(g_jump, 1); }
+void enter_thread(u64 tp) {
+    // a stack for the signal handler, as the game's may be the trouble
+    stack_t ss{};
+    ss.ss_size = 1 << 18;
+    ss.ss_sp = new unsigned char[ss.ss_size];
+    sigaltstack(&ss, nullptr);
+    asm volatile("wrgsbase %0" ::"r"(tp));
+}
 
 // The instructions at rip, through objdump, read without faulting if rip isn't mapped.
 std::vector<std::string> disassemble(u64 rip) {

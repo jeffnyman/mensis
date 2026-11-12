@@ -127,24 +127,35 @@ same results.
   build needs to: the assembly routine hands the dispatcher one pointer to the frame, and a
   pointer is passed the same way everywhere. `vprintf` reads the game's System V `va_list`
   itself, one conversion at a time, rather than handing it to the host's C library.
-* **The thread pointer** is where the platforms differ:
-  * Linux lets a program set `fs`, so the game's thread pointer goes there, as on the PS4. The
-    loader's own C library uses `fs` too, so the assembly routine swaps the two at every call,
-    with `wrfsbase`, one instruction, which Linux allows since 5.9.
-  * 64-bit Windows doesn't let a program set `fs`, so the game's code is changed instead. It
-    reads its thread pointer with one instruction, `mov rax, qword ptr fs:[0]`, which appears
-    17,127 times, and in no other way. Before the run, each is rewritten in place, at the same
-    nine bytes, to `mov rax, qword ptr gs:[0x1480 + 8 × slot]`: on Windows `gs` points at the
+* **The thread pointer.** The game reads it with one instruction, `mov rax, qword ptr fs:[0]`,
+  which appears 17,127 times, and in no other way. The PS4 keeps it in `fs`; 64-bit Windows
+  doesn't let a program set `fs`, and on Linux the loader's own C library uses it. So before
+  the run each is rewritten in place, at the same nine bytes, to read through `gs` instead,
+  which neither loader uses for anything else. No stack, flag or other register is touched:
+  * on Windows, to `mov rax, qword ptr gs:[0x1480 + 8 × slot]`. There `gs` points at the
     thread's own information block, whose thread-local slots start at 0x1480, so this reads a
-    slot (from `TlsAlloc`) where each thread keeps its game thread pointer. No stack, flag or
-    other register is touched.
-* **Stopping**: a fault is caught (Linux: a signal, on its own stack; Windows: a vectored
-  exception handler), the registers are recorded, and the run returns to `main`. The summary
-  shows the instructions at the fault (Linux, through `objdump`) or their bytes (Windows). A
-  time limit (`--seconds`, 10 by default) and a call limit (`--calls`) stop runaway runs.
-* **Repeatable**: two runs make the same calls with the same results. Anything the stand-ins
-  hand the game lives at a fixed address, and the clock (`gettimeofday`) starts on 2026-01-01
-  and advances a millisecond a call.
+    slot (from `TlsAlloc`) where each thread keeps its game thread pointer;
+  * on Linux, to `mov rax, qword ptr gs:[0]`, with each thread's `gs` base set to its thread
+    pointer (`wrgsbase`, which Linux allows since 5.9): `[tp]` holds the thread pointer, as on
+    the PS4.
+* **Threads.** Each thread the game creates runs on a thread of the loader's own, on a stack
+  of the size it asked for (in a 64 MiB slot of its own, with a megabyte more for the loader's
+  code, which runs on the game's stack during a call) and with a TLS block of its own. Mutexes,
+  condition variables, read-write locks and semaphores are real. Each object the game declares
+  is a pointer-sized handle, as in FreeBSD, and points at the loader's own object, kept in an
+  area of its own, so the game's heap is laid out as in a run without threads. Function-level
+  statics (`__cxa_guard_acquire`) are constructed once, with a second thread waiting for the
+  first.
+* **Stopping**: a fault is caught (Linux: a signal, on a stack of the thread's own; Windows: a
+  vectored exception handler), recorded, and the thread resumes on its own stack, from where
+  the outputs are written and the process ends. The summary shows the instructions at the fault
+  (Linux, through `objdump`) or their bytes (Windows), the game-code addresses on the
+  faulting thread's stack (mostly return addresses: the way back), and every thread with its
+  state and last call. Any thread can stop the run; so can the main thread's `_start`
+  returning, a time limit (`--seconds`, 10 by default) and a call limit (`--calls`).
+* **Repeatable, as far as threads allow.** Anything the stand-ins hand the game lives at a
+  fixed address. Once the game's threads run, the order in which they make their calls, and
+  how often a thread polling the clock does so, varies from run to run.
 
 ### What it showed
 
@@ -181,13 +192,26 @@ same results.
    4.48 GiB and six flexible-memory blocks totalling 322 MiB, nearly all within a thousand
    calls of each other and before any thread but the logger's. It then carves its own heaps
    out of them, so the system's allocator is barely used.
-7. **Threads are the next wall.** The run now makes 112,777 calls to 83 functions and asks for
-   13 threads: a background logger, a job worker, nine work pools (`EzWorkPool_TypeA0` to
-   `TypeD1`), `MOMainThread` and `GXRenderThread`. It also starts the network, SSL and HTTP
-   libraries. Then the main thread waits on a condition variable for a worker
-   (`scePthreadCondWait`). The threads were recorded but not run, so the wait returns at once
-   with nothing done, and the main thread reads a pointer the worker never wrote. Running the
-   game's threads, each with its own stack and thread pointer, is the next step.
+7. **Then threads.** Without them, the run made 112,777 calls to 83 functions, asked for 13
+   threads (a background logger, a job worker, nine work pools `EzWorkPool_TypeA0` to
+   `TypeD1`, `MOMainThread` and `GXRenderThread`), started the network, SSL and HTTP
+   libraries, and faulted in the main thread, reading through a null pointer just after a
+   `scePthreadCondWait`. The obvious reading, that the wait was for a thread that never ran,
+   turned out to be wrong: with the threads running, the fault is the same (below).
+8. **With the threads running**, the game starts 16 of them, and they behave as threads
+   should: the work pools wait on their condition variables for work, the logger and the job
+   worker on their semaphores. Three more belong to FMOD, the sound library: its mixer, its
+   audio-out thread and its stream thread. About 290,000 calls are made in a fifth of a
+   second.
+9. **Files are the next wall.** `MOMainThread` is the sound system's start-up. It starts FMOD,
+   asks for the sound project, `/app0/dvdroot_ps4/sound/sprj_mixer.fev`
+   (`sceKernelStat`), is told it doesn't exist (there is no file system yet), shuts FMOD down
+   cleanly (waits for its three threads, deletes their semaphores), wakes the main thread
+   and exits. The main thread goes on without sound into graphics set-up (the function that
+   creates the default render target and depth stencil) and faults on the same null pointer
+   as before, in a call made with a null object. `/app0/` is the game's own directory, and
+   its files are those [the package](the-package.md) extracts into `work/`: giving the game
+   its files is the next step.
 
 ## Files
 

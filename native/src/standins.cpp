@@ -5,10 +5,12 @@
 // the rest take the start-up further. The game's memory is mapped at the addresses it expects,
 // so a pointer argument is used directly.
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <map>
 #include <new>
 #include <string>
 
@@ -90,32 +92,85 @@ i64 s_alloc_direct(const u64* a, std::string&) {
     return 0;
 }
 
+// The game's mappings, for sceKernelQueryMemoryProtection: start: (end, protection). The
+// protection bits: 1 CPU read, 2 CPU write, 4 CPU execute, 0x10 GPU read, 0x20 GPU write.
+std::mutex g_maps_lock;
+std::map<u64, std::pair<u64, int>> g_maps;
+
+void record_mapping(u64 start, u64 len, int prot) {
+    std::lock_guard lock(g_maps_lock);
+    g_maps[start] = {start + len, prot};
+}
+
 // sceKernelMapDirectMemory(void **addr, len, prot, flags, phys, align): map it 1:1
 i64 s_map_direct(const u64* a, std::string&) {
     *ptr<u64>(a[0]) = a[4];
+    record_mapping(a[4], a[1], int(a[2]));
     return 0;
 }
 
 // sceKernelMapFlexibleMemory / MapNamedFlexibleMemory(void **addr, len, prot, flags, ...)
 i64 s_map_flexible(const u64* a, std::string&) {
-    *ptr<u64>(a[0]) = alloc(a[1], 0x4000);
+    u64 p = alloc(a[1], 0x4000);
+    *ptr<u64>(a[0]) = p;
+    record_mapping(p, a[1], int(a[2]));
     return 0;
 }
 
-// scePthreadCreate(*thread, attr, entry, arg, name): record it, don't run it
-i64 s_thread_create(const u64* a, std::string& note) {
-    M.threads.emplace_back(a[2], a[3]);
-    *ptr<u64>(a[0]) = 0x1000 + M.threads.size();
-    note = std::format("thread {} not run: '{}'", M.threads.size(),
-                       a[4] ? ptr<char>(a[4]) : "");
+// sceKernelQueryMemoryProtection(addr, void **start, void **end, u32 *prot): the mapping that
+// holds addr
+i64 s_query_protection(const u64* a, std::string& note) {
+    std::lock_guard lock(g_maps_lock);
+    auto it = g_maps.upper_bound(a[0]);
+    if (it == g_maps.begin() || (--it, a[0] >= it->second.first)) {
+        note = "not mapped";
+        return i64(std::int32_t(0x80020016));  // SCE_KERNEL_ERROR_EINVAL
+    }
+    if (a[1]) *ptr<u64>(a[1]) = it->first;
+    if (a[2]) *ptr<u64>(a[2]) = it->second.first;
+    if (a[3]) *ptr<u32>(a[3]) = u32(it->second.second);
+    note = std::format("{:#x}-{:#x} prot {:#x}", it->first, it->second.first, it->second.second);
     return 0;
 }
 
-// __cxa_guard_acquire(guard): 1 = "construct it now" while the guard's first byte is 0
-i64 s_guard_acquire(const u64* a, std::string&) { return *ptr<unsigned char>(a[0]) == 0; }
+// ---- files: none yet ----
+
+// sceKernelStat(const char *path, SceKernelStat *sb): no file system yet, so nothing exists
+i64 s_stat(const u64* a, std::string& note) {
+    note = std::format("'{}': no file system yet", a[0] ? ptr<char>(a[0]) : "");
+    return i64(std::int32_t(0x80020002));  // SCE_KERNEL_ERROR_ENOENT
+}
+
+// __cxa_guard_acquire(guard): a function's static object, constructed once. 1 = "construct it
+// now", while the guard's first byte is 0. Its second byte marks a construction in progress, so
+// a second thread arriving meanwhile waits for it rather than constructing again.
+std::mutex g_guard_lock;
+std::condition_variable g_guard_done;
+
+i64 s_guard_acquire(const u64* a, std::string&) {
+    auto* g = ptr<unsigned char>(a[0]);
+    std::unique_lock lock(g_guard_lock);
+    g_guard_done.wait(lock, [&] { return g[0] != 0 || g[1] == 0; });
+    if (g[0]) return 0;
+    g[1] = 1;
+    return 1;
+}
 
 i64 s_guard_release(const u64* a, std::string&) {
-    *ptr<unsigned char>(a[0]) = 1;
+    auto* g = ptr<unsigned char>(a[0]);
+    std::lock_guard lock(g_guard_lock);
+    g[0] = 1;
+    g[1] = 0;
+    g_guard_done.notify_all();
+    return 0;
+}
+
+// __cxa_guard_abort(guard): the constructor threw; let the next one try
+i64 s_guard_abort(const u64* a, std::string&) {
+    auto* g = ptr<unsigned char>(a[0]);
+    std::lock_guard lock(g_guard_lock);
+    g[1] = 0;
+    g_guard_done.notify_all();
     return 0;
 }
 
@@ -266,7 +321,10 @@ std::string format_sysv(const char* f, SysvVaList* v) {
 i64 s_vprintf(const u64* a, std::string& note) {
     std::string text = format_sysv(ptr<char>(a[0]), ptr<SysvVaList>(a[1]));
     i64 n = i64(text.size());
-    M.stdout_text += text;
+    {
+        std::lock_guard lock(M.log_lock);
+        M.stdout_text += text;
+    }
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
     note = std::format("\"{}\"", text);
     return n;
@@ -281,7 +339,7 @@ i64 s_strncpy(const u64* a, std::string&) {
 i64 s_ldiv(const u64* a, std::string&) {
     i64 n = i64(a[0]), d = i64(a[1]);
     if (d == 0) stop("ldiv by zero");
-    M.frame->ret2 = u64(n % d);
+    current_frame()->ret2 = u64(n % d);
     return n / d;
 }
 
@@ -289,10 +347,10 @@ i64 s_ldiv(const u64* a, std::string&) {
 // picks sin, cos, -sin, -cos; x comes and goes in xmm0.
 i64 s_fsin(const u64* a, std::string& note) {
     float x;
-    std::memcpy(&x, M.frame->xmm0, 4);
+    std::memcpy(&x, current_frame()->xmm0, 4);
     float r = (a[0] & 1) ? std::cos(x) : std::sin(x);
     if (a[0] & 2) r = -r;
-    std::memcpy(M.frame->fret, &r, 4);
+    std::memcpy(current_frame()->fret, &r, 4);
     note = std::format("{} -> {}", x, r);
     return 0;
 }
@@ -451,15 +509,60 @@ i64 s_getpctype(const u64*, std::string&) { return i64(&tables()->ctype[128]); }
 i64 s_getptolower(const u64*, std::string&) { return i64(&tables()->lower[128]); }
 i64 s_getptoupper(const u64*, std::string&) { return i64(&tables()->upper[128]); }
 
-// gettimeofday(struct timeval *tv, tz): a fixed clock (2026-01-01, one millisecond on per
-// call), so that runs repeat exactly
+// gettimeofday(struct timeval *tv, tz): the real clock. (With the game's threads running, a run
+// doesn't repeat exactly anyway, and timed waits are measured against this clock.)
 i64 s_gettimeofday(const u64* a, std::string&) {
-    static u64 ms = 0;
-    ms++;
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
     if (a[0]) {
-        ptr<i64>(a[0])[0] = 1767225600 + i64(ms / 1000);
-        ptr<i64>(a[0])[1] = i64(ms % 1000) * 1000;
+        ptr<i64>(a[0])[0] = us / 1000000;
+        ptr<i64>(a[0])[1] = us % 1000000;
     }
+    return 0;
+}
+
+// ---- clocks ----
+
+// Seconds and nanoseconds, as FreeBSD's struct timespec: two 64-bit fields.
+void write_timespec(u64 at, std::chrono::nanoseconds t) {
+    ptr<i64>(at)[0] = t.count() / 1000000000;
+    ptr<i64>(at)[1] = t.count() % 1000000000;
+}
+
+// clock_gettime(clockid, struct timespec *): FreeBSD's CLOCK_REALTIME (0) is the wall clock;
+// the others (CLOCK_MONOTONIC 4 and the rest) count from an arbitrary start
+i64 clock_now(const u64* a) {
+    if (!a[1]) return 0;
+    if (a[0] == 0)
+        write_timespec(a[1], std::chrono::system_clock::now().time_since_epoch());
+    else
+        write_timespec(a[1], std::chrono::steady_clock::now().time_since_epoch());
+    return 0;
+}
+i64 s_clock_gettime(const u64* a, std::string&) { return clock_now(a); }
+
+// time(time_t *t)
+i64 s_time(const u64* a, std::string&) {
+    i64 s = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+    if (a[0]) *ptr<i64>(a[0]) = s;
+    return s;
+}
+
+// clock(): processor time, in FreeBSD's CLOCKS_PER_SEC (128); here, time since the run began
+i64 s_clock(const u64*, std::string&) {
+    auto t = std::chrono::steady_clock::now() - M.t0;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(t).count() * 128 / 1000;
+}
+
+// exp2f(float x): in and out through xmm0
+i64 s_exp2f(const u64*, std::string&) {
+    float x;
+    std::memcpy(&x, current_frame()->xmm0, 4);
+    float r = std::exp2(x);
+    std::memcpy(current_frame()->fret, &r, 4);
     return 0;
 }
 
@@ -510,10 +613,10 @@ const std::unordered_map<std::string, Standin>& standins() {
             {"sceKernelMapDirectMemory", s_map_direct},
             {"sceKernelMapFlexibleMemory", s_map_flexible},
             {"sceKernelMapNamedFlexibleMemory", s_map_flexible},
-            {"scePthreadCreate", s_thread_create},
             {"__stack_chk_fail", s_stack_chk_fail},
             {"__cxa_guard_acquire", s_guard_acquire},
             {"__cxa_guard_release", s_guard_release},
+            {"__cxa_guard_abort", s_guard_abort},
             {"sceKernelGetDirectMemorySize", s_direct_size},
             {"vprintf", s_vprintf},
             {"strncpy", s_strncpy},
@@ -535,21 +638,22 @@ const std::unordered_map<std::string, Standin>& standins() {
             {"_Getptolower", s_getptolower},
             {"_Getptoupper", s_getptoupper},
             {"gettimeofday", s_gettimeofday},
+            {"clock_gettime", s_clock_gettime},
+            {"sceKernelClockGettime", s_clock_gettime},
+            {"time", s_time},
+            {"clock", s_clock},
+            {"exp2f", s_exp2f},
+            {"srand", s_zero},
+            {"sceKernelQueryMemoryProtection", s_query_protection},
+            {"sceKernelStat", s_stat},
             {"sceSystemServiceParamGetInt", s_system_param},
             {"sceAppContentAppParamGetInt", s_app_param},
         };
-        // Imports for which 0 ("success", "nothing to do") is the right answer in a run with
-        // one thread: locks never contend, and exit handlers never run.
-        for (const char* n : {
-                 "_init_env", "atexit", "__cxa_atexit", "__cxa_guard_abort",
-                 "scePthreadMutexattrInit", "scePthreadMutexattrSettype",
-                 "scePthreadMutexattrDestroy", "scePthreadMutexInit", "scePthreadMutexDestroy",
-                 "scePthreadMutexLock", "scePthreadMutexUnlock", "scePthreadMutexTrylock",
-                 "scePthreadRwlockInit", "scePthreadRwlockRdlock", "scePthreadRwlockWrlock",
-                 "scePthreadRwlockUnlock", "scePthreadCondInit", "scePthreadCondSignal",
-                 "scePthreadCondBroadcast", "sceKernelCreateSema", "sceKernelSignalSema",
-                 "sceKernelPollSema"})
+        // Imports for which 0 ("success", "nothing to do") is the right answer: exit handlers
+        // never run.
+        for (const char* n : {"_init_env", "atexit", "__cxa_atexit"})
             t.emplace(n, s_zero);
+        add_thread_standins(t);
         return t;
     }();
     return table;

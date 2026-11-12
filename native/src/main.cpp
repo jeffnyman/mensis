@@ -15,15 +15,17 @@
 // * Each import stub (one 8-byte slot per import, which orbis_prep pointed every GOT entry at)
 //   is patched to jump to a small thunk, and from there to mensis_import_common (enter_*.S),
 //   which gathers the arguments into a Frame and calls mensis_dispatch.
-// * The game's thread pointer: TLS variant II, as in tools/loader.py. How the game reaches it
-//   differs by platform (platform_linux.cpp, platform_windows.cpp).
-// * The stand-ins (standins.cpp): tools/loader.py's, and more. Every other import returns 0
-//   and is counted as unhandled. Threads are recorded, not run.
+// * The game's thread pointer: TLS variant II, as in tools/loader.py, one block per thread.
+//   The game reads it with one instruction, mov rax, fs:[0], which is rewritten to read through
+//   gs instead (patch_thread_pointer_loads); each platform points gs at it its own way.
+// * The stand-ins (standins.cpp, threads.cpp). Every other import returns 0 and is counted as
+//   unhandled. The game's threads run, each on a thread of the loader's own.
 //
-// It stops at the first GPU submission, at the exit handler, at a fault with the registers and
-// the instructions there, after --calls import calls, or after --seconds (default 10).
+// It stops at the first GPU submission, at the exit handler, when the main thread's _start
+// returns, at a fault (with the registers and the instructions there), after --calls import
+// calls, or after --seconds (default 10).
 
-#include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,7 +42,6 @@ using namespace mensis;
 
 namespace mensis {
 Machine M;
-volatile int g_in_loader = 0, g_alarm = 0;
 
 void die(const std::string& what) {
     std::cerr << "mensis-loader: " << what << "\n";
@@ -49,6 +50,9 @@ void die(const std::string& what) {
 }  // namespace mensis
 
 namespace {
+
+thread_local GameThread* t_current = nullptr;
+thread_local Frame* t_frame = nullptr;
 
 // The two ELF structures the loader reads (64-bit, little-endian).
 struct ElfHeader {
@@ -70,13 +74,20 @@ std::string hex(i64 v) {
     return v < 0 ? std::format("-0x{:x}", u64(0) - u64(v)) : std::format("0x{:x}", u64(v));
 }
 
-void log_call(const Frame* f, const std::string& name, const std::string& tail) {
-    std::string line = std::format("{:6} 0x{:08x} {}(0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}) {}",
-                                   M.calls.size(), f->caller, name, f->args[0], f->args[1],
+// Under M.log_lock. The main thread's calls are written as tools/loader.py writes them; another
+// thread's carry its number: "[t3] name(...)".
+void log_call(GameThread* t, const Frame* f, const std::string& name, const std::string& tail) {
+    std::string who = t && t->id ? std::format("[t{}] ", t->id) : "";
+    std::string line = std::format("{:6} 0x{:08x} {}{}(0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}) {}",
+                                   M.calls.size(), f->caller, who, name, f->args[0], f->args[1],
                                    f->args[2], f->args[3], tail);
     M.calls.push_back(line);
     M.last_calls.push_back(line);
     if (M.last_calls.size() > 12) M.last_calls.pop_front();
+    if (t) {
+        t->last_call = line;
+        t->calls++;
+    }
 }
 
 // ---- loading ------------------------------------------------------------------------------
@@ -170,24 +181,48 @@ void patch_imports() {
     }
 }
 
+// The game reads its thread pointer with one instruction, in 17,127 places:
+//
+//     64 48 8B 04 25 00 00 00 00      mov rax, qword ptr fs:[0]
+//
+// (under TLS variant II, fs:[0] holds the thread pointer itself). Each becomes, at the same
+// length, a read through gs at the displacement the platform chose:
+//
+//     65 48 8B 04 25 <disp32>         mov rax, qword ptr gs:[disp]
+u64 patch_thread_pointer_loads(u32 disp) {
+    static const unsigned char load_fs[9] = {0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0};
+    u64 patched = 0;
+    for (auto [lo, hi] : M.code) {
+        auto* p = reinterpret_cast<unsigned char*>(lo);
+        auto* end = reinterpret_cast<unsigned char*>(hi) - sizeof load_fs;
+        while (p <= end) {
+            p = static_cast<unsigned char*>(std::memchr(p, 0x64, size_t(end - p) + 1));
+            if (!p) break;
+            if (std::memcmp(p, load_fs, sizeof load_fs) == 0) {
+                p[0] = 0x65;  // fs -> gs
+                std::memcpy(p + 5, &disp, 4);
+                patched++;
+                p += sizeof load_fs;
+            } else {
+                p++;
+            }
+        }
+    }
+    return patched;
+}
+
 void map(u64 addr, u64 size) {
     platform::reserve(addr, size);
     platform::commit(addr, size);
 }
 
-// The stack, heap, thread pointer and entry parameters, at tools/loader.py's addresses.
-// Returns the thread pointer.
-u64 setup() {
+// The main stack, heap, TLS area, entry parameters, thread stacks and sync objects.
+void setup() {
     map(STACK_TOP - STACK_SIZE, STACK_SIZE);
     platform::reserve(HEAP_BASE, HEAP_RESERVE);
-    // TLS, variant II: [image][thread pointer -> self]
-    map(TLS_BASE, 0x10000);
-    u64 block = up(M.tls.memsz, M.tls.align);
-    u64 tp = TLS_BASE + block + 0x100;
-    if (M.tls.filesz)
-        std::memcpy(reinterpret_cast<void*>(tp - block), reinterpret_cast<void*>(M.tls.vaddr),
-                    M.tls.filesz);
-    *reinterpret_cast<u64*>(tp) = tp;
+    platform::reserve(TLS_BASE, TLS_SLOT * MAX_THREADS);
+    platform::reserve(THREAD_STACKS, THREAD_STACK_SLOT * MAX_THREADS);
+    platform::reserve(SYNC_BASE, SYNC_RESERVE);
     // entry parameters: { int argc; int pad; const char *argv[3]; }, the exit handler and
     // LIBC_DATA
     map(PARAMS, 0x10000);
@@ -196,10 +231,12 @@ u64 setup() {
     struct { std::int32_t argc, pad; u64 argv[3]; } params = {1, 0, {PARAMS + 0x100, 0, 0}};
     std::memcpy(reinterpret_cast<void*>(PARAMS), &params, sizeof params);
     write_thunk(EXIT_STUB, u32(M.imports.size()));
-    return tp;
 }
 
-void write_outputs(const std::string& dir, double seconds) {
+// Under M.log_lock.
+void write_outputs(const std::string& reason) {
+    const std::string& dir = M.out_dir;
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count();
     std::filesystem::create_directories(dir);
     {
         std::ofstream f(dir + "/calls.log", std::ios::binary);
@@ -211,9 +248,9 @@ void write_outputs(const std::string& dir, double seconds) {
     std::vector<std::string> s = {
         "# Native loader run\n",
         std::format("Stopped: {}. {} import calls, {} distinct; {} calls to {} imports without a "
-                    "stand-in; {} threads asked for, not run. Ran for {:.2f} s.\n",
-                    M.stop_reason, M.calls.size(), M.counts.size(), unhandled_calls,
-                    M.unhandled.size(), M.threads.size(), seconds),
+                    "stand-in; {} threads. Ran for {:.2f} s.\n",
+                    reason, M.calls.size(), M.counts.size(), unhandled_calls, M.unhandled.size(),
+                    M.threads.size(), seconds),
     };
     for (const auto& n : M.notes) s.push_back(n + "\n");
     s.insert(s.end(), {"## Where it stopped\n", "```"});
@@ -222,10 +259,34 @@ void write_outputs(const std::string& dir, double seconds) {
         s.push_back(std::format("rip {:#x}, rsp {:#x}, rbp {:#x}, rax {:#x}, rdi {:#x}, rsi {:#x}",
                                 g.rip, g.rsp, g.rbp, g.rax, g.rdi, g.rsi));
         for (auto& line : platform::disassemble(g.rip)) s.push_back(line);
+        // The way back: the values on the stack that point into the game's code, nearest
+        // first. Most are return addresses (some are leftovers); look each up in Ghidra.
+        std::string back;
+        int found = 0;
+        bool on_stack = (g.rsp >= THREAD_STACKS && g.rsp < THREAD_STACKS + THREAD_STACK_SLOT * MAX_THREADS) ||
+                        (g.rsp >= STACK_TOP - STACK_SIZE && g.rsp < STACK_TOP);
+        for (u64 p = g.rsp; on_stack && found < 16 && p < g.rsp + 0x2000 && (p & 0xffff) != 0; p += 8) {
+            u64 v = *reinterpret_cast<const u64*>(p);
+            for (auto [lo, hi] : M.code)
+                if (v >= lo && v < hi && v < M.stubs_lo) {
+                    back += std::format(" {:#x}", v);
+                    found++;
+                }
+        }
+        if (!back.empty()) s.push_back("code addresses on the stack:" + back);
     } else {
-        s.push_back("(in the loader, during the last call below)");
+        s.push_back("(not at a fault: see the threads and the last calls below)");
     }
-    s.insert(s.end(), {"```\n", "Last calls:\n", "```"});
+    s.insert(s.end(), {"```\n", "## Threads\n", "| # | Name | Calls | State | Last call |",
+                       "|---:|---|---:|---|---|"});
+    for (const auto& t : M.threads) {
+        std::string last = t->last_call;
+        std::replace(last.begin(), last.end(), '|', '/');
+        auto first = last.find_first_not_of(' ');
+        s.push_back(std::format("| {} | {} | {} | {} | `{}` |", t->id, t->name, t->calls,
+                                t->state, first == std::string::npos ? "" : last.substr(first)));
+    }
+    s.insert(s.end(), {"", "Last calls:\n", "```"});
     s.insert(s.end(), M.last_calls.begin(), M.last_calls.end());
     s.insert(s.end(), {"```\n", "## Imports by first use\n", "| Import | Calls | Stand-in |",
                        "|---|---:|---|"});
@@ -234,57 +295,169 @@ void write_outputs(const std::string& dir, double seconds) {
                                 standins().contains(n) ? "yes" : ""));
     std::ofstream f(dir + "/summary.md", std::ios::binary);
     for (const auto& line : s) f << line << "\n";
+    f.close();
     for (size_t i = 0; i < 2 && i < s.size(); i++) std::cout << s[i] << "\n";
+    std::cout.flush();
 }
 
 }  // namespace
 
 namespace mensis {
 
+Frame* current_frame() { return t_frame; }
+GameThread* current_thread() { return t_current; }
+
 u64 alloc(u64 size, u64 align) {
     size = std::max<u64>(size, 1);
-    u64 addr = up(M.heap_top, std::max<u64>(align, 16));
-    if (addr + size > HEAP_BASE + HEAP_RESERVE) stop("heap reservation used up");
-    while (addr + size > M.heap_committed) {
-        platform::commit(M.heap_committed, HEAP_STEP);
-        M.heap_committed += HEAP_STEP;
+    u64 addr;
+    {
+        std::lock_guard lock(M.heap_lock);
+        addr = up(M.heap_top, std::max<u64>(align, 16));
+        if (addr + size <= HEAP_BASE + HEAP_RESERVE) {
+            while (addr + size > M.heap_committed) {
+                platform::commit(M.heap_committed, HEAP_STEP);
+                M.heap_committed += HEAP_STEP;
+            }
+            M.heap_top = addr + size;
+            M.allocs[addr] = size;
+            return addr;
+        }
     }
-    M.heap_top = addr + size;
-    M.allocs[addr] = size;
+    stop("heap reservation used up");
+}
+
+u64 sync_alloc(u64 size, u64 align) {
+    static std::mutex lock;
+    static u64 top = SYNC_BASE, committed = SYNC_BASE;
+    std::lock_guard g(lock);
+    u64 addr = up(top, std::max<u64>(align, 16));
+    if (addr + size > SYNC_BASE + SYNC_RESERVE) die("the loader's object area is full");
+    while (addr + size > committed) {
+        platform::commit(committed, 0x100000);
+        committed += 0x100000;
+    }
+    top = addr + size;
     return addr;
 }
 
 void stop(const std::string& reason) {
-    M.stop_reason = reason;
-    platform::leave();
+    GameThread* t = t_current;
+    if (!t) finish(reason);
+    t->stop_reason = reason;
+    mensis_restore(t->enter.saved_rsp);
+}
+
+void finish(const std::string& reason) {
+    static std::atomic<bool> finishing{false};
+    if (finishing.exchange(true)) {  // another thread is writing the outputs; it will end us
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    {
+        std::lock_guard lock(M.log_lock);
+        write_outputs(reason);
+    }
+    std::_Exit(0);
+}
+
+GameThread* new_thread(const std::string& name, u64 entry, u64 arg0, u64 arg1, u64 stack_size) {
+    std::lock_guard lock(M.log_lock);
+    u32 id = u32(M.threads.size());
+    if (id >= MAX_THREADS) die("too many threads");
+    auto t = std::make_unique<GameThread>();
+    t->id = id;
+    t->name = name;
+    t->handle = 0x1000 + id;
+    // Its TLS block, variant II: [image][thread pointer -> self]
+    u64 base = TLS_BASE + id * TLS_SLOT;
+    platform::commit(base, TLS_SLOT);
+    u64 block = up(M.tls.memsz, M.tls.align);
+    t->tp = base + block + 0x100;
+    if (M.tls.filesz)
+        std::memcpy(reinterpret_cast<void*>(t->tp - block),
+                    reinterpret_cast<void*>(M.tls.vaddr), M.tls.filesz);
+    *reinterpret_cast<u64*>(t->tp) = t->tp;
+    // Its stack: the main thread's is tools/loader.py's; each other gets its own 64 MiB slot,
+    // with the size it asked for and a megabyte more for the loader's own code, which runs on
+    // the game's stack during a call.
+    u64 top, limit;
+    if (id == 0) {
+        top = STACK_TOP - 0x1000 + 16;  // so _start starts at STACK_TOP - 0x1000 - 8
+        limit = STACK_TOP - STACK_SIZE;
+    } else {
+        u64 size = up(std::max<u64>(stack_size, 0x10000) + (1 << 20), 0x10000);
+        size = std::min(size, THREAD_STACK_SLOT);
+        top = THREAD_STACKS + u64(id) * THREAD_STACK_SLOT;
+        limit = top - size;
+        platform::commit(limit, size);
+    }
+    t->enter = {entry, arg0, arg1, top, limit, 0};
+    M.threads.push_back(std::move(t));
+    return M.threads.back().get();
+}
+
+void run_thread(GameThread* t) {
+    t_current = t;
+    platform::enter_thread(t->tp);
+    {
+        std::lock_guard lock(M.log_lock);
+        t->state = "running game code";
+    }
+    u64 r = mensis_enter_game(&t->enter);
+    // back on the loader's own stack
+    if (t->faulted) {
+        {
+            std::lock_guard lock(M.log_lock);
+            if (!M.fault.valid) M.fault = t->fault;
+            t->state = "faulted";
+        }
+        finish(t->id ? std::format("{} in thread {} ({})", t->fault_reason, t->id, t->name)
+                     : t->fault_reason);
+    }
+    if (!t->stop_reason.empty()) finish(t->stop_reason);
+    if (t->id == 0) finish(std::format("_start returned {:#x}", r));
+    {
+        std::lock_guard lock(M.log_lock);
+        t->state = t->exited ? "exited" : "returned";
+    }
+    std::lock_guard lock(t->m);
+    if (!t->exited) t->result = r;
+    t->finished = true;
+    t->cv.notify_all();
 }
 
 }  // namespace mensis
 
 extern "C" i64 mensis_dispatch(Frame* f) {
-    g_in_loader = 1;
+    GameThread* t = t_current;
+    t_frame = f;
     if (f->index >= M.imports.size())
         stop(std::format("exit handler called with {:#x}", f->args[0]));
     const std::string& name = M.imports[f->index].name;
-    if (M.max_calls && M.calls.size() >= M.max_calls)
-        stop(std::format("call budget ({}) used up", M.max_calls));
-    if (M.counts[name]++ == 0) M.first_use.push_back(name);
-    if (is_submit(name)) {
-        log_call(f, name, "stop");
-        stop("first GPU submission: " + name);
+    bool over = false;
+    {
+        std::lock_guard lock(M.log_lock);
+        if (M.max_calls && M.calls.size() >= M.max_calls) {
+            over = true;
+        } else {
+            if (M.counts[name]++ == 0) M.first_use.push_back(name);
+            if (t) t->state = "in " + name;
+            if (is_submit(name)) log_call(t, f, name, "stop");
+        }
     }
+    if (over) stop(std::format("call budget ({}) used up", M.max_calls));
+    if (is_submit(name)) stop("first GPU submission: " + name);
     std::string note;
     i64 ret = 0;
-    M.frame = f;
     if (Standin fn = M.standin[f->index]) {
         ret = fn(f->args, note);
     } else {
+        std::lock_guard lock(M.log_lock);
         M.unhandled[name]++;
         note = "unhandled";
     }
-    log_call(f, name, "-> " + hex(ret) + (note.empty() ? "" : " " + note));
-    g_in_loader = 0;
-    if (g_alarm) stop(std::format("time limit ({} s) reached", M.seconds));
+    std::lock_guard lock(M.log_lock);
+    log_call(t, f, name, "-> " + hex(ret) + (note.empty() ? "" : " " + note));
+    if (t) t->state = "running game code";
     return ret;
 }
 
@@ -304,22 +477,26 @@ int main(int argc, char** argv) {
                      "[--seconds N] [--calls N]\n";
         return 2;
     }
+    M.out_dir = pos[2];
 
     load_symbols(pos[1]);
     load_elf(pos[0]);
     patch_imports();
-    u64 tp = setup();
-    platform::prepare();
+    setup();
+    u32 disp = platform::prepare();
+    u64 patched = patch_thread_pointer_loads(disp);
+    M.notes.push_back(std::format(
+        "Thread pointer: {} loads of fs:[0] rewritten to read gs:[{:#x}].", patched, disp));
+    platform::install_fault_handler();
 
-    // _start is an ordinary function: it expects to have been called, with a return address on
-    // top of a 16-byte-aligned stack (its AVX code faults on a misaligned one). The exit
-    // handler serves as that return address.
-    u64 sp = STACK_TOP - 0x1000 - 8;
-    *reinterpret_cast<u64*>(sp) = EXIT_STUB;
+    // _start(params, exit handler): an ordinary function, called on a 16-byte-aligned stack.
+    GameThread* main_thread = new_thread("main", M.entry, PARAMS, EXIT_STUB, 0);
 
-    auto t0 = std::chrono::steady_clock::now();
-    platform::run(M.entry, PARAMS, EXIT_STUB, sp, tp);
-    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    write_outputs(pos[2], secs);
+    M.t0 = std::chrono::steady_clock::now();
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(M.seconds));
+        finish(std::format("time limit ({} s) reached", M.seconds));
+    }).detach();
+    run_thread(main_thread);  // never returns: the main thread's end finishes the run
     return 0;
 }

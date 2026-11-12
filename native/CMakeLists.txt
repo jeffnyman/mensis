@@ -34,18 +34,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(mensis-loader src/main.cpp src/standins.cpp ${PLATFORM_SOURCES})
+add_executable(mensis-loader src/main.cpp src/standins.cpp src/threads.cpp ${PLATFORM_SOURCES})
 target_compile_options(mensis-loader PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 
 if(WIN32)
     target_compile_definitions(mensis-loader PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
-    target_compile_options(mensis-loader PRIVATE
-        # On Linux the game and the loader each have their own fs (thread pointer), swapped at
-        # every import call. The stack protector reads its canary through fs, so a function that
-        # swaps fs, or a signal handler that arrives with the game's fs, would see the wrong one.
-        $<$<COMPILE_LANGUAGE:CXX>:-fno-stack-protector>
-    )
+    find_package(Threads REQUIRED)
+    target_link_libraries(mensis-loader PRIVATE Threads::Threads)
     # Position-independent, so nothing of ours lands at 0x400000 where the game must go.
     set_target_properties(mensis-loader PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_options(mensis-loader PRIVATE -pie)
