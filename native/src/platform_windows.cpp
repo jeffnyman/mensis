@@ -13,7 +13,10 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <cstdio>
 #include <format>
+#include <thread>
+#include <vector>
 
 #include "loader.hpp"
 
@@ -55,9 +58,97 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+// ---- the window (--window) ----
+//
+// The display's buffer on screen, scaled to the window, redrawn 30 times a second; the title
+// counts the flips and their rate.
+
+std::vector<u32> g_pixels;
+u32 g_width = 0, g_height = 0;
+u64 g_flips = 0, g_flips_then = 0;
+ULONGLONG g_then = 0;
+double g_rate = 0;
+
+LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_TIMER: {
+            g_flips = video_picture(g_pixels, g_width, g_height);
+            ULONGLONG now = GetTickCount64();
+            if (now - g_then >= 1000) {
+                g_rate = double(g_flips - g_flips_then) * 1000.0 / double(now - g_then);
+                g_flips_then = g_flips;
+                g_then = now;
+            }
+            std::wstring title = g_flips ? std::format(L"Mensis: frame {}, {:.1f} a second", g_flips, g_rate)
+                                         : std::wstring(L"Mensis: starting");
+            SetWindowTextW(w, title.c_str());
+            InvalidateRect(w, nullptr, FALSE);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(w, &ps);
+            RECT r;
+            GetClientRect(w, &r);
+            if (g_width) {
+                BITMAPINFO bi{};
+                bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                bi.bmiHeader.biWidth = LONG(g_width);
+                bi.bmiHeader.biHeight = -LONG(g_height);  // top down
+                bi.bmiHeader.biPlanes = 1;
+                bi.bmiHeader.biBitCount = 32;
+                bi.bmiHeader.biCompression = BI_RGB;
+                SetStretchBltMode(dc, HALFTONE);
+                StretchDIBits(dc, 0, 0, r.right, r.bottom, 0, 0, int(g_width), int(g_height),
+                              g_pixels.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+            } else {
+                FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            }
+            EndPaint(w, &ps);
+            return 0;
+        }
+        case WM_CLOSE:
+            finish("the window was closed");
+        default:
+            return DefWindowProcW(w, msg, wp, lp);
+    }
+}
+
 }  // namespace
 
 namespace mensis::platform {
+
+bool open_window() {
+    std::thread([] {
+        HINSTANCE inst = GetModuleHandleW(nullptr);
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = window_proc;
+        wc.hInstance = inst;
+        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
+        wc.lpszClassName = L"MensisDisplay";
+        RegisterClassW(&wc);
+        RECT r{0, 0, 960, 540};  // half the display's 1920x1080
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        HWND w = CreateWindowExW(0, wc.lpszClassName, L"Mensis: starting", WS_OVERLAPPEDWINDOW,
+                                 CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+                                 nullptr, nullptr, inst, nullptr);
+        if (!w) {
+            std::fprintf(stderr, "can't open the window (error %lu)\n", GetLastError());
+            return;
+        }
+        ShowWindow(w, SW_SHOW);
+        g_then = GetTickCount64();
+        SetTimer(w, 1, 33, nullptr);
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }).detach();
+    return true;
+}
 
 void reserve(u64 addr, u64 size) {
     void* p = VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE,

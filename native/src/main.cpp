@@ -4,7 +4,7 @@
 // logged (docs/the-loader.md).
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
-//                   [--frames N] [--log N] [--app0 DIR]...
+//                   [--frames N] [--log N] [--window] [--app0 DIR]...
 //
 // --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
 // lay folders over each other, first match wins. By default: work/update, then work/base (the
@@ -510,14 +510,17 @@ extern "C" i64 mensis_dispatch(Frame* f) {
 
 int main(int argc, char** argv) {
     std::vector<std::string> pos;
+    bool window = false, seconds_given = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if (a == "--app0" && i + 1 < argc) {
+        if (a == "--window") {
+            window = true;
+        } else if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
                    i + 1 < argc) {
             u64 v = std::stoull(argv[++i]);
-            if (a == "--seconds") M.seconds = unsigned(v);
+            if (a == "--seconds") M.seconds = unsigned(v), seconds_given = true;
             else if (a == "--calls") M.max_calls = v;
             else if (a == "--log") M.log_limit = v;
             else M.max_flips = v;
@@ -527,7 +530,7 @@ int main(int argc, char** argv) {
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N] [--frames N] [--log N] [--app0 DIR]...\n";
+                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--app0 DIR]...\n";
         return 2;
     }
     M.out_dir = pos[2];
@@ -552,11 +555,16 @@ int main(int argc, char** argv) {
     // _start(params, exit handler): an ordinary function, called on a 16-byte-aligned stack.
     GameThread* main_thread = new_thread("main", M.entry, PARAMS, EXIT_STUB, 0);
 
+    // With a window, the run goes on until it is closed, unless --seconds says otherwise.
+    if (window && !seconds_given) M.seconds = 0;
+    if (window && !platform::open_window())
+        M.notes.push_back("--window: there is no window on this platform yet; frame.bmp shows the screen at the end.");
     M.t0 = std::chrono::steady_clock::now();
-    std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(M.seconds));
-        finish(std::format("time limit ({} s) reached", M.seconds));
-    }).detach();
+    if (M.seconds)
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::seconds(M.seconds));
+            finish(std::format("time limit ({} s) reached", M.seconds));
+        }).detach();
     run_thread(main_thread);  // never returns: the main thread's end finishes the run
     return 0;
 }

@@ -39,6 +39,7 @@ target_compile_options(mensis-loader PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -We
 
 if(WIN32)
     target_compile_definitions(mensis-loader PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(mensis-loader PRIVATE user32 gdi32)
 else()
     find_package(Threads REQUIRED)
     target_link_libraries(mensis-loader PRIVATE Threads::Threads)

@@ -158,7 +158,7 @@ struct Machine {
 
     u64 max_calls = 0;
     u64 max_flips = 0;  // --frames: stop after this many flips
-    unsigned seconds = 10;
+    unsigned seconds = 10;  // 0: no time limit
     std::string out_dir;
     std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
     std::chrono::steady_clock::time_point t0;
@@ -192,7 +192,8 @@ std::vector<std::string> gpu_report();
 constexpr int EVENT_VIDEO_OUT = -13, EVENT_GRAPHICS = -14;
 constexpr u64 VIDEO_OUT_FLIP = 6, GRAPHICS_EOP = 0x40;
 void trigger_event(int filter, u64 ident, i64 data);  // to every queue that registered it
-std::vector<std::string> video_report();
+std::vector<std::string> video_report();  // and saves the buffer on screen to frame.bmp
+u64 video_picture(std::vector<u32>& pixels, u32& width, u32& height);  // for the window
 // printf's formatting, reading the arguments from a System V va_list at va (standins.cpp)
 std::string format_sysv(const char* format, u64 va);
 // Write to one of the game's FILE*s; false if it isn't one the loader opened (files.cpp)
@@ -216,6 +217,9 @@ void commit(u64 addr, u64 size);  // make reserved memory usable (read, write, e
 u32 prepare();
 void install_fault_handler();
 void enter_thread(u64 tp);  // on each host thread before it runs game code
+// A window showing the display (--window), on a thread of its own; false if this platform
+// has none. Closing it ends the run.
+bool open_window();
 std::vector<std::string> disassemble(u64 rip);  // the instructions at rip, for the summary
 }  // namespace platform
 

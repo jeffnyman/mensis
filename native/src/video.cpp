@@ -9,7 +9,9 @@
 // events, and in sceVideoOutGetFlipStatus.
 
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <map>
 #include <memory>
 
@@ -142,6 +144,8 @@ struct Display {
     std::mutex m;
     int rate = 0;  // sceVideoOutSetFlipRate: 0 = 60 a second, 1 = 30, 2 = 20
     std::vector<u64> buffers;
+    // The buffers' attribute (sceVideoOutRegisterBuffers'): all share one
+    u32 format = 0, tiling = 0, width = 0, height = 0, pitch = 0;
     std::deque<Flip> pending;  // asked for, waiting for a vertical blank
     int on_gpu = 0;  // flips that wait for their command buffers first
     u64 flips = 0;
@@ -236,6 +240,14 @@ i64 video_register_buffers(const u64* a, std::string& note) {
         g_display.buffers[a[1] + i] = at;
         where += std::format(" {:#x}", at);
     }
+    if (a[4]) {  // the attribute: pixel format, tiling mode, aspect ratio, width, height, pitch
+        const u32* attr = reinterpret_cast<const u32*>(a[4]);
+        g_display.format = attr[0];
+        g_display.tiling = attr[1];
+        g_display.width = attr[3];
+        g_display.height = attr[4];
+        g_display.pitch = attr[5];
+    }
     note = std::format("{} buffers from index {}:{}", a[3], a[1], where);
     return 0;
 }
@@ -303,11 +315,72 @@ void trigger_event(int filter, u64 ident, i64 data) {
     g_eq_cv.notify_all();
 }
 
+// The buffer on screen, as a 32-bit BMP, with its bytes as they are in memory: the PS4's
+// A8R8G8B8 is B, G, R, A in memory, as a BMP's pixels are. A tiled buffer (tiling mode 0) is
+// written as if it weren't, so a picture in it would come out scrambled. Returns how many of
+// its pixels aren't 0. Under g_display.m.
+u64 save_frame(const std::string& path) {
+    const Display& d = g_display;
+    u64 at = d.buffers[size_t(d.current)];
+    struct {
+        char magic[2] = {'B', 'M'};
+        u32 file_size, reserved = 0, offset = 54;
+        u32 header = 40;
+        std::int32_t width, height;  // negative: the rows top down
+        std::uint16_t planes = 1, bits = 32;
+        u32 compression = 0, image_size, x_ppm = 2835, y_ppm = 2835, colours = 0, important = 0;
+    } h;
+    static_assert(sizeof(h) == 56);  // 54, and the padding after the magic
+    u64 row = u64(d.width) * 4;
+    h.image_size = u32(row * d.height);
+    h.file_size = 54 + h.image_size;
+    h.width = std::int32_t(d.width);
+    h.height = -std::int32_t(d.height);
+    std::ofstream f(path, std::ios::binary);
+    f.write(h.magic, 2);
+    f.write(reinterpret_cast<const char*>(&h.file_size), 52);
+    u64 lit = 0;
+    for (u32 y = 0; y < d.height; y++) {
+        const u32* p = reinterpret_cast<const u32*>(at + u64(y) * d.pitch * 4);
+        for (u32 x = 0; x < d.width; x++) lit += p[x] != 0;
+        f.write(reinterpret_cast<const char*>(p), std::streamsize(row));
+    }
+    return lit;
+}
+
+// For the window: a copy of the buffer on screen (empty before the first flip) and its size;
+// returns the flips so far.
+u64 video_picture(std::vector<u32>& pixels, u32& width, u32& height) {
+    std::lock_guard lock(g_display.m);
+    const Display& d = g_display;
+    pixels.clear();
+    width = height = 0;
+    if (d.current >= 0 && size_t(d.current) < d.buffers.size() && d.width && d.height && d.pitch >= d.width) {
+        width = d.width;
+        height = d.height;
+        pixels.resize(size_t(width) * height);
+        for (u32 y = 0; y < height; y++)
+            std::memcpy(pixels.data() + size_t(y) * width,
+                        reinterpret_cast<const void*>(d.buffers[size_t(d.current)] + u64(y) * d.pitch * 4),
+                        size_t(width) * 4);
+    }
+    return d.flips;
+}
+
 std::vector<std::string> video_report() {
     std::lock_guard lock(g_display.m);
     if (!g_display.started) return {};
-    return {std::format("Display: {} flips shown, {} waiting, {} waiting for the GPU; buffer {} on screen.\n",
-                        g_display.flips, g_display.pending.size(), g_display.on_gpu, g_display.current)};
+    std::string s = std::format("Display: {} flips shown, {} waiting, {} waiting for the GPU; buffer {} on screen",
+                                g_display.flips, g_display.pending.size(), g_display.on_gpu, g_display.current);
+    const Display& d = g_display;
+    if (d.current >= 0 && size_t(d.current) < d.buffers.size() && d.width && d.height && d.pitch >= d.width) {
+        std::filesystem::create_directories(M.out_dir);
+        u64 lit = save_frame(M.out_dir + "/frame.bmp");
+        s += std::format(" (saved to frame.bmp: {}x{}, {}; {} of its {} pixels not 0)", d.width, d.height,
+                         d.tiling == 0 ? "tiled, written as if linear" : "linear", lit,
+                         u64(d.width) * d.height);
+    }
+    return {s + ".\n"};
 }
 
 void add_video_standins(std::unordered_map<std::string, Standin>& t) {

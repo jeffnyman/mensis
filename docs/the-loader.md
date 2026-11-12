@@ -111,8 +111,10 @@ work/native/linux/mensis-loader work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eb
 
 It writes the same `calls.log` and `summary.md` into `work/loader-native/`, plus `stdout.txt`,
 whatever the game printed, `files/`, the folders the game may write to, and `gpu/`, what the
-game asked the GPU to do. Add `--frames 60` to stop after 60 frames, or `--seconds 20` to run
-longer than the default 10. The two builds run
+game asked the GPU to do, and `frame.bmp`, the frame on screen when it stopped. Add `--frames
+60` to stop after 60 frames, or `--seconds 20` to run longer than the default 10. On Windows,
+`--window` opens a window on the display, whose title counts the frames as they are shown; the
+run then goes on until the window is closed. The two builds run
 the same code: up to the point where the game's threads started running, they made the same
 calls, from the same places, with the same results.
 
@@ -182,9 +184,13 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   a wait on memory (`WAIT_REG_MEM`) waits, because the game and the GPU keep in step through
   memory: a label written when some work is done, which the CPU or another queue waits to
   see. The first six submissions of each queue are written to `gpu/`, decoded.
-* **The display** keeps the timing without showing anything: one flip at each vertical blank,
-  60 a second or the rate the game asks for, each reported in `sceVideoOutGetFlipStatus` and
-  as an event to the event queues that asked for one (`sceKernelWaitEqueue`).
+* **The display** keeps the timing: one flip at each vertical blank, 60 a second or the rate
+  the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
+  queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
+  flip chose: in the window (`--window`, Windows; a copy 30 times a second, scaled to the
+  window, through GDI) and, at the end, in `frame.bmp`. The buffers are tiled, the GPU's own
+  arrangement of pixels, and both show them as if they weren't, which will need undoing once
+  there is a picture in them.
 * **Sound** is taken and discarded, at the pace of a real audio port: `sceAudioOutOutput`
   waits until the port's next buffer is due (256 samples at 48 kHz, every 5.3 ms), as the
   sound library's audio thread expects.
@@ -333,6 +339,13 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     than by the loader. The time between frames goes where it goes on the console: the main
     thread reads the clock in a loop (`gettimeofday`, 238 million of the calls) until its next
     frame is due. Linux shows 504 frames in the same time.
+21. **The screen is black.** The game's three frame buffers are 1920×1080, 32 bits a pixel,
+    tiled, 8,355,840 bytes apart (1,088 rows: the height rounded up to the GPU's tiles). The one
+    on screen after 120 frames has 0 of its 2,073,600 pixels set. Nothing else would be
+    expected: a GPU writes pixels by running shaders, the game's own programs for the GPU's
+    cores, and here none run. The window, its title counting 30 frames a second over black, is
+    where they will show. Running the shaders, translated from the GPU's instruction set (AMD's
+    GCN) to something a PC's GPU runs, is the next part, and the largest.
 
 ## Files
 
@@ -342,4 +355,4 @@ the repository's root, or name the folders with `--app0` (more than once, first 
 | `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/` and `gpu/` (the first submissions of each queue, decoded) |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded) and `frame.bmp` (the screen when it stopped) |
