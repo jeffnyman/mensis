@@ -85,7 +85,7 @@ and character models rendered from the game's own meshes and textures (`flver.py
   on Windows or Linux, the game gets past an engine panic, through 4.8 GiB of memory claimed
   up front, into 48 running threads and its own files, with sound up, and on past its
   splash screen, to 30 frames a second, its pace on a PS4, with the commands for its draws
-  followed but not yet drawn.
+  followed but not yet drawn, and the 36 GPU programs they use disassembled.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
@@ -141,8 +141,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     rows' working names tell them.
 16. [The loader](docs/the-loader.md): the game's own start-up run under a CPU emulator, every
     system call it makes, and the AVX instruction that stops it: what an emulator has to do first.
-    Then the same run natively, in C++, with the game's threads and files, and the GPU's
-    command stream followed, frame after frame.
+    Then the same run natively, in C++, with the game's threads and files, the GPU's command
+    stream followed, frame after frame, and its shaders disassembled.
 
 For short answers that point into all of these, start with [questions and
 answers](docs/questions-and-answers.md).

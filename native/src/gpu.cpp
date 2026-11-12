@@ -11,7 +11,13 @@
 // memory: a fence value written at the end of some work, which the CPU (or another queue) waits
 // to see. The first few submissions of each queue are also written out, decoded, to
 // <out>/gpu/.
+//
+// The shader registers each queue sets are kept, so that each draw and dispatch shows which
+// programs it would run. At the end each program is written out, disassembled (gcn.cpp), to
+// <out>/shaders/.
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <filesystem>
@@ -164,12 +170,48 @@ struct Queue {
     // under g_stats_lock
     u64 submissions = 0, packets = 0, draws = 0, dispatches = 0;
     std::string waiting;  // the wait it's in now, if any
+
+    std::array<u32, 0x400> sh{};  // the SH registers as SET_SH_REG left them (the worker's own)
+};
+
+// A shader program a draw or dispatch used: where, its resource words (register and other
+// counts), its user data (the values its first SGPRs start with) when first used, and how
+// often it was used.
+struct Shader {
+    std::string stage;  // vs, ps, cs; fetch (called from a vs)
+    u64 addr = 0;
+    u32 rsrc1 = 0, rsrc2 = 0;
+    std::array<u32, 16> user{};
+    std::array<u32, 3> threads{};  // cs: the threads in a group
+    u64 uses = 0, order = 0;
+    std::string from;  // the queue, or for a fetch shader the vertex shader that calls it
 };
 
 std::mutex g_stats_lock;
 std::map<std::string, u64> g_ops;  // packets of each kind, all queues
 std::map<int, std::unique_ptr<Queue>> g_queues;  // 0 is the graphics queue; compute ids from 1
 std::mutex g_queues_lock;
+std::map<std::pair<std::string, u64>, Shader> g_shaders;  // under g_stats_lock
+
+// The program a stage's registers point at (lo: the address >> 8, and its top bits), noted
+// as used; returns its address, 0 if none.
+u64 note_shader(Queue& q, const char* stage, u32 lo, u32 rsrc, u32 user) {
+    u64 addr = (u64(q.sh[lo]) << 8) | (u64(q.sh[lo + 1] & 0xff) << 40);
+    if (!addr) return 0;
+    std::lock_guard lock(g_stats_lock);
+    Shader& s = g_shaders[{stage, addr}];
+    if (!s.uses++) {
+        s.stage = stage;
+        s.addr = addr;
+        s.rsrc1 = q.sh[rsrc];
+        s.rsrc2 = q.sh[rsrc + 1];
+        std::copy_n(q.sh.begin() + user, 16, s.user.begin());
+        if (s.stage == "cs") s.threads = {q.sh[0x207] & 0xffff, q.sh[0x208] & 0xffff, q.sh[0x209] & 0xffff};
+        s.order = g_shaders.size();
+        s.from = q.name;
+    }
+    return addr;
+}
 
 struct Walk {
     Queue& q;
@@ -215,6 +257,17 @@ struct Walk {
                 if (op == 0x15 || op == 0x16) q.dispatches++;
             }
             std::string what = list_only ? describe(op, b, body) : execute(op, b, body, depth, list_only);
+            if (!list_only) {
+                if (op == 0x76 && body >= 2)  // SET_SH_REG: kept, for the draws and dispatches
+                    for (u32 k = 1; k < body && (b[0] & 0xffff) + k - 1 < q.sh.size(); k++)
+                        q.sh[(b[0] & 0xffff) + k - 1] = b[k];
+                if (is_draw(op)) {
+                    u64 vs = note_shader(q, "vs", 0x48, 0x4a, 0x4c), ps = note_shader(q, "ps", 0x08, 0x0a, 0x0c);
+                    what += std::format(" [vs {:#x}, ps {}]", vs, ps ? std::format("{:#x}", ps) : "none");
+                }
+                if (op == 0x15 || op == 0x16)
+                    what += std::format(" [cs {:#x}]", note_shader(q, "cs", 0x20c, 0x212, 0x240));
+            }
             line(depth, std::format("{:5} {}{}", i, label, what.empty() ? "" : " " + what));
             if ((op == 0x3f || op == 0x33) && body >= 3) {  // an indirect buffer: its packets, in place
                 u64 at = (b[0] & ~3u) | (u64(b[1] & 0xffff) << 32);
@@ -482,7 +535,102 @@ void gpu_ding_dong(int id, u32 offset) {
     push(q, std::move(job));
 }
 
+namespace {
+
+// The shaders the draws and dispatches used, each written to <out>/shaders/ as its code
+// (.bin) and disassembled (.txt); a vertex shader's fetch shader, the routine it calls to
+// load its vertices, is found through the user data it was given, and written too.
+std::vector<std::string> shader_report() {
+    std::vector<Shader> list;
+    {
+        std::lock_guard lock(g_stats_lock);
+        for (auto& [key, sh] : g_shaders) list.push_back(sh);
+    }
+    if (list.empty()) return {};
+    std::sort(list.begin(), list.end(), [](const Shader& a, const Shader& b) { return a.order < b.order; });
+    auto dir = std::filesystem::path(M.out_dir) / "shaders";
+    std::filesystem::create_directories(dir);
+    std::map<u64, bool> fetch_seen;
+    std::map<std::string, u64> per_stage;
+    u64 unknown = 0, instructions = 0;
+    std::vector<std::string> rows;
+    constexpr size_t SHOWN = 30;
+    for (size_t k = 0; k < list.size(); k++) {
+        Shader sh = list[k];  // a copy: list grows as fetch shaders are found
+        std::string name = std::format("{}-{:x}", sh.stage, sh.addr);
+        per_stage[sh.stage]++;
+        u64 avail = 0;
+        {
+            std::lock_guard lock(M.heap_lock);
+            if (sh.addr >= M.heap_base && sh.addr < M.heap_top) avail = std::min<u64>(M.heap_top - sh.addr, 256 * 1024);
+        }
+        if (avail < 4) {
+            rows.push_back(std::format("| {} | `{}` | (not in the game's memory) | | | | | | {} |", sh.stage, name, sh.uses));
+            continue;
+        }
+        const u32* code = reinterpret_cast<const u32*>(sh.addr);
+        GcnListing g = gcn_disassemble(code, u32(avail / 4));
+        unknown += g.unknown;
+        instructions += g.instructions;
+        bool fetch = sh.stage == "fetch";
+        u32 user_sgprs = fetch ? 0 : (sh.rsrc2 >> 1) & 0x1f;
+        for (int c : g.calls) {
+            if (c < 0 || u32(c) + 1 >= user_sgprs) continue;
+            u64 at = sh.user[size_t(c)] | (u64(sh.user[size_t(c) + 1]) << 32);
+            if (!at || fetch_seen[at]) continue;
+            fetch_seen[at] = true;
+            Shader f;
+            f.stage = "fetch";
+            f.addr = at;
+            f.uses = sh.uses;
+            f.from = name;
+            list.push_back(f);
+        }
+        u32 vgprs = ((sh.rsrc1 & 0x3f) + 1) * 4, sgprs = (((sh.rsrc1 >> 6) & 0xf) + 1) * 8;
+        std::ofstream(dir / (name + ".bin"), std::ios::binary)
+            .write(reinterpret_cast<const char*>(code), std::streamsize(g.bytes));
+        std::ofstream f(dir / (name + ".txt"), std::ios::binary);
+        f << std::format("{} shader at {:#x}, {} bytes, {} instructions", sh.stage, sh.addr, g.bytes, g.instructions);
+        if (g.unknown) f << std::format(" ({} not decoded)", g.unknown);
+        f << "\n";
+        if (fetch) {
+            f << std::format("called by {} (the address is in its user data); returns with s_setpc_b64\n", sh.from);
+        } else {
+            f << std::format("first used on the {} queue; used {} times\n", sh.from, sh.uses);
+            f << std::format("registers: {} VGPRs, {} SGPRs; {} user SGPRs, set before it starts:", vgprs, sgprs, user_sgprs);
+            for (u32 u = 0; u < user_sgprs && u < 16; u++) f << std::format(" s{}={:#x}", u, sh.user[u]);
+            f << "\n";
+            if (sh.stage == "cs") f << std::format("threads in a group: {} x {} x {}\n", sh.threads[0], sh.threads[1], sh.threads[2]);
+        }
+        if (g.has_footer)
+            f << std::format("footer \"OrbShdr\" at +{:#x}; hash {:08x} {:08x}\n", g.footer_at, g.hash0, g.hash1);
+        f << "\n";
+        for (const auto& line : g.lines) f << line << "\n";
+        if (rows.size() < SHOWN)
+            rows.push_back(fetch ? std::format("| fetch | `{}` | {} | {} | {} | | | | (from `{}`) |", name, g.bytes,
+                                               g.instructions, g.unknown, sh.from)
+                                 : std::format("| {} | `{}` | {} | {} | {} | {} | {} | {} | {} |", sh.stage, name, g.bytes,
+                                               g.instructions, g.unknown, vgprs, sgprs, user_sgprs, sh.uses));
+    }
+    std::string counts;
+    for (auto& [stage, n] : per_stage) counts += std::format("{}{} {}", counts.empty() ? "" : ", ", n, stage);
+    std::vector<std::string> s = {
+        "## Shaders\n",
+        std::format("{} programs ({}), {} instructions, {} of them not decoded; each is in `shaders/`, "
+                    "disassembled. In the order first used:\n",
+                    list.size(), counts, instructions, unknown),
+        "| Stage | Program | Bytes | Instructions | Not decoded | VGPRs | SGPRs | User SGPRs | Used |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|"};
+    s.insert(s.end(), rows.begin(), rows.end());
+    if (list.size() > rows.size()) s.push_back(std::format("\n({} more in `shaders/`.)", list.size() - rows.size()));
+    s.push_back("");
+    return s;
+}
+
+}  // namespace
+
 std::vector<std::string> gpu_report() {
+    std::vector<std::string> shaders = shader_report();
     std::vector<std::string> s;
     std::lock_guard lock(g_queues_lock);
     if (g_queues.empty()) return s;
@@ -498,6 +646,7 @@ std::vector<std::string> gpu_report() {
     std::sort(by.rbegin(), by.rend());
     for (auto& [c, n] : by) s.push_back(std::format("| {} | {} |", n, c));
     s.push_back("");
+    s.insert(s.end(), shaders.begin(), shaders.end());
     return s;
 }
 

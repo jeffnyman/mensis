@@ -110,8 +110,9 @@ work/native/linux/mensis-loader work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eb
 ```
 
 It writes the same `calls.log` and `summary.md` into `work/loader-native/`, plus `stdout.txt`,
-whatever the game printed, `files/`, the folders the game may write to, and `gpu/`, what the
-game asked the GPU to do, and `frame.bmp`, the frame on screen when it stopped. Add `--frames
+whatever the game printed, `files/`, the folders the game may write to, `gpu/`, what the
+game asked the GPU to do, `shaders/`, the GPU programs its draws and dispatches used,
+disassembled, and `frame.bmp`, the frame on screen when it stopped. Add `--frames
 60` to stop after 60 frames, or `--seconds 20` to run longer than the default 10. On Windows,
 `--window` opens a window on the display, whose title counts the frames as they are shown; the
 run then goes on until the window is closed. The two builds run
@@ -184,6 +185,16 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   a wait on memory (`WAIT_REG_MEM`) waits, because the game and the GPU keep in step through
   memory: a label written when some work is done, which the CPU or another queue waits to
   see. The first six submissions of each queue are written to `gpu/`, decoded.
+* **The shaders.** The command processor keeps the shader registers each queue sets, so each
+  draw and dispatch names the programs it would run (in `gpu/`, `[vs ..., ps ...]`). At the
+  end, each program is written to `shaders/`: its code (`.bin`) and, disassembled by `gcn.cpp`,
+  a listing (`.txt`) with its register counts and the user data it started with. The GPU is
+  AMD's GCN of the second generation (Sea Islands), and the disassembler follows AMD's
+  reference for its instruction set. A program's length comes from the footer the PS4's
+  compiler puts after its code ("OrbShdr"). A vertex shader doesn't load its vertices itself:
+  it calls a fetch shader (`s_swappc_b64`), whose address is in its user data, and those are
+  written out too. LLVM's disassembler (`llvm-mc`) only reads later GCN generations, so the
+  listings were checked by hand against the reference, not against another tool.
 * **The display** keeps the timing: one flip at each vertical blank, 60 a second or the rate
   the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
   queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
@@ -346,13 +357,26 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     cores, and here none run. The window, its title counting 30 frames a second over black, is
     where they will show. Running the shaders, translated from the GPU's instruction set (AMD's
     GCN) to something a PC's GPU runs, is the next part, and the largest.
+22. **The game's shaders.** In 20 seconds the draws and dispatches use 36 programs: 11 vertex
+    shaders, 9 pixel shaders, 6 compute shaders and 10 fetch shaders, 806 instructions in all,
+    every one decoded. They are short, from 6 instructions to 76, and each but the fetch
+    shaders starts the same way, with `s_mov_b32 vcc_hi, ...`, a mark of the PS4's compiler.
+    The first draw (`DRAW_INDEX_AUTO`, 3 vertices) is a triangle that covers the screen: its
+    vertex shader, 13 instructions, makes the corners from the vertex's number alone, with no
+    vertex buffer. Its pixel shader reads the source image at the pixel and puts each of red,
+    green and blue through a curve of its own, a layer of a 3-layer texture: a colour
+    correction. The compute shader used most, 19 instructions, copies a buffer into an image,
+    one element a thread, 64 threads a group. Most of the other vertex shaders call a fetch
+    shader for two or three attributes and multiply the position by a 2×4 matrix from their
+    constants: flat shapes, as a splash screen and its text would be. Linux, slower to reach
+    the later screens, used 27 of them in the same time, with the same listings.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded) and `frame.bmp` (the screen when it stopped) |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled) and `frame.bmp` (the screen when it stopped) |

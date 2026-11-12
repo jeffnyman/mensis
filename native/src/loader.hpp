@@ -187,7 +187,17 @@ void gpu_submit(u32 count, const u64* dcbs, const u32* dcb_bytes, const u64* ccb
                 const u32* ccb_bytes, std::function<void()> then);
 void gpu_map_compute(int id, u64 ring, u32 dwords, u64 rptr_addr);
 void gpu_ding_dong(int id, u32 offset);
-std::vector<std::string> gpu_report();
+std::vector<std::string> gpu_report();  // and writes the shaders out, disassembled
+// The GPU's shaders (gcn.cpp): the code at `code`, up to `dwords` long, disassembled to its
+// end (the footer's length; with no footer, the first s_endpgm or return)
+struct GcnListing {
+    std::vector<std::string> lines;
+    u32 bytes = 0, instructions = 0, unknown = 0;
+    bool has_footer = false;
+    u32 hash0 = 0, hash1 = 0, footer_at = 0;
+    std::vector<int> calls;  // s_swappc_b64 / s_setpc_b64 to an SGPR pair: its first SGPR
+};
+GcnListing gcn_disassemble(const u32* code, u32 dwords);
 // Events (video.cpp): the kevent filters and idents the display and the GPU report
 constexpr int EVENT_VIDEO_OUT = -13, EVENT_GRAPHICS = -14;
 constexpr u64 VIDEO_OUT_FLIP = 6, GRAPHICS_EOP = 0x40;
