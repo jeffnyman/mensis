@@ -53,35 +53,39 @@ u32 u(float x) {
     return r;
 }
 
-float half(u32 h) {
-    u32 s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
-    float v;
-    if (e == 0) v = std::ldexp(float(m), -24);
-    else if (e == 31) v = m ? NAN : INFINITY;
-    else v = std::ldexp(float(m | 0x400), int(e) - 25);
-    return s ? -v : v;
+float half(u32 h) {  // bit by bit: a normal half's exponent and mantissa move into place
+    u32 sign = (h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+    if (e == 0) {
+        float v = float(m) * (1.0f / 16777216.0f);  // a denormal: m * 2^-24
+        return sign ? -v : v;
+    }
+    if (e == 31) return f(sign | 0x7f800000 | (m << 13));
+    return f(sign | ((e + 112) << 23) | (m << 13));
 }
 
 namespace {
-u32 to_half_mode(float x, bool toward_zero) {
-    u32 b = u(x), s = (b >> 16) & 0x8000;
-    float a = std::fabs(x);
-    if (std::isnan(x)) return s | 0x7e00;
-    if (a >= 65520.0f && !toward_zero) return s | 0x7c00;
-    if (a >= 65504.0f) return s | (std::isinf(a) && !toward_zero ? 0x7c00 : 0x7bff);
-    if (a < std::ldexp(1.0f, -24)) return s;  // too small even for a denormal
-    int e;
-    float m = std::frexp(a, &e);  // a = m * 2^e, m in [0.5, 1)
-    int he = e + 14;  // the half's biased exponent
-    float scaled = he <= 0 ? std::ldexp(a, 24) : std::ldexp(m, 11);  // denormal: units of 2^-24
-    u32 q = u32(toward_zero ? std::trunc(scaled) : std::nearbyint(scaled));
-    if (he <= 0) return s | q;  // a denormal (q may round up into the smallest normal: still right)
-    if (q == 0x800) {  // rounded up to the next power of two
-        q = 0x400;
-        he++;
+u32 to_half_mode(float x, bool toward_zero) {  // rounded to nearest even, or toward zero
+    u32 b = u(x), sign = (b >> 16) & 0x8000, e = (b >> 23) & 0xff, m = b & 0x7fffff;
+    if (e == 255) return sign | 0x7c00 | (m ? 0x200 : 0);
+    int he = int(e) - 112;  // the half's exponent
+    if (he >= 31) return sign | (toward_zero ? 0x7bff : 0x7c00);
+    u32 q, shift;
+    if (he <= 0) {  // a denormal half, or 0
+        if (he < -10) return sign;
+        m |= 0x800000;
+        shift = u32(14 - he);
+    } else {
+        shift = 13;
     }
-    if (he >= 31) return s | 0x7c00;
-    return s | (u32(he) << 10) | (q & 0x3ff);
+    q = m >> shift;
+    if (!toward_zero) {
+        u32 rem = m & ((1u << shift) - 1), halfway = 1u << (shift - 1);
+        if (rem > halfway || (rem == halfway && (q & 1))) q++;
+    }
+    if (he <= 0) return sign | q;  // rounding up into the smallest normal is still right
+    if (q == 0x400) q = 0, he++;
+    if (he >= 31) return sign | (toward_zero ? 0x7bff : 0x7c00);
+    return sign | (u32(he) << 10) | q;
 }
 }  // namespace
 
@@ -97,7 +101,10 @@ std::map<std::string, u64> notes() {
     return g_notes;
 }
 
+std::atomic<u32> g_generation{1};  // a draw's or dispatch's number, for the block cache
+
 void Memory::snapshot() {
+    g_generation++;
     ranges.clear();
     {
         std::lock_guard lock(M.heap_lock);
@@ -293,6 +300,19 @@ u64 element_address(u64 base, u32 tiling, u32 bytes, u32 pitch, u32 height, u32 
     return base + (slice * rows + y) * pitch * bytes + u64(x) * bytes;
 }
 
+void Image::prepare(const Memory& mem) {
+    Layout l = layout(dfmt);
+    bytes = u32(l.bytes);
+    block = is_block(dfmt);
+    epitch = block ? (std::max(pitch, width) + 3) / 4 : std::max(pitch, width);
+    eheight = block ? (height + 3) / 4 : height;
+    u64 slices = std::max({depth, last_array + 1, type == 11 ? 6u : 1u});
+    bool micro = tiling == 5 || tiling == 9 || tiling == 13 || tiling == 19;
+    u64 size = micro ? (u64(epitch) + 7) / 8 * ((u64(eheight) + 7) / 8) * 64 * bytes * slices
+                     : u64(epitch) * ((u64(eheight) + 7) / 8 * 8) * bytes * slices;
+    all_ok = bytes && mem.ok(base, size);
+}
+
 namespace {
 
 // ---- block compression (BC1-5), one texel of a 4x4 block ----
@@ -372,34 +392,68 @@ struct Sampler {
 
 // One texel of slice `slice`, as the shader would see it before dst_sel: floats, or integers
 // for uint/sint formats. Outside the image: 0.
+// A compressed block's 16 pixels, decoded once: a small cache for each thread, emptied for
+// each draw or dispatch (a texture's memory may change between them). Null if the format
+// isn't decoded.
+struct BlockCache {
+    u64 tag[1024];
+    u32 generation[1024];
+    float px[1024][64];
+};
+
+const float* cached_block(u32 dfmt, u64 at) {
+    thread_local std::unique_ptr<BlockCache> cache;
+    if (!cache) {
+        cache = std::make_unique<BlockCache>();
+        std::memset(cache->generation, 0, sizeof cache->generation);
+    }
+    u32 g = g_generation.load(std::memory_order_relaxed);
+    size_t i = ((at >> 3) ^ (at >> 13)) & 1023;
+    u64 tag = at ^ (u64(dfmt) << 56);
+    float* px = cache->px[i];
+    if (cache->tag[i] == tag && cache->generation[i] == g) return px;
+    for (u32 y = 0; y < 4; y++)
+        for (u32 x = 0; x < 4; x++)
+            if (!block_texel(dfmt, reinterpret_cast<const unsigned char*>(at), x, y, px + (y * 4 + x) * 4)) return nullptr;
+    cache->tag[i] = tag;
+    cache->generation[i] = g;
+    return px;
+}
+
+// One texel of slice `slice`, as the shader would see it before dst_sel: floats, or integers
+// for uint/sint formats. Outside the image: 0. The image is prepared.
 void texel(const Image& t, const Memory& mem, int x, int y, u32 slice, u32 o[4]) {
     o[0] = o[1] = o[2] = 0;
     o[3] = is_int(t.nfmt) ? 1 : u(1.0f);
     if (x < 0 || y < 0 || u32(x) >= t.width || u32(y) >= t.height) return;
-    Layout l = layout(t.dfmt);
-    if (!l.count) {
+    if (!t.bytes) {
         note(std::format("images of data format {}", t.dfmt));
         return;
     }
-    if (is_block(t.dfmt)) {
-        u32 pitch = (std::max(t.pitch, t.width) + 3) / 4, h = (t.height + 3) / 4;
-        u64 at = element_address(t.base, t.tiling, u32(l.bytes), pitch, h, u32(x) / 4, u32(y) / 4, slice);
-        if (!at || !mem.ok(at, u64(l.bytes))) return;
-        float c[4];
-        if (!block_texel(t.dfmt, reinterpret_cast<const unsigned char*>(at), u32(x) & 3, u32(y) & 3, c)) {
+    if (t.block) {
+        u64 at = element_address(t.base, t.tiling, t.bytes, t.epitch, t.eheight, u32(x) / 4, u32(y) / 4, slice);
+        if (!at || (!t.all_ok && !mem.ok(at, t.bytes))) return;
+        const float* c = cached_block(t.dfmt, at);
+        if (!c) {
             note(std::format("images compressed as BC{} (not decoded; read as 0)", t.dfmt - 34));
             return;
         }
-        for (int k = 0; k < 4; k++) {
-            float v = c[k];
-            if (t.nfmt == 9 && k < 3) v = srgb_to_linear(v);
-            o[k] = u(v);
-        }
+        c += ((u32(y) & 3) * 4 + (u32(x) & 3)) * 4;
+        for (int k = 0; k < 4; k++) o[k] = u(t.nfmt == 9 && k < 3 ? srgb_to_linear(c[k]) : c[k]);
         return;
     }
-    u64 at = element_address(t.base, t.tiling, u32(l.bytes), std::max(t.pitch, t.width), t.height, u32(x), u32(y), slice);
-    if (!at || !mem.ok(at, u64(l.bytes))) return;
-    unpack(t.dfmt, t.nfmt, reinterpret_cast<const unsigned char*>(at), o);
+    u64 at = element_address(t.base, t.tiling, t.bytes, t.epitch, t.eheight, u32(x), u32(y), slice);
+    if (!at || (!t.all_ok && !mem.ok(at, t.bytes))) return;
+    const auto* p = reinterpret_cast<const unsigned char*>(at);
+    if (t.dfmt == 10 && t.nfmt == 0) {  // 8-bit RGBA, the usual
+        for (int k = 0; k < 4; k++) o[k] = u(float(p[k]) * (1.0f / 255.0f));
+        return;
+    }
+    if (t.nfmt == 7 && (t.dfmt == 4 || t.dfmt == 11 || t.dfmt == 14)) {  // 32-bit floats: as they are
+        std::memcpy(o, p, t.bytes);
+        return;
+    }
+    unpack(t.dfmt, t.nfmt, p, o);
 }
 
 void swizzle(const u32 sel[4], bool integer, const u32 in[4], u32 out[4]) {
@@ -991,6 +1045,72 @@ void vop(Wave& w, const Vop& o) {
         default: break;
     }
     bool fr = float_result(op);
+    // the usual ops: straight loops over the lanes, the sources gathered first
+    {
+        alignas(32) u32 A[LANES], B[LANES], C[LANES], R[LANES];
+        auto gather = [&](const Src& s, int k, u32* out) {
+            if (s.v)
+                for (int l = 0; l < LANES; l++) out[l] = ((*s.v)[size_t(l)] & andm[k]) ^ xorm[k];
+            else
+                for (int l = 0; l < LANES; l++) out[l] = (s.k & andm[k]) ^ xorm[k];
+        };
+        bool fast = true;
+        auto F = [](u32 x) { return f(x); };
+        switch (op) {
+            case 0x103: case 0x104: case 0x105: case 0x108: case 0x10f: case 0x110: case 0x11b: case 0x11c:
+            case 0x11d: case 0x115: case 0x116: case 0x119: case 0x11a: case 0x12f:
+                gather(a, 0, A), gather(b, 1, B);
+                break;
+            case 0x11f: gather(a, 0, A), gather(b, 1, B); for (int l = 0; l < LANES; l++) C[l] = d[size_t(l)]; break;
+            case 0x141: case 0x14b: gather(a, 0, A), gather(b, 1, B), gather(c, 2, C); break;
+            case 0x181: case 0x185: case 0x186: case 0x187: case 0x188: case 0x1a4: case 0x1a0: gather(a, 0, A); break;
+            default: fast = false;
+        }
+        if (fast) {
+            switch (op) {
+                case 0x103: for (int l = 0; l < LANES; l++) R[l] = u(F(A[l]) + F(B[l])); break;
+                case 0x104: for (int l = 0; l < LANES; l++) R[l] = u(F(A[l]) - F(B[l])); break;
+                case 0x105: for (int l = 0; l < LANES; l++) R[l] = u(F(B[l]) - F(A[l])); break;
+                case 0x108: for (int l = 0; l < LANES; l++) R[l] = u(F(A[l]) * F(B[l])); break;
+                case 0x10f: for (int l = 0; l < LANES; l++) R[l] = u(std::fmin(F(A[l]), F(B[l]))); break;
+                case 0x110: for (int l = 0; l < LANES; l++) R[l] = u(std::fmax(F(A[l]), F(B[l]))); break;
+                case 0x11b: for (int l = 0; l < LANES; l++) R[l] = A[l] & B[l]; break;
+                case 0x11c: for (int l = 0; l < LANES; l++) R[l] = A[l] | B[l]; break;
+                case 0x11d: for (int l = 0; l < LANES; l++) R[l] = A[l] ^ B[l]; break;
+                case 0x115: for (int l = 0; l < LANES; l++) R[l] = A[l] >> (B[l] & 31); break;
+                case 0x116: for (int l = 0; l < LANES; l++) R[l] = B[l] >> (A[l] & 31); break;
+                case 0x119: for (int l = 0; l < LANES; l++) R[l] = A[l] << (B[l] & 31); break;
+                case 0x11a: for (int l = 0; l < LANES; l++) R[l] = B[l] << (A[l] & 31); break;
+                case 0x12f: for (int l = 0; l < LANES; l++) R[l] = to_half_mode(F(A[l]), true) | (to_half_mode(F(B[l]), true) << 16); break;
+                case 0x11f: case 0x141: for (int l = 0; l < LANES; l++) R[l] = u(F(A[l]) * F(B[l]) + F(C[l])); break;
+                case 0x14b: for (int l = 0; l < LANES; l++) R[l] = u(std::fma(F(A[l]), F(B[l]), F(C[l]))); break;
+                case 0x181: for (int l = 0; l < LANES; l++) R[l] = A[l]; break;
+                case 0x185: for (int l = 0; l < LANES; l++) R[l] = u(float(std::int32_t(A[l]))); break;
+                case 0x186: for (int l = 0; l < LANES; l++) R[l] = u(float(A[l])); break;
+                case 0x1a4: for (int l = 0; l < LANES; l++) R[l] = u(std::floor(F(A[l]))); break;
+                case 0x1a0: for (int l = 0; l < LANES; l++) R[l] = u(std::fmin(F(A[l]) - std::floor(F(A[l])), f(0x3f7fffff))); break;
+                default: {  // the conversions to integers, with their clamping
+                    bool ok2 = true;
+                    for (int l = 0; l < LANES; l++) R[l] = alu(op, A[l], 0, 0, 0, ok2);
+                }
+            }
+            if (fr && (o.omod || o.clamp))
+                for (int l = 0; l < LANES; l++) {
+                    float x = f(R[l]);
+                    if (o.omod == 1) x *= 2;
+                    if (o.omod == 2) x *= 4;
+                    if (o.omod == 3) x *= 0.5f;
+                    if (o.clamp) x = std::clamp(x, 0.0f, 1.0f);
+                    R[l] = u(x);
+                }
+            if (exec == ~0ull)
+                for (int l = 0; l < LANES; l++) d[size_t(l)] = R[l];
+            else
+                for (int l = 0; l < LANES; l++)
+                    if ((exec >> l) & 1) d[size_t(l)] = R[l];
+            return;
+        }
+    }
     bool ok = true;
     for (int l = 0; l < LANES; l++) {
         if (!((exec >> l) & 1)) continue;
@@ -1379,6 +1499,7 @@ void image_op(Wave& w, const Memory& mem, u32 w0, u32 w1) {
     bool unorm = (w0 >> 12) & 1;
     u32 vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff, srsrc = ((w1 >> 16) & 0x1f) * 4, ssamp = ((w1 >> 21) & 0x1f) * 4;
     Image t(&w.s[srsrc]);
+    t.prepare(mem);
     u64 exec = w.exec();
     auto vaddr_at = [&](int k, int ln) { return w.v[(vaddr + u32(k)) & 255][size_t(ln)]; };
     auto write_out = [&](int ln, const u32 v[4]) {
@@ -1446,7 +1567,7 @@ void image_op(Wave& w, const Memory& mem, u32 w0, u32 w1) {
     float W = float(t.width), H = float(t.height);
     // implicit level of detail: from the 2x2 quad's differences in the coordinates
     std::array<float, LANES> lod{};
-    if (!lod_given && !zero_lod) {
+    if (!lod_given && !zero_lod && s.mag != s.min) {  // it only picks the filter
         for (int q = 0; q < LANES; q += 4) {
             float u0 = f(vaddr_at(r_coords, q)), v0 = n > 1 ? f(vaddr_at(r_coords + 1, q)) : 0;
             float dudx, dvdx, dudy, dvdy;
@@ -1606,14 +1727,20 @@ void ds_op(Wave& w, u32 w0, u32 w1) {
 }  // namespace
 
 Result run(Wave& w, u64 pc, Io& io, const Memory& mem) {
+    u64 code_lo = 0, code_hi = 0;
     for (u64 steps = 0; steps < 20'000'000; steps++) {
-        if (!mem.ok(pc, 4)) {
-            note("shader code outside the game's memory");
-            return {Stop::fault, pc};
+        if (pc < code_lo || pc + 8 > code_hi) {  // the range the code is in, found once
+            code_lo = code_hi = 0;
+            for (auto [lo, hi] : mem.ranges)
+                if (pc >= lo && pc + 4 <= hi) code_lo = lo, code_hi = hi;
+            if (!code_hi) {
+                note("shader code outside the game's memory");
+                return {Stop::fault, pc};
+            }
         }
         const u32* p = reinterpret_cast<const u32*>(pc);
         u32 w0 = p[0];
-        auto lit = [&]() { return mem.ok(pc + 4, 4) ? p[1] : 0u; };
+        auto lit = [&]() { return pc + 8 <= code_hi ? p[1] : 0u; };
         u64 next = pc + 4;
         if (!(w0 >> 31)) {
             u32 top7 = w0 >> 25;
@@ -1744,7 +1871,7 @@ Result run(Wave& w, u64 pc, Io& io, const Memory& mem) {
             continue;
         }
         // the two-dword formats
-        if (!mem.ok(pc + 4, 4)) return {Stop::fault, pc};
+        if (pc + 8 > code_hi) return {Stop::fault, pc};
         u32 w1 = p[1];
         next = pc + 8;
         switch (enc) {

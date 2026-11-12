@@ -116,7 +116,7 @@ disassembled, `draws/`, what the first draws of each pixel shader drew, and `fra
 frame on screen when it stopped. Add `--frames 60` to stop after 60 frames, or `--seconds 20`
 to run longer than the default 10. On Windows, `--window` opens a window on the display, whose
 title counts the frames as they are shown; the run then goes on until the window is closed.
-The game's title screen comes after about 90 seconds (`--seconds 100`). `--no-draw` leaves the
+The game's title screen comes within 70 seconds (`--seconds 75`). `--no-draw` leaves the
 drawing out, and the game runs at its own 30 frames a second, to a black screen. The two builds run
 the same code: up to the point where the game's threads started running, they made the same
 calls, from the same places, with the same results.
@@ -415,6 +415,23 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     GPU, which is now the CPU, and the time it took is the time the game sees. Nothing it
     used in that time was counted as not done. Linux draws the same splash screen (211
     frames in 30 seconds).
+26. **Faster.** The summary now says how long the drawing took: of 31 seconds, the draws
+    took 26.5 and the dispatches 1.8, so the pixels were what to speed up. Counting the
+    processor's cycles by kind of instruction pointed at three things: reading textures (37%),
+    writing pixels to the target (30%) and arithmetic (26%). Each now works out once what it
+    can (a texture's or a target's layout, once an instruction or a draw), has a short way
+    through for the usual formats (8-bit RGBA, 32-bit floats), decodes a compressed block once
+    rather than for each pixel that reads it, and does the usual arithmetic in straight loops
+    over the 64 lanes. The conversions to and from 16-bit floats, in nearly every pixel's
+    export, are now done with bits; checked against the old ones over every 16-bit value and
+    20 million others, they differ only where the old ones were wrong: infinity rounded toward
+    zero, which stays infinity, and the values just below the smallest 16-bit number, which
+    round to it rather than to 0. In 30 seconds the game now shows 287 frames rather than
+    195, nearly 10 a second, and reaches its title screen within 70 seconds (668 frames);
+    Linux shows 301 in 30 seconds rather than 211. All 16 of the CPU's threads (8 cores) is
+    best: 12 gave 255 frames, 8 gave 185. What is left is the interpreting itself, each
+    instruction taken apart again for each wave; much faster would mean translating the
+    shaders, to the CPU's own instructions or to a PC GPU's.
 
 ## Files
 

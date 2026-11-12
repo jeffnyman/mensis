@@ -86,6 +86,14 @@ Pool& pool() {
 
 std::mutex g_draw_lock;  // the GPU's queues draw one at a time: the pool is shared
 std::atomic<u64> g_saved{0};
+std::atomic<u64> g_draw_ns{0}, g_dispatch_ns{0};  // the time drawing and dispatching took
+
+struct Timer {  // adds the time from here to the end of the scope
+    std::atomic<u64>& to;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    explicit Timer(std::atomic<u64>& t) : to(t) {}
+    ~Timer() { to += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); }
+};
 std::atomic<u64> g_draws{0}, g_triangles{0}, g_pixels{0}, g_ps_waves{0}, g_dispatches{0}, g_groups{0};
 
 u32 reg(const GpuRegs& r, u32 i, u32 dflt) { return r.ctx_set[i] ? r.ctx[i] : dflt; }
@@ -123,6 +131,28 @@ struct Target {  // a render target, from its CB_COLORn registers
     u64 base = 0;
     u32 pitch = 0, height = 0, format = 0, nfmt = 0, swap = 0, tiling = 0, bytes = 0, count = 0;
     u32 blend = 0, mask = 0;
+    // worked out once a draw: the components' order in memory (COMP_SWAP), whether its pixels
+    // are in rows (not micro-tiled), whether all of it is memory the GPU may write, and
+    // whether it is 8-bit RGBA unorm (the usual), which has a short way through
+    int order[4] = {0, 1, 2, 3};
+    bool rows = true, all_ok = false, unorm8 = false;
+    void prepare(const Memory& mem) {
+        static const int swap4[4][4] = {{0, 1, 2, 3}, {2, 1, 0, 3}, {3, 2, 1, 0}, {3, 0, 1, 2}};
+        static const int swap2[4][2] = {{0, 1}, {0, 3}, {1, 0}, {3, 0}};
+        if (count >= 3)
+            for (int c = 0; c < 4; c++) order[c] = swap4[swap][c];
+        else if (count == 2)
+            order[0] = swap2[swap][0], order[1] = swap2[swap][1];
+        else
+            order[0] = int(swap);
+        rows = !(tiling == 5 || tiling == 9 || tiling == 13 || tiling == 19);
+        u64 size = u64(pitch) * ((u64(height) + 7) / 8 * 8) * bytes;
+        all_ok = count && mem.ok(base, size);
+        unorm8 = format == 10 && nfmt == 0;
+    }
+    u64 address(u32 x, u32 y) const {
+        return rows ? base + (u64(y) * pitch + x) * bytes : element_address(base, tiling, bytes, pitch, height, x, y, 0);
+    }
 };
 
 struct Tri {
@@ -242,24 +272,17 @@ struct PsIo : Io {
             }
             int x = px[l], y = py[l];
             if (x < 0 || y < 0 || u32(x) >= t.pitch || u32(y) >= t.height) continue;
-            u64 at = element_address(t.base, t.tiling, t.bytes, t.pitch, t.height, u32(x), u32(y), 0);
-            if (!at || !mem.ok(at, t.bytes)) continue;
+            u64 at = t.address(u32(x), u32(y));
+            if (!at || (!t.all_ok && !mem.ok(at, t.bytes))) continue;
             auto* p = reinterpret_cast<unsigned char*>(at);
-            // the components in memory order (COMP_SWAP), and back
-            static const int swap4[4][4] = {{0, 1, 2, 3}, {2, 1, 0, 3}, {3, 2, 1, 0}, {3, 0, 1, 2}};
-            static const int swap2[4][2] = {{0, 1}, {0, 3}, {1, 0}, {3, 0}};
-            static const int swap1[4] = {0, 1, 2, 3};
-            int order[4] = {0, 1, 2, 3};
-            if (t.count == 4 || t.count == 3)
-                for (int c = 0; c < 4; c++) order[c] = swap4[t.swap][c];
-            else if (t.count == 2)
-                order[0] = swap2[t.swap][0], order[1] = swap2[t.swap][1];
-            else
-                order[0] = swap1[t.swap];
+            const int* order = t.order;
             u32 old_mem[4], old[4] = {0, 0, 0, integer ? 1u : u(1.0f)};
             bool need_old = (t.mask & 15) != 15 || ((t.blend >> 30) & 1);
             if (need_old) {
-                unpack(t.format, t.nfmt, p, old_mem);
+                if (t.unorm8)
+                    for (int c = 0; c < 4; c++) old_mem[c] = u(float(p[c]) * (1.0f / 255.0f));
+                else
+                    unpack(t.format, t.nfmt, p, old_mem);
                 for (u32 c = 0; c < t.count; c++) old[order[c]] = old_mem[c];
             }
             if (((t.blend >> 30) & 1) && !integer) {
@@ -282,7 +305,15 @@ struct PsIo : Io {
                 if (!((t.mask >> c) & 1)) rgba[c] = old[c];
             u32 mem_order[4] = {0, 0, 0, 0};
             for (u32 c = 0; c < t.count; c++) mem_order[c] = rgba[order[c]];
-            pack(t.format, t.nfmt, mem_order, p);
+            if (t.unorm8) {
+                for (int c = 0; c < 4; c++) {
+                    float v = f(mem_order[c]);
+                    v = v > 0 ? (v < 1 ? v : 1) : 0;  // and NaN to 0
+                    p[c] = (unsigned char)(v * 255.0f + 0.5f);
+                }
+            } else {
+                pack(t.format, t.nfmt, mem_order, p);
+            }
             written++;
         }
     }
@@ -382,6 +413,7 @@ std::vector<std::array<size_t, 3>> assemble(u32 type, size_t n, bool& rects, boo
 std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     if (!M.draw || !count) return {};
     std::lock_guard draw_lock(g_draw_lock);
+    Timer timer(g_draw_ns);
     g_draws++;
     u64 vs = program(r, 0x48), ps = program(r, 0x08);
     if (!vs) return "(no vertex shader)";
@@ -447,6 +479,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     bool any = false;
     for (u32 k = 0; k < 8; k++) {
         targets[k] = target(r, k);
+        targets[k].prepare(mem);
         any |= targets[k].count != 0;
     }
     u32 mode = (reg(r, 0x202, 0xcc0010) >> 4) & 7;
@@ -626,6 +659,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
 std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     if (!M.draw) return {};
     std::lock_guard draw_lock(g_draw_lock);
+    Timer timer(g_dispatch_ns);
     u64 cs = program(r, 0x20c);
     if (!cs) return "(no compute shader)";
     g_dispatches++;
@@ -695,7 +729,10 @@ std::vector<std::string> draw_report() {
     std::vector<std::string> s = {
         "## Drawing\n",
         std::format("Run on the CPU: {} draws, {} triangles, {} pixels ({} pixel-shader waves); {} dispatches, {} groups.\n",
-                    g_draws.load(), g_triangles.load(), g_pixels.load(), g_ps_waves.load(), g_dispatches.load(), g_groups.load())};
+                    g_draws.load(), g_triangles.load(), g_pixels.load(), g_ps_waves.load(), g_dispatches.load(), g_groups.load()),
+        std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
+                    double(g_dispatch_ns) / 1e9,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};
     auto n = notes();
     if (!n.empty()) {
         s.insert(s.end(), {"Not done, or done only in part:\n", "| What | Times |", "|---|---:|"});

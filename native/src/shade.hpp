@@ -91,8 +91,13 @@ struct Image {
     u32 dfmt = 0, nfmt = 0, width = 1, height = 1, depth = 1, pitch = 1;
     u32 sel[4] = {4, 5, 6, 7};  // dst_sel: 0 zero, 1 one, 4-7 x y z w
     u32 tiling = 0, type = 9, base_level = 0, base_array = 0, last_array = 0;
+    // Worked out once an instruction (prepare): the element's size, whether it is a compressed
+    // block, the pitch and height in elements, and whether all of it is memory the GPU may read
+    u32 bytes = 0, epitch = 0, eheight = 0;
+    bool block = false, all_ok = false;
     explicit Image(const u32* t);
     Image() = default;
+    void prepare(const Memory& mem);
     bool array() const { return type == 12 || type == 13 || type == 15; }
 };
 
