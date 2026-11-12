@@ -459,7 +459,7 @@ extern "C" i64 mensis_dispatch(Frame* f) {
         }
     }
     if (over) stop(std::format("call budget ({}) used up", M.max_calls));
-    if (is_submit(name)) stop("first GPU submission: " + name);
+    if (is_submit(name)) stop("first GPU submission: " + name + ", " + save_submission(f->args));
     std::string note;
     i64 ret = 0;
     if (Standin fn = M.standin[f->index]) {

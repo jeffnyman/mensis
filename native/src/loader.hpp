@@ -150,6 +150,11 @@ u64 alloc(u64 size, u64 align = 16);
 const std::unordered_map<std::string, Standin>& standins();
 void add_thread_standins(std::unordered_map<std::string, Standin>& t);  // threads.cpp
 void add_file_standins(std::unordered_map<std::string, Standin>& t);  // files.cpp
+void add_gnm_standins(std::unordered_map<std::string, Standin>& t);  // gnm.cpp
+void add_libc_standins(std::unordered_map<std::string, Standin>& t);  // libc.cpp
+void add_audio_standins(std::unordered_map<std::string, Standin>& t);  // audio.cpp
+// Saves a GPU submission's command buffers to <out>/gpu/; returns a description (gnm.cpp)
+std::string save_submission(const u64* args);
 // printf's formatting, reading the arguments from a System V va_list at va (standins.cpp)
 std::string format_sysv(const char* format, u64 va);
 // Write to one of the game's FILE*s; false if it isn't one the loader opened (files.cpp)

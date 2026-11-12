@@ -91,26 +91,58 @@ i64 s_strcpy(const u64* a, std::string&) {
     return i64(a[0]);
 }
 
-// sceKernelAllocateDirectMemory(start, end, len, align, type, *physOut): hand out heap
-i64 s_alloc_direct(const u64* a, std::string&) {
-    *ptr<u64>(a[5]) = alloc(a[2], std::max<u64>(a[3], 0x10000));
-    return 0;
+// ---- the game's memory ----
+//
+// Direct memory is the PS4's physical memory, which a game allocates (an offset and a type) and
+// then maps; flexible memory is mapped in one step. Here an allocation is a piece of the heap
+// and maps 1:1, so its "physical" offset is its address. The loader records both, for the
+// calls that ask about them. Released memory is forgotten but not reused.
+
+// sceKernelAllocateDirectMemory's: offset: (length, memory type)
+std::mutex g_mem_lock;
+std::map<u64, std::pair<u64, int>> g_direct;
+
+// The mappings: start: what is mapped there. The protection bits: 1 CPU read, 2 CPU write,
+// 4 CPU execute, 0x10 GPU read, 0x20 GPU write.
+struct Mapping {
+    u64 end;
+    int prot;
+    bool direct;
+    int type;  // the direct memory's type
+    u64 offset;  // the direct memory's offset
+};
+std::map<u64, Mapping> g_maps;
+
+// The mapping that holds addr, or (find_next) the first one after it; null if none. Under
+// g_mem_lock.
+const std::pair<const u64, Mapping>* mapping_at(u64 addr, bool find_next = false) {
+    auto it = g_maps.upper_bound(addr);
+    if (it != g_maps.begin()) {
+        auto prev = std::prev(it);
+        if (addr < prev->second.end) return &*prev;
+    }
+    return find_next && it != g_maps.end() ? &*it : nullptr;
 }
 
-// The game's mappings, for sceKernelQueryMemoryProtection: start: (end, protection). The
-// protection bits: 1 CPU read, 2 CPU write, 4 CPU execute, 0x10 GPU read, 0x20 GPU write.
-std::mutex g_maps_lock;
-std::map<u64, std::pair<u64, int>> g_maps;
-
-void record_mapping(u64 start, u64 len, int prot) {
-    std::lock_guard lock(g_maps_lock);
-    g_maps[start] = {start + len, prot};
+// sceKernelAllocateDirectMemory(start, end, len, align, type, *physOut): hand out heap
+i64 s_alloc_direct(const u64* a, std::string& note) {
+    u64 p = alloc(a[2], std::max<u64>(a[3], 0x10000));
+    *ptr<u64>(a[5]) = p;
+    std::lock_guard lock(g_mem_lock);
+    g_direct[p] = {a[2], int(a[4])};
+    note = std::format("{:#x}, type {}", p, a[4]);
+    return 0;
 }
 
 // sceKernelMapDirectMemory(void **addr, len, prot, flags, phys, align): map it 1:1
 i64 s_map_direct(const u64* a, std::string&) {
     *ptr<u64>(a[0]) = a[4];
-    record_mapping(a[4], a[1], int(a[2]));
+    std::lock_guard lock(g_mem_lock);
+    int type = 0;
+    auto it = g_direct.upper_bound(a[4]);
+    if (it != g_direct.begin() && a[4] < std::prev(it)->first + std::prev(it)->second.first)
+        type = std::prev(it)->second.second;
+    g_maps[a[4]] = {a[4] + a[1], int(a[2]), true, type, a[4]};
     return 0;
 }
 
@@ -118,23 +150,77 @@ i64 s_map_direct(const u64* a, std::string&) {
 i64 s_map_flexible(const u64* a, std::string&) {
     u64 p = alloc(a[1], 0x4000);
     *ptr<u64>(a[0]) = p;
-    record_mapping(p, a[1], int(a[2]));
+    std::lock_guard lock(g_mem_lock);
+    g_maps[p] = {p + a[1], int(a[2]), false, 0, 0};
     return 0;
 }
+
+constexpr i64 SCE_EACCES = i64(std::int32_t(0x8002000d)), SCE_EINVAL = i64(std::int32_t(0x80020016));
 
 // sceKernelQueryMemoryProtection(addr, void **start, void **end, u32 *prot): the mapping that
 // holds addr
 i64 s_query_protection(const u64* a, std::string& note) {
-    std::lock_guard lock(g_maps_lock);
-    auto it = g_maps.upper_bound(a[0]);
-    if (it == g_maps.begin() || (--it, a[0] >= it->second.first)) {
+    std::lock_guard lock(g_mem_lock);
+    auto* m = mapping_at(a[0]);
+    if (!m) {
         note = "not mapped";
-        return i64(std::int32_t(0x80020016));  // SCE_KERNEL_ERROR_EINVAL
+        return SCE_EINVAL;
     }
-    if (a[1]) *ptr<u64>(a[1]) = it->first;
-    if (a[2]) *ptr<u64>(a[2]) = it->second.first;
-    if (a[3]) *ptr<u32>(a[3]) = u32(it->second.second);
-    note = std::format("{:#x}-{:#x} prot {:#x}", it->first, it->second.first, it->second.second);
+    if (a[1]) *ptr<u64>(a[1]) = m->first;
+    if (a[2]) *ptr<u64>(a[2]) = m->second.end;
+    if (a[3]) *ptr<u32>(a[3]) = u32(m->second.prot);
+    note = std::format("{:#x}-{:#x} prot {:#x}", m->first, m->second.end, m->second.prot);
+    return 0;
+}
+
+// sceKernelVirtualQuery(addr, flags, SceKernelVirtualQueryInfo *info, size): the mapping that
+// holds addr, or with flags bit 0, the next one. The info (0x48 bytes): start, end, offset,
+// int protection, int memory type, a byte of flags (1 flexible, 2 direct, 0x10 committed), and
+// a 32-byte name.
+i64 s_virtual_query(const u64* a, std::string& note) {
+    std::lock_guard lock(g_mem_lock);
+    auto* m = mapping_at(a[0], a[1] & 1);
+    if (!m) {
+        note = "not mapped";
+        return SCE_EACCES;
+    }
+    unsigned char info[0x48] = {};
+    u64 fields[3] = {m->first, m->second.end, m->second.offset};
+    std::memcpy(info, fields, sizeof fields);
+    std::memcpy(info + 24, &m->second.prot, 4);
+    std::memcpy(info + 28, &m->second.type, 4);
+    info[32] = static_cast<unsigned char>((m->second.direct ? 2 : 1) | 0x10);
+    std::memcpy(ptr<void>(a[2]), info, std::min<u64>(a[3], sizeof info));
+    note = std::format("{:#x}-{:#x} {}", m->first, m->second.end, m->second.direct ? "direct" : "flexible");
+    return 0;
+}
+
+// sceKernelGetDirectMemoryType(offset, int *type, off_t *start, off_t *end)
+i64 s_direct_type(const u64* a, std::string&) {
+    std::lock_guard lock(g_mem_lock);
+    auto it = g_direct.upper_bound(a[0]);
+    if (it == g_direct.begin() || a[0] >= std::prev(it)->first + std::prev(it)->second.first)
+        return SCE_EACCES;
+    --it;
+    if (a[1]) *ptr<int>(a[1]) = it->second.second;
+    if (a[2]) *ptr<u64>(a[2]) = it->first;
+    if (a[3]) *ptr<u64>(a[3]) = it->first + it->second.first;
+    return 0;
+}
+
+// sceKernelReleaseDirectMemory(offset, len): forget the allocation and its mappings
+i64 s_release_direct(const u64* a, std::string&) {
+    std::lock_guard lock(g_mem_lock);
+    g_direct.erase(a[0]);
+    for (auto it = g_maps.begin(); it != g_maps.end();)
+        it = it->second.direct && it->second.offset == a[0] ? g_maps.erase(it) : std::next(it);
+    return 0;
+}
+
+// sceKernelMunmap(addr, len)
+i64 s_munmap(const u64* a, std::string&) {
+    std::lock_guard lock(g_mem_lock);
+    g_maps.erase(a[0]);
     return 0;
 }
 
@@ -740,6 +826,10 @@ const std::unordered_map<std::string, Standin>& standins() {
             {"strrchr", s_strrchr},
             {"srand", s_zero},
             {"sceKernelQueryMemoryProtection", s_query_protection},
+            {"sceKernelVirtualQuery", s_virtual_query},
+            {"sceKernelGetDirectMemoryType", s_direct_type},
+            {"sceKernelReleaseDirectMemory", s_release_direct},
+            {"sceKernelMunmap", s_munmap},
             {"sceSystemServiceParamGetInt", s_system_param},
             {"sceAppContentAppParamGetInt", s_app_param},
         };
@@ -749,6 +839,9 @@ const std::unordered_map<std::string, Standin>& standins() {
             t.emplace(n, s_zero);
         add_thread_standins(t);
         add_file_standins(t);
+        add_gnm_standins(t);
+        add_libc_standins(t);
+        add_audio_standins(t);
         return t;
     }();
     return table;

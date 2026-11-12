@@ -82,9 +82,9 @@ and character models rendered from the game's own meshes and textures (`flver.py
   stops on its first AVX instruction it makes 26,631 system calls to 30 functions: a 116 MiB
   allocator, 1,106 static objects and 1,320 mutexes. That call log is an emulator's first to-do
   list, and the AVX wall is why an emulator has to run the game's code natively. Run natively,
-  on Windows or Linux, the start-up gets ten times as far: past an engine panic, through 4.8
-  GiB of memory claimed up front, into 16 running threads and the game's own files, until sound
-  is up and graphics set-up begins.
+  on Windows or Linux, the start-up makes 4.2 million calls: past an engine panic, through 4.8
+  GiB of memory claimed up front, into 28 running threads and the game's own files, with sound
+  up and the display opened, to the game's first GPU submission.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
@@ -140,7 +140,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
     rows' working names tell them.
 16. [The loader](docs/the-loader.md): the game's own start-up run under a CPU emulator, every
     system call it makes, and the AVX instruction that stops it: what an emulator has to do first.
-    Then the same run natively, in C++, with the game's threads and files, as far as graphics.
+    Then the same run natively, in C++, with the game's threads and files, to its first GPU
+    submission.
 
 For short answers that point into all of these, start with [questions and
 answers](docs/questions-and-answers.md).

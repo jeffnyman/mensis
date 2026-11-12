@@ -163,6 +163,17 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   open and stat shows which file answered. The `printf` family writes to `stdout.txt`; the
   variadic ones read their arguments the way the called function's own `va_start` would, from
   the registers and the caller's stack.
+* **The graphics driver and the display** answer the questions a driver answers at set-up:
+  where the tessellation ring goes, a compute queue's id, that validation isn't built in (as
+  on a retail console), and the display's handle, buffer attributes and event queue. There is
+  no GPU behind them yet. The run stops at the game's first GPU submission
+  (`sceGnmSubmitCommandBuffers`), and saves the command buffers it submits to `gpu/`.
+* **Sound** is taken and discarded, at the pace of a real audio port: `sceAudioOutOutput`
+  waits until the port's next buffer is due (256 samples at 48 kHz, every 5.3 ms), as the
+  sound library's audio thread expects.
+* **The C library's** mathematics, strings and number parsing are the host's, including
+  Dinkumware's internal names (`_FLog`, `_Sin`, `_Stoul`, ...). The game's assertions
+  (`_Assert`) go to `stdout.txt`, and the run carries on, as a release build's would.
 * **Stopping**: a fault is caught (Linux: a signal, on a stack of the thread's own; Windows: a
   vectored exception handler), recorded, and the thread resumes on its own stack, from where
   the outputs are written and the process ends. The summary shows the instructions at the fault
@@ -237,15 +248,36 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     the missing sound wasn't its cause. Meanwhile the render thread has made its first calls
     into the graphics driver (`sceGnmMapComputeQueue`, `sceGnmValidateCommandBuffers`, the
     tessellation ring's address), all without stand-ins. Which thread faults first varies
-    from run to run; both are setting up graphics. The PS4's graphics driver and the GPU
-    behind it are the next step, and the biggest.
+    from run to run; both are setting up graphics.
+12. **The graphics set-up was failing, and cleaning up after itself.** The render thread's
+    set-up (read through Ghidra's decompiler) allocates and maps the tessellation ring, then
+    maps a compute queue, and checks the queue's id: 0 means failure. With no stand-in, the
+    driver call returned 0, so the render thread released the ring, woke the main thread as
+    if set-up were done, and the main thread went on to read the objects that were never
+    made: the null pointer. The PS4's driver numbers queues from 1. With that one answer the
+    set-up completes, and the run goes on to the first GPU submission.
+13. **The game starts the rest of itself**: five graphics workers (`GXWorker:1` to `5`), the
+    resource system (`Core.Res.FileLoader`, `CacheableFileLoader`, `TaskManager` and three
+    `PostProcessor`s), 28 threads in all. It opens the display (one 1920×1080 output, 8-bit
+    ARGB in sRGB, three frame buffers to flip between, and a `FlipEventQueue`). YEBIS, the
+    post-processing middleware, reports a run of assertions while creating its effects
+    (`hfx.tech_BokehBlur_Sn[...]`, `hfx.fParam_FocusDistance`, ...): techniques and parameters
+    it looks for and doesn't find. Why is still open; the run carries on as a release build
+    would.
+14. **The first GPU submission** comes after about 4.2 million calls and two seconds, from
+    the render thread, on Windows and Linux alike. It is one command buffer of 28 bytes, a
+    single PM4 packet (the GPU's command format): `WAIT_REG_MEM`, "wait until the 32-bit
+    value at 0x2_4140_0030 equals 0x29", a label next to the compute queue's ring. It sits
+    where the game had asked `sceGnmDrawInitDefaultHardwareState200` to write the GPU's
+    default state, which has no stand-in yet, so the wait is all there is. Reading what the
+    game submits, and giving the GPU something to run it on, is the next step.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output), `standins.cpp`, and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (graphics and display) and `audio.cpp`; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt` and `files/` |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/` and `gpu/` (the submitted command buffers) |
