@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -90,6 +91,7 @@ struct GameThread {
     std::string state = "starting";
     std::string last_call;
     u64 calls = 0;
+    const Frame* frame = nullptr;  // the call it's in, if any
 
     // set by the thread itself on its way out
     bool faulted = false;
@@ -131,6 +133,7 @@ struct Machine {
     std::unordered_map<u64, u64> allocs;  // address: size
 
     u64 max_calls = 0;
+    u64 max_flips = 0;  // --frames: stop after this many flips
     unsigned seconds = 10;
     std::string out_dir;
     std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
@@ -153,14 +156,24 @@ void add_file_standins(std::unordered_map<std::string, Standin>& t);  // files.c
 void add_gnm_standins(std::unordered_map<std::string, Standin>& t);  // gnm.cpp
 void add_libc_standins(std::unordered_map<std::string, Standin>& t);  // libc.cpp
 void add_audio_standins(std::unordered_map<std::string, Standin>& t);  // audio.cpp
-// Saves a GPU submission's command buffers to <out>/gpu/; returns a description (gnm.cpp)
-std::string save_submission(const u64* args);
+void add_video_standins(std::unordered_map<std::string, Standin>& t);  // video.cpp
+// The command processor (gpu.cpp): a submission to the graphics queue, then `then` (a flip);
+// a compute queue's ring; the ring written up to offset (sceGnmDingDong); the summary's lines.
+void gpu_submit(u32 count, const u64* dcbs, const u32* dcb_bytes, const u64* ccbs,
+                const u32* ccb_bytes, std::function<void()> then);
+void gpu_map_compute(int id, u64 ring, u32 dwords, u64 rptr_addr);
+void gpu_ding_dong(int id, u32 offset);
+std::vector<std::string> gpu_report();
+// Events (video.cpp): the kevent filters and idents the display and the GPU report
+constexpr int EVENT_VIDEO_OUT = -13, EVENT_GRAPHICS = -14;
+constexpr u64 VIDEO_OUT_FLIP = 6, GRAPHICS_EOP = 0x40;
+void trigger_event(int filter, u64 ident, i64 data);  // to every queue that registered it
+std::vector<std::string> video_report();
 // printf's formatting, reading the arguments from a System V va_list at va (standins.cpp)
 std::string format_sysv(const char* format, u64 va);
 // Write to one of the game's FILE*s; false if it isn't one the loader opened (files.cpp)
 bool stream_write(u64 file, const std::string& text);
 void set_errno(int e);  // the calling game thread's errno (FreeBSD's values)
-bool is_submit(const std::string& name);
 void init_libc_data();  // after LIBC_DATA is mapped
 Frame* current_frame();  // the call in progress on this thread, for stand-ins that need more
 GameThread* current_thread();

@@ -163,11 +163,26 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   open and stat shows which file answered. The `printf` family writes to `stdout.txt`; the
   variadic ones read their arguments the way the called function's own `va_start` would, from
   the registers and the caller's stack.
-* **The graphics driver and the display** answer the questions a driver answers at set-up:
-  where the tessellation ring goes, a compute queue's id, that validation isn't built in (as
-  on a retail console), and the display's handle, buffer attributes and event queue. There is
-  no GPU behind them yet. The run stops at the game's first GPU submission
-  (`sceGnmSubmitCommandBuffers`), and saves the command buffers it submits to `gpu/`.
+* **The graphics driver** answers the questions a driver answers at set-up: where the
+  tessellation ring goes, a compute queue's id, that validation isn't built in (as on a retail
+  console). Most of its other calls write the GPU's commands (PM4 packets, AMD's format) into
+  a command buffer the game is filling: a shader's registers, the default state, a debugging
+  marker. The game reserves the space first and moves on by exactly that much, so each call
+  fills it all: the registers from the structure the game hands over, then a `NOP` to the end.
+  What the real driver writes besides isn't reproduced; the buffer stays well-formed and the
+  same length.
+* **The command processor** (`gpu.cpp`) is what the GPU's front end does with what the game
+  submits, short of drawing. The graphics queue (`sceGnmSubmitCommandBuffers`) and each compute
+  queue (a ring of packets; `sceGnmDingDong` says how far it is written, and the read pointer
+  tells the game how far the GPU has got) has a thread of its own that walks the packets in
+  order. Draws and dispatches are counted, not run: there are no shaders yet. What a packet
+  writes to memory is written (`WRITE_DATA`, `EVENT_WRITE_EOP`, `RELEASE_MEM`, `DMA_DATA`), and
+  a wait on memory (`WAIT_REG_MEM`) waits, because the game and the GPU keep in step through
+  memory: a label written when some work is done, which the CPU or another queue waits to
+  see. The first six submissions of each queue are written to `gpu/`, decoded.
+* **The display** keeps the timing without showing anything: one flip at each vertical blank,
+  60 a second or the rate the game asks for, each reported in `sceVideoOutGetFlipStatus` and
+  as an event to the event queues that asked for one (`sceKernelWaitEqueue`).
 * **Sound** is taken and discarded, at the pace of a real audio port: `sceAudioOutOutput`
   waits until the port's next buffer is due (256 samples at 48 kHz, every 5.3 ms), as the
   sound library's audio thread expects.
@@ -179,8 +194,9 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   the outputs are written and the process ends. The summary shows the instructions at the fault
   (Linux, through `objdump`) or their bytes (Windows), the game-code addresses on the
   faulting thread's stack (mostly return addresses: the way back), and every thread with its
-  state and last call. Any thread can stop the run; so can the main thread's `_start`
-  returning, a time limit (`--seconds`, 10 by default) and a call limit (`--calls`).
+  state and last call (and, for a thread waiting in a call, what it waits on). Any thread can
+  stop the run; so can the main thread's `_start` returning, a time limit (`--seconds`, 10 by
+  default), a call limit (`--calls`) and a frame limit (`--frames`, flips shown).
 * **Repeatable, as far as threads allow.** Anything the stand-ins hand the game lives at a
   fixed address. Once the game's threads run, the order in which they make their calls, and
   how often a thread polling the clock does so, varies from run to run.
@@ -267,17 +283,50 @@ the repository's root, or name the folders with `--app0` (more than once, first 
 14. **The first GPU submission** comes after about 4.2 million calls and two seconds, from
     the render thread, on Windows and Linux alike. It is one command buffer of 28 bytes, a
     single PM4 packet (the GPU's command format): `WAIT_REG_MEM`, "wait until the 32-bit
-    value at 0x2_4140_0030 equals 0x29", a label next to the compute queue's ring. It sits
+    value at 0x2_4140_0030 is at least 0x29", a label next to the compute queue's ring. It sits
     where the game had asked `sceGnmDrawInitDefaultHardwareState200` to write the GPU's
     default state, which has no stand-in yet, so the wait is all there is. Reading what the
     game submits, and giving the GPU something to run it on, is the next step.
+15. **The driver's calls, as the game makes them.** Each is wrapped in a function of the
+    game's that reserves space and then advances (read through Ghidra's decompiler):
+    `sceGnmSetVsShader` gets 29 dwords, `SetPsShader` 40, `SetCsShader` 25, and the default
+    state needs 256 free and reports what it wrote. With them answered, the first submission
+    is two buffers: the wait, then the 256 dwords of default state.
+16. **The queues wait on each other.** The compute queue's ring holds indirect buffers of
+    dispatches, each piece of work ending in a `RELEASE_MEM` that writes 0, 1, 2, ... to the
+    label at 0x2_4140_0030. The graphics queue's first wait, for 0x29 or more, holds it until
+    the compute queue's 42nd piece of work is done. Within a graphics buffer the pattern
+    repeats: an `EVENT_WRITE_EOP` writes 1 to a label, a `WAIT_REG_MEM` waits for it, caches
+    are flushed (`ACQUIRE_MEM`), and the next dispatch goes. The first draw is in the third
+    submission: `DRAW_INDEX_AUTO` of 3 vertices, most likely one triangle over the whole
+    screen, the usual way to run a pixel shader once per pixel.
+17. **Two flips, then stuck.** The main thread signalled five semaphores that no thread was
+    waiting on, then waited itself, for ever. Their five threads had never started: they were
+    created with
+    `pthread_create_name_np`, FreeBSD's way of creating a named thread, which had no stand-in.
+    They are `HavokWorkerThread`s, the physics library's workers. With them running, the game
+    goes on.
+18. **Spinning on things that never come.** Two threads polled without a pause:
+    `DLUserPreferenceNotifyService` called `sceUserServiceGetEvent` 8 million times, because
+    the call answered 0, success, rather than "no event"; and the socket thread, one of four
+    `NexusRevolution` threads that handle the game's networking, called `sceNetEpollWait` 5.6
+    million times, because it returned at once rather than waiting out its 33 ms timeout for
+    network events. With both answering as a console with no user events and no network would, the
+    game starts 48 threads.
+19. **The game runs frame after frame.** In 20 seconds (Windows) it shows 335 frames: 2,044
+    graphics submissions with 1,697 draws and 2,356 dispatches, 29.6 million calls. After
+    about 14 million calls it hides the system's splash screen
+    (`sceSystemServiceHideSplashScreen`), so what it draws now is its own. It asks for 60
+    flips a second and gets about 20 here: the loader logs every call, and the log alone
+    (`calls.log`) is 2.5 GB after 20 seconds. Linux runs the same way, more slowly, reading
+    the game's files across WSL's file system.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (graphics and display) and `audio.cpp`; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/` and `gpu/` (the submitted command buffers) |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/` and `gpu/` (the first submissions of each queue, decoded) |

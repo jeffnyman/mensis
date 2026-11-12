@@ -90,6 +90,10 @@ i64 s_pthread_create(const u64* a, std::string& note) {
     return s_create(b, note);
 }
 
+// pthread_create_name_np(pthread_t *thread, const pthread_attr_t *attr, entry, arg, name):
+// FreeBSD's, with a name, in scePthreadCreate's order
+i64 s_pthread_create_name(const u64* a, std::string& note) { return s_create(a, note); }
+
 i64 s_self(const u64*, std::string&) { return i64(me()->handle); }
 
 // scePthreadExit(void *value): back out of the thread
@@ -520,6 +524,7 @@ void add_thread_standins(std::unordered_map<std::string, Standin>& t) {
     std::pair<const char*, Standin> list[] = {
         {"scePthreadCreate", s_create},
         {"pthread_create", s_pthread_create},
+        {"pthread_create_name_np", s_pthread_create_name},
         {"scePthreadSelf", s_self},
         {"pthread_self", s_self},
         {"scePthreadExit", s_exit},

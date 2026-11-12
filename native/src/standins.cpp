@@ -684,6 +684,24 @@ i64 clock_now(const u64* a) {
 }
 i64 s_clock_gettime(const u64* a, std::string&) { return clock_now(a); }
 
+// sceKernelReadTsc(): the CPU's time-stamp counter. The game doesn't ask its rate
+// (sceKernelGetTscFrequency); this one counts at 1.6 GHz, the PS4 CPU's clock.
+i64 s_read_tsc(const u64*, std::string&) {
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - M.t0);
+    return ns.count() * 8 / 5;
+}
+
+// sceUserServiceGetEvent(SceUserServiceEvent *): a user logging in or out. None happen.
+i64 s_user_event(const u64*, std::string&) { return i64(std::int32_t(0x80960007)); }  // NO_EVENT
+
+// sceNetEpollWait(epoll, events, max, timeout in microseconds, or -1): there is no network, so
+// nothing ever arrives; wait out the timeout (a second at a time, for ever) and report none
+i64 s_epoll_wait(const u64* a, std::string&) {
+    std::int32_t timeout = std::int32_t(a[3]);
+    std::this_thread::sleep_for(std::chrono::microseconds(timeout < 0 ? 1000000 : timeout));
+    return 0;
+}
+
 // time(time_t *t)
 i64 s_time(const u64* a, std::string&) {
     i64 s = std::chrono::duration_cast<std::chrono::seconds>(
@@ -818,6 +836,9 @@ const std::unordered_map<std::string, Standin>& standins() {
             {"gettimeofday", s_gettimeofday},
             {"clock_gettime", s_clock_gettime},
             {"sceKernelClockGettime", s_clock_gettime},
+            {"sceKernelReadTsc", s_read_tsc},
+            {"sceUserServiceGetEvent", s_user_event},
+            {"sceNetEpollWait", s_epoll_wait},
             {"time", s_time},
             {"clock", s_clock},
             {"exp2f", s_exp2f},
@@ -842,6 +863,7 @@ const std::unordered_map<std::string, Standin>& standins() {
         add_gnm_standins(t);
         add_libc_standins(t);
         add_audio_standins(t);
+        add_video_standins(t);
         return t;
     }();
     return table;
@@ -852,8 +874,5 @@ void init_libc_data() {
     new (ptr<void>(LIBC_DATA)) Tables;
 }
 
-bool is_submit(const std::string& name) {
-    return name == "sceGnmSubmitCommandBuffers" || name == "sceGnmSubmitAndFlipCommandBuffers";
-}
 
 }  // namespace mensis

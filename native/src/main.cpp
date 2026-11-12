@@ -4,7 +4,7 @@
 // logged (docs/the-loader.md).
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
-//                   [--app0 DIR]...
+//                   [--frames N] [--app0 DIR]...
 //
 // --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
 // lay folders over each other, first match wins. By default: work/update, then work/base (the
@@ -26,9 +26,9 @@
 // * The stand-ins (standins.cpp, threads.cpp). Every other import returns 0 and is counted as
 //   unhandled. The game's threads run, each on a thread of the loader's own.
 //
-// It stops at the first GPU submission, at the exit handler, when the main thread's _start
-// returns, at a fault (with the registers and the instructions there), after --calls import
-// calls, or after --seconds (default 10).
+// It stops at the exit handler, when the main thread's _start returns, at a fault (with the
+// registers and the instructions there), after --calls import calls, after --frames flips of
+// the display, or after --seconds (default 10).
 
 #include <atomic>
 #include <cstdio>
@@ -267,6 +267,7 @@ void write_outputs(const std::string& reason) {
                     M.threads.size(), seconds),
     };
     for (const auto& n : M.notes) s.push_back(n + "\n");
+    for (const auto& line : video_report()) s.push_back(line);
     s.insert(s.end(), {"## Where it stopped\n", "```"});
     if (M.fault.valid) {
         const auto& g = M.fault;
@@ -297,10 +298,16 @@ void write_outputs(const std::string& reason) {
         std::string last = t->last_call;
         std::replace(last.begin(), last.end(), '|', '/');
         auto first = last.find_first_not_of(' ');
+        std::string state = t->state;
+        if (t->frame && t->state.starts_with("in "))  // in a call: with what
+            state += std::format("({:#x}, {:#x}, {:#x})", t->frame->args[0], t->frame->args[1],
+                                 t->frame->args[2]);
         s.push_back(std::format("| {} | {} | {} | {} | `{}` |", t->id, t->name, t->calls,
-                                t->state, first == std::string::npos ? "" : last.substr(first)));
+                                state, first == std::string::npos ? "" : last.substr(first)));
     }
-    s.insert(s.end(), {"", "Last calls:\n", "```"});
+    s.push_back("");
+    for (const auto& line : gpu_report()) s.push_back(line);
+    s.insert(s.end(), {"Last calls:\n", "```"});
     s.insert(s.end(), M.last_calls.begin(), M.last_calls.end());
     s.insert(s.end(), {"```\n", "## Imports by first use\n", "| Import | Calls | Stand-in |",
                        "|---|---:|---|"});
@@ -454,12 +461,13 @@ extern "C" i64 mensis_dispatch(Frame* f) {
             over = true;
         } else {
             if (M.counts[name]++ == 0) M.first_use.push_back(name);
-            if (t) t->state = "in " + name;
-            if (is_submit(name)) log_call(t, f, name, "stop");
+            if (t) {
+                t->state = "in " + name;
+                t->frame = f;
+            }
         }
     }
     if (over) stop(std::format("call budget ({}) used up", M.max_calls));
-    if (is_submit(name)) stop("first GPU submission: " + name + ", " + save_submission(f->args));
     std::string note;
     i64 ret = 0;
     if (Standin fn = M.standin[f->index]) {
@@ -471,7 +479,10 @@ extern "C" i64 mensis_dispatch(Frame* f) {
     }
     std::lock_guard lock(M.log_lock);
     log_call(t, f, name, "-> " + hex(ret) + (note.empty() ? "" : " " + note));
-    if (t) t->state = "running game code";
+    if (t) {
+        t->state = "running game code";
+        t->frame = nullptr;
+    }
     return ret;
 }
 
@@ -481,16 +492,18 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
-        } else if ((a == "--seconds" || a == "--calls") && i + 1 < argc) {
+        } else if ((a == "--seconds" || a == "--calls" || a == "--frames") && i + 1 < argc) {
             u64 v = std::stoull(argv[++i]);
-            (a == "--seconds" ? (void)(M.seconds = unsigned(v)) : (void)(M.max_calls = v));
+            if (a == "--seconds") M.seconds = unsigned(v);
+            else if (a == "--calls") M.max_calls = v;
+            else M.max_flips = v;
         } else {
             pos.push_back(a);
         }
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N] [--app0 DIR]...\n";
+                     "[--seconds N] [--calls N] [--frames N] [--app0 DIR]...\n";
         return 2;
     }
     M.out_dir = pos[2];
