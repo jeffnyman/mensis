@@ -308,8 +308,8 @@ void Image::prepare(const Memory& mem) {
     eheight = block ? (height + 3) / 4 : height;
     u64 slices = std::max({depth, last_array + 1, type == 11 ? 6u : 1u});
     bool micro = tiling == 5 || tiling == 9 || tiling == 13 || tiling == 19;
-    u64 size = micro ? (u64(epitch) + 7) / 8 * ((u64(eheight) + 7) / 8) * 64 * bytes * slices
-                     : u64(epitch) * ((u64(eheight) + 7) / 8 * 8) * bytes * slices;
+    size = micro ? (u64(epitch) + 7) / 8 * ((u64(eheight) + 7) / 8) * 64 * bytes * slices
+                 : u64(epitch) * ((u64(eheight) + 7) / 8 * 8) * bytes * slices;
     all_ok = bytes && mem.ok(base, size);
 }
 

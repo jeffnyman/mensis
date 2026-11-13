@@ -18,10 +18,14 @@
 // Not done yet: depth and stencil, clipping to the near plane (a triangle with a vertex
 // behind the eye is skipped), multisampling, mip levels past the first.
 //
-// With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, its vertex
-// and pixel shaders translated (translate.cpp, vkdraw.cpp), into a copy of the render target
-// as it was before; then the CPU draws it, and the two are compared pixel by pixel. If the
-// vertex shader can't be translated, the GPU is given the CPU's vertices instead.
+// With --gpu, each draw whose pixel shader can be translated (translate.cpp) is drawn on the
+// PC's GPU instead (vkdraw.cpp): its render target goes up from the game's memory, and comes
+// back into it. The CPU draws the rest, and runs the dispatches.
+//
+// With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, into a copy
+// of the render target as it was before; then the CPU draws it, and the two are compared
+// pixel by pixel. If the vertex shader can't be translated, the GPU is given the CPU's
+// vertices instead.
 
 #include <bit>
 #include <cmath>
@@ -409,6 +413,23 @@ void save_target(u64 number, const Target& t, u32 width, u32 height, const Memor
 std::map<u64, translate::Program> g_programs;  // decoded once each; under g_draw_lock
 u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0;
 std::map<std::string, u64> g_check_skipped;
+u64 g_gpu_draws = 0, g_gpu_vertices = 0;  // --gpu
+std::map<std::string, u64> g_gpu_skipped;
+
+// A hash of n bytes of memory, to tell whether a texture changed
+u64 hash_memory(const unsigned char* p, u64 n) {
+    u64 h[4] = {0x9e3779b97f4a7c15ull, 0xc2b2ae3d27d4eb4full, 0x165667b19e3779f9ull, 0x27d4eb2f165667c5ull};
+    u64 i = 0;
+    for (; i + 32 <= n; i += 32)
+        for (int k = 0; k < 4; k++) {
+            u64 w;
+            std::memcpy(&w, p + i + 8 * k, 8);
+            h[k] = (h[k] ^ w) * 0x100000001b3ull;
+            h[k] ^= h[k] >> 29;
+        }
+    for (; i < n; i++) h[0] = (h[0] ^ p[i]) * 0x100000001b3ull;
+    return h[0] ^ (h[1] * 3) ^ (h[2] * 5) ^ (h[3] * 7) ^ n;
+}
 
 // A shader's translation, beside its disassembly: shaders/<vs|ps>-<address>.glsl, the first
 // time it is translated in a run
@@ -480,9 +501,9 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     return true;
 }
 
-// The draw, as vkdraw needs it, drawn; false (and why) if it couldn't be. vertex_why: why the
-// vertices are the CPU's, if they are.
-bool gpu_check(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const GpuRegs& r, u64 vs, u64 ps,
+// The draw, as vkdraw needs it (but for its target's memory); false (and why) if it can't be.
+// vertex_why: why the vertices are the CPU's, if they are.
+bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const GpuRegs& r, u64 vs, u64 ps,
                const Vertices& out, const std::vector<Tri>& tris, const std::vector<u32>& index,
                const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Target* targets, const int clip[4],
                u32 ps_user, u32 ena, u32 addr, const Memory& mem) {
@@ -573,7 +594,8 @@ bool gpu_check(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const
                 }
             }
         }
-    // the textures, each texel as the CPU's interpreter reads it
+    // the textures: 8-bit RGBA in rows as it is in memory, else each texel as the CPU's
+    // interpreter reads it, which is kept on the GPU under a hash of the memory it reads
     for (auto& im : vals.images) {
         Image ti(im.t);
         ti.prepare(mem);
@@ -591,6 +613,23 @@ bool gpu_check(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const
             return false;
         }
         std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
+        bool micro = ti.tiling == 5 || ti.tiling == 9 || ti.tiling == 13 || ti.tiling == 19;
+        if (ti.type == 9 && ti.dfmt == 10 && (ti.nfmt == 0 || ti.nfmt == 9) && !micro && ti.all_ok) {
+            tx.format = ti.nfmt == 9 ? 43 : 37;  // VK_FORMAT_R8G8B8A8_UNORM, _SRGB
+            tx.pitch = ti.epitch;
+            tx.raw = reinterpret_cast<const unsigned char*>(ti.base);
+            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            d.textures.push_back(std::move(tx));
+            continue;
+        }
+        if (ti.all_ok) {
+            tx.key = std::format("{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4], im.t[5],
+                                 im.t[6], im.t[7], hash_memory(reinterpret_cast<const unsigned char*>(ti.base), ti.size));
+            if (vkdraw::has_texture(tx.key)) {
+                d.textures.push_back(std::move(tx));
+                continue;
+            }
+        }
         tx.rgba.resize(size_t(tx.width) * tx.height * tx.layers * 4);
         float* o = tx.rgba.data();
         for (u32 l = 0; l < tx.layers; l++) {
@@ -608,19 +647,18 @@ bool gpu_check(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const
     d.height = t.height;
     // VkFormat: R8G8B8A8 unorm 37, srgb 43; B8G8R8A8 unorm 44, srgb 50 (COMP_SWAP alt: B first)
     d.format = t.swap == 0 ? (t.nfmt == 9 ? 43 : 37) : (t.nfmt == 9 ? 50 : 44);
-    d.target.assign(reinterpret_cast<const unsigned char*>(t.base), reinterpret_cast<const unsigned char*>(t.base) + bytes);
     d.blend = t.blend;
     d.mask = t.mask;
     for (int c = 0; c < 4; c++) d.blend_color[c] = regf(r, 0x105 + u32(c), 0);
     for (int k = 0; k < 4; k++) d.scissor[k] = clip[k];
-    d.before = d.target;
-    return vkdraw::run(d, why);
+    return true;
 }
 
 // The GPU's picture against the CPU's, now in the target: how many pixels differ by more than
 // 1 in 255 in any channel, and by how much at most, and how many the draw changed (on the
 // GPU), so that "the same" isn't only "left as they were". Saves the GPU's as NNN-gpu.bmp.
-std::string compare(u64 number, const vkdraw::Draw& d, const Target& t, const int clip[4]) {
+std::string compare(u64 number, const vkdraw::Draw& d, const std::vector<unsigned char>& before,
+                    const std::vector<unsigned char>& result, const Target& t, const int clip[4]) {
     u64 n = 0, differ = 0, changed = 0;
     int most = 0;
     for (int y = clip[1]; y < clip[3] && u32(y) < d.height; y++)
@@ -628,10 +666,10 @@ std::string compare(u64 number, const vkdraw::Draw& d, const Target& t, const in
             size_t at = (size_t(y) * d.width + size_t(x)) * 4;
             const auto* cpu = reinterpret_cast<const unsigned char*>(t.base) + at;
             int m = 0;
-            for (int c = 0; c < 4; c++) m = std::max(m, std::abs(int(cpu[c]) - int(d.target[at + size_t(c)])));
+            for (int c = 0; c < 4; c++) m = std::max(m, std::abs(int(cpu[c]) - int(result[at + size_t(c)])));
             n++;
             differ += m > 1;
-            changed += std::memcmp(&d.before[at], &d.target[at], 4) != 0;
+            changed += std::memcmp(&before[at], &result[at], 4) != 0;
             most = std::max(most, m);
         }
     u32 w = std::min({d.width, u32(clip[2]), 4096u}), h = std::min({d.height, u32(clip[3]), 4096u});
@@ -639,7 +677,7 @@ std::string compare(u64 number, const vkdraw::Draw& d, const Target& t, const in
     bool rgba = t.swap == 0;
     for (u32 y = 0; y < h; y++)
         for (u32 x = 0; x < w; x++) {
-            const unsigned char* p = &d.target[(size_t(y) * d.width + x) * 4];
+            const unsigned char* p = &result[(size_t(y) * d.width + x) * 4];
             unsigned char* q = &px[(size_t(y) * w + x) * 4];
             q[0] = rgba ? p[2] : p[0];
             q[1] = p[1];
@@ -815,12 +853,62 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     int area[4] = {x0, y0, x1, y1};
     vkdraw::Draw check;
     std::string check_why, vertex_why;
+    std::vector<unsigned char> before, result;
     bool checked = false;
+    // the draws saved to draws/: their number and a line in the index, once drawn
+    auto saved = [&](std::string what, const std::string& extra) {
+        if (!save) return what;
+        g_saved_by_ps[ps]++;
+        u64 number = g_saved++;
+        auto dir = std::filesystem::path(M.out_dir) / "draws";
+        std::filesystem::create_directories(dir);
+        if (number == 0)  // an earlier run's pictures go
+            for (const auto& e : std::filesystem::directory_iterator(dir))
+                if (e.path().extension() == ".bmp") std::filesystem::remove(e.path());
+        if (checked) {
+            what += "; " + compare(number, check, before, result, targets[0], area);
+            what += vertex_why.empty() ? ", vertices too" : "; vertices from the CPU: " + vertex_why;
+        } else if (M.gpu_check) {
+            what += "; not on the GPU: " + check_why;
+        }
+        what += extra;
+        for (auto& t : targets)
+            if (t.count) {
+                save_target(number, t, u32(x1), u32(y1), mem, std::format("vs {:#x}, ps {:#x}: {}", vs, ps, what));
+                break;
+            }
+        return what;
+    };
     if (save && M.gpu_check) {
-        checked = gpu_check(check, check_why, vertex_why, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user,
-                            ena, addr, mem);
+        checked = prepare_gpu(check, check_why, vertex_why, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user,
+                              ena, addr, mem);
+        if (checked) {
+            const auto* p = reinterpret_cast<const unsigned char*>(targets[0].base);
+            before.assign(p, p + size_t(check.width) * check.height * 4);
+            result.resize(before.size());
+            check.target = before.data();
+            check.result = result.data();
+            checked = vkdraw::run(check, check_why);
+        }
         if (!checked) g_check_skipped[check_why]++;
         else if (vertex_why.empty()) g_check_gpu_vertices++;
+    } else if (M.gpu) {
+        // drawn on the GPU, into the game's memory
+        vkdraw::Draw gd;
+        std::string why, vwhy;
+        if (prepare_gpu(gd, why, vwhy, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user, ena, addr, mem)) {
+            auto* p = reinterpret_cast<unsigned char*>(targets[0].base);
+            gd.target = p;
+            gd.result = p;
+            if (vkdraw::run(gd, why)) {
+                g_gpu_draws++;
+                g_gpu_vertices += vwhy.empty();
+                size_t n = gd.indices.empty() ? gd.vertices.size() / ((1 + gd.attributes) * 4) : gd.indices.size();
+                return saved(std::format("on the GPU: {} triangles{}", n / 3, rects ? " (rectangles)" : ""),
+                             vwhy.empty() ? "" : "; vertices from the CPU: " + vwhy);
+            }
+        }
+        g_gpu_skipped[why]++;
     }
     Pool& p = pool();
     int bands = (y1 - y0) * (x1 - x0) > 64 * 64 ? p.n : 1;
@@ -923,27 +1011,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     else p.run(band);
     g_pixels += pixels;
     g_ps_waves += waves;
-    std::string what = std::format("{} triangles, {} pixels", tris.size(), pixels.load());
-    if (save) {
-        g_saved_by_ps[ps]++;
-        u64 number = g_saved++;
-        auto dir = std::filesystem::path(M.out_dir) / "draws";
-        std::filesystem::create_directories(dir);
-        if (number == 0)  // an earlier run's pictures go
-            for (const auto& e : std::filesystem::directory_iterator(dir))
-                if (e.path().extension() == ".bmp") std::filesystem::remove(e.path());
-        if (checked) {
-            what += "; " + compare(number, check, targets[0], area);
-            what += vertex_why.empty() ? ", vertices too" : "; vertices from the CPU: " + vertex_why;
-        }
-        else if (M.gpu_check) what += "; not on the GPU: " + check_why;
-        for (auto& t : targets)
-            if (t.count) {
-                save_target(number, t, u32(x1), u32(y1), mem, std::format("vs {:#x}, ps {:#x}: {}", vs, ps, what));
-                break;
-            }
-    }
-    return what;
+    return saved(std::format("{} triangles, {} pixels", tris.size(), pixels.load()), "");
 }
 
 std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
@@ -1023,6 +1091,19 @@ std::vector<std::string> draw_report() {
         std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
                     double(g_dispatch_ns) / 1e9,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};
+    if (M.gpu) {
+        std::lock_guard lock(g_draw_lock);
+        std::string where = vkdraw::device();
+        s.push_back(std::format("On the GPU (`--gpu`){}: {} draws, {} of them with their vertex shaders there too; the CPU drew "
+                                "the rest.\n",
+                                where.empty() ? "" : ", " + where, g_gpu_draws, g_gpu_vertices));
+        if (std::string rep = vkdraw::report(); !rep.empty()) s.push_back(rep + ".\n");
+        if (!g_gpu_skipped.empty()) {
+            s.insert(s.end(), {"Drawn on the CPU instead:\n", "| Why | Draws |", "|---|---:|"});
+            for (auto& [why, count] : g_gpu_skipped) s.push_back(std::format("| {} | {} |", why, count));
+            s.push_back("");
+        }
+    }
     if (M.gpu_check) {
         std::lock_guard lock(g_draw_lock);
         std::string where = vkdraw::device();

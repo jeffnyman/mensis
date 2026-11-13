@@ -94,6 +94,7 @@ struct Image {
     // Worked out once an instruction (prepare): the element's size, whether it is a compressed
     // block, the pitch and height in elements, and whether all of it is memory the GPU may read
     u32 bytes = 0, epitch = 0, eheight = 0;
+    u64 size = 0;  // the bytes it spans, all its slices, from base
     bool block = false, all_ok = false;
     explicit Image(const u32* t);
     Image() = default;

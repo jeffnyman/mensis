@@ -163,6 +163,7 @@ struct Machine {
     unsigned seconds = 10;  // 0: no time limit
     bool draw = true;  // run the draws and dispatches (--no-draw: only follow the commands)
     bool gpu_check = false;  // draw the draws saved to draws/ on the PC's GPU too (--gpu-check)
+    bool gpu = false;  // draw on the PC's GPU what it can (--gpu)
     std::string out_dir;
     std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
     std::chrono::steady_clock::time_point t0;

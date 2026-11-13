@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// One draw on the PC's GPU, through Vulkan, with nothing kept between draws: it is for
-// checking the translation (--gpu-check), a draw at a time, not for speed. The GLSL is
-// compiled to SPIR-V by the Vulkan SDK's shaderc. Textures are uploaded as 32-bit floats,
-// decoded on the CPU exactly as the CPU's interpreter reads them, so that only the shader
-// and the GPU's filtering and blending differ from the CPU's draw.
+// Draws on the PC's GPU, through Vulkan, one at a time: each one's render target goes up from
+// the game's memory and comes back into it (or into a copy, for --gpu-check) before the next.
+// The GLSL is compiled to SPIR-V by the Vulkan SDK's shaderc. Kept between draws: the compiled
+// shaders and pipelines (one descriptor set layout serves them all), the samplers, a render
+// target of each format and size, one buffer for what goes up and one for what comes back,
+// and the textures, by their descriptor and a hash of the memory they read, so a texture
+// that hasn't changed isn't decoded or uploaded again (up to 2 GiB of them; those not used
+// lately go first). A texture is uploaded as it is in memory if the GPU reads that format the
+// same way (8-bit RGBA, in rows), else as 32-bit floats, decoded on the CPU exactly as the
+// CPU's interpreter reads them.
 //
 // Built where the Vulkan SDK is (Windows, so far: MENSIS_VULKAN); elsewhere run() says so.
 
@@ -15,7 +20,10 @@
 #include <shaderc/shaderc.h>
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -48,7 +56,7 @@ std::string g_first_message;
 VKAPI_ATTR VkBool32 VKAPI_CALL on_message(VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT,
                                           const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
     if (g_messages++ == 0) g_first_message = data->pMessage;
-    if (g_messages <= 10) std::fprintf(stderr, "Vulkan validation (GPU check): %s\n", data->pMessage);
+    if (g_messages <= 10) std::fprintf(stderr, "Vulkan validation (GPU drawing): %s\n", data->pMessage);
     return VK_FALSE;
 }
 
@@ -61,7 +69,7 @@ bool init() {
     if (g.tried) return g.ok;
     g.tried = true;
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "Mensis GPU check";
+    app.pApplicationName = "Mensis";
     app.apiVersion = VK_API_VERSION_1_3;
     const char* layer = "VK_LAYER_KHRONOS_validation";
     u32 n = 0;
@@ -118,7 +126,10 @@ bool init() {
     if (!have.geometryShader || !have.depthClamp) return fail("a GPU without geometry shaders or depth clamping");
     want.geometryShader = VK_TRUE;  // a rectangle's fourth corner
     want.depthClamp = VK_TRUE;  // depth isn't clipped: the console's draws here don't test it
+    VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    v12.descriptorBindingPartiallyBound = VK_TRUE;  // one layout, its bindings used or not
     VkPhysicalDeviceVulkan13Features v13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    v13.pNext = &v12;
     v13.dynamicRendering = VK_TRUE;
     v13.shaderDemoteToHelperInvocation = VK_TRUE;  // what discard compiles to for Vulkan 1.3
     float priority = 1;
@@ -175,88 +186,6 @@ u32 memory_type(u32 bits, VkMemoryPropertyFlags want) {
     return ~0u;
 }
 
-// Everything one draw makes, destroyed at the end
-struct Objects {
-    std::vector<std::pair<VkBuffer, VkDeviceMemory>> buffers;
-    std::vector<std::pair<VkImage, VkDeviceMemory>> images;
-    std::vector<VkImageView> views;
-    std::vector<VkSampler> samplers;
-    std::vector<VkShaderModule> modules;
-    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkDescriptorPool dpool = VK_NULL_HANDLE;
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VkFence fence = VK_NULL_HANDLE;
-    ~Objects() {
-        VkDevice d = g.device;
-        if (fence) vkDestroyFence(d, fence, nullptr);
-        if (cmd) vkFreeCommandBuffers(d, g.pool, 1, &cmd);
-        if (dpool) vkDestroyDescriptorPool(d, dpool, nullptr);
-        if (pipeline) vkDestroyPipeline(d, pipeline, nullptr);
-        if (layout) vkDestroyPipelineLayout(d, layout, nullptr);
-        if (set_layout) vkDestroyDescriptorSetLayout(d, set_layout, nullptr);
-        for (auto m : modules) vkDestroyShaderModule(d, m, nullptr);
-        for (auto s : samplers) vkDestroySampler(d, s, nullptr);
-        for (auto v : views) vkDestroyImageView(d, v, nullptr);
-        for (auto [i, m] : images) vkDestroyImage(d, i, nullptr), vkFreeMemory(d, m, nullptr);
-        for (auto [b, m] : buffers) vkDestroyBuffer(d, b, nullptr), vkFreeMemory(d, m, nullptr);
-    }
-
-    // A buffer the CPU can write and read, holding `bytes` (copied in if given)
-    VkBuffer buffer(VkDeviceSize size, VkBufferUsageFlags usage, const void* bytes, void** mapped = nullptr) {
-        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bi.size = std::max<VkDeviceSize>(size, 16);
-        bi.usage = usage;
-        VkBuffer b;
-        if (vkCreateBuffer(g.device, &bi, nullptr, &b) != VK_SUCCESS) return VK_NULL_HANDLE;
-        VkMemoryRequirements mr;
-        vkGetBufferMemoryRequirements(g.device, b, &mr);
-        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        ai.allocationSize = mr.size;
-        ai.memoryTypeIndex = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        VkDeviceMemory m;
-        if (vkAllocateMemory(g.device, &ai, nullptr, &m) != VK_SUCCESS) {
-            vkDestroyBuffer(g.device, b, nullptr);
-            return VK_NULL_HANDLE;
-        }
-        vkBindBufferMemory(g.device, b, m, 0);
-        buffers.emplace_back(b, m);
-        void* p;
-        vkMapMemory(g.device, m, 0, VK_WHOLE_SIZE, 0, &p);
-        if (bytes) std::memcpy(p, bytes, size);
-        if (mapped) *mapped = p;
-        return b;
-    }
-
-    VkImage image(VkImageType type, VkFormat format, u32 w, u32 h, u32 depth, u32 layers, VkImageUsageFlags usage) {
-        VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        ii.imageType = type;
-        ii.format = format;
-        ii.extent = {w, h, depth};
-        ii.mipLevels = 1;
-        ii.arrayLayers = layers;
-        ii.samples = VK_SAMPLE_COUNT_1_BIT;
-        ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ii.usage = usage;
-        VkImage i;
-        if (vkCreateImage(g.device, &ii, nullptr, &i) != VK_SUCCESS) return VK_NULL_HANDLE;
-        VkMemoryRequirements mr;
-        vkGetImageMemoryRequirements(g.device, i, &mr);
-        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        ai.allocationSize = mr.size;
-        ai.memoryTypeIndex = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        VkDeviceMemory m;
-        if (vkAllocateMemory(g.device, &ai, nullptr, &m) != VK_SUCCESS) {
-            vkDestroyImage(g.device, i, nullptr);
-            return VK_NULL_HANDLE;
-        }
-        vkBindImageMemory(g.device, i, m, 0);
-        images.emplace_back(i, m);
-        return i;
-    }
-};
-
 void barrier(VkCommandBuffer cmd, VkImage image, u32 layers, VkImageLayout from, VkImageLayout to, VkAccessFlags sa,
              VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -308,68 +237,195 @@ VkSamplerAddressMode address_mode(u32 m) {
     }
 }
 
-bool draw(Draw& d, std::string& why) {
-    Objects o;
-    std::vector<u32> vs_spv, ps_spv;
-    if (!compile(d.vs, shaderc_vertex_shader, vs_spv, why) || !compile(d.ps, shaderc_fragment_shader, ps_spv, why)) return false;
-    auto module = [&](const std::vector<u32>& code) {
-        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        mi.codeSize = code.size() * 4;
-        mi.pCode = code.data();
-        VkShaderModule m = VK_NULL_HANDLE;
-        vkCreateShaderModule(g.device, &mi, nullptr, &m);
-        o.modules.push_back(m);
-        return m;
-    };
-    VkShaderModule vsm = module(vs_spv), psm = module(ps_spv), gsm = VK_NULL_HANDLE;
-    if (!d.gs.empty()) {
-        std::vector<u32> gs_spv;
-        if (!compile(d.gs, shaderc_geometry_shader, gs_spv, why)) return false;
-        gsm = module(gs_spv);
-    }
-    bool gpu_vertices = !d.indices.empty();
-    VkFormat format = VkFormat(d.format);
+// ---- what is kept between draws ----
 
-    // the descriptors: the values, then a texture and sampler for each image instruction
-    // and the vertex shader's: its values at 16, its buffers from 17
-    if (d.textures.size() > 15) {
-        why = "more than 15 image instructions";
+// A buffer the CPU writes and reads, mapped
+struct HostBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    unsigned char* p = nullptr;
+    VkDeviceSize size = 0;
+    void destroy() {
+        if (buffer) vkDestroyBuffer(g.device, buffer, nullptr), vkFreeMemory(g.device, memory, nullptr);
+        *this = {};
+    }
+    // At least `want` bytes (the old contents aren't kept). `cached`: for the CPU to read, in
+    // the CPU's own cached memory (the GPU's memory the CPU can see is very slow to read from)
+    bool reserve(VkDeviceSize want, VkBufferUsageFlags usage, bool cached = false) {
+        if (want <= size) return true;
+        destroy();
+        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bi.size = std::max<VkDeviceSize>(want + want / 2, 1 << 20);
+        bi.usage = usage;
+        if (vkCreateBuffer(g.device, &bi, nullptr, &buffer) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(g.device, buffer, &mr);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = mr.size;
+        const VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        ai.memoryTypeIndex = ~0u;
+        if (cached) ai.memoryTypeIndex = memory_type(mr.memoryTypeBits, host | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (ai.memoryTypeIndex == ~0u) ai.memoryTypeIndex = memory_type(mr.memoryTypeBits, host);
+        if (vkAllocateMemory(g.device, &ai, nullptr, &memory) != VK_SUCCESS) {
+            vkDestroyBuffer(g.device, buffer, nullptr);
+            buffer = VK_NULL_HANDLE;
+            return false;
+        }
+        vkBindBufferMemory(g.device, buffer, memory, 0);
+        void* m;
+        vkMapMemory(g.device, memory, 0, VK_WHOLE_SIZE, 0, &m);
+        p = static_cast<unsigned char*>(m);
+        size = bi.size;
+        return true;
+    }
+};
+
+struct GpuImage {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    u32 layers = 1;
+    VkDeviceSize bytes = 0;
+    u64 used = 0;  // the draw that last used it
+    void destroy() {
+        if (view) vkDestroyImageView(g.device, view, nullptr);
+        if (image) vkDestroyImage(g.device, image, nullptr), vkFreeMemory(g.device, memory, nullptr);
+        *this = {};
+    }
+};
+
+bool make_image(GpuImage& im, VkImageType type, VkImageViewType view_type, VkFormat format, u32 w, u32 h, u32 depth, u32 layers,
+                VkImageUsageFlags usage, VkComponentMapping swizzle = {}) {
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = type;
+    ii.format = format;
+    ii.extent = {w, h, depth};
+    ii.mipLevels = 1;
+    ii.arrayLayers = layers;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = usage;
+    if (vkCreateImage(g.device, &ii, nullptr, &im.image) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(g.device, im.image, &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(g.device, &ai, nullptr, &im.memory) != VK_SUCCESS) {
+        vkDestroyImage(g.device, im.image, nullptr);
+        im.image = VK_NULL_HANDLE;
         return false;
     }
+    vkBindImageMemory(g.device, im.image, im.memory, 0);
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = im.image;
+    vi.viewType = view_type;
+    vi.format = format;
+    vi.components = swizzle;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+    vkCreateImageView(g.device, &vi, nullptr, &im.view);
+    im.layers = layers;
+    im.bytes = mr.size;
+    return true;
+}
+
+struct Kept {
+    bool ready = false;
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorPool dpool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    HostBuffer upload, readback;  // a draw's data going up, and its target coming back
+    std::map<std::string, VkPipeline> pipelines;
+    std::map<std::string, VkShaderModule> modules;
+    std::map<std::string, GpuImage> textures;
+    VkDeviceSize texture_bytes = 0;
+    std::map<std::array<u32, 4>, VkSampler> samplers;
+    std::map<std::array<u32, 3>, GpuImage> targets;  // by format, width, height
+    u64 draws = 0, texture_uploads = 0, evicted = 0;
+    u64 ns = 0;  // the time the draws took, uploads and readbacks included
+};
+Kept k;
+
+constexpr u32 IMAGES = 15, BUFFERS = 15;  // a pixel shader's textures (1-15), a vertex shader's buffers (17-31)
+constexpr VkDeviceSize TEXTURE_BUDGET = VkDeviceSize(2) << 30;
+
+// One descriptor set layout for every draw, with each binding there to be used or not
+bool prepare_kept() {
+    if (k.ready) return true;
     const VkShaderStageFlags all = VK_SHADER_STAGE_ALL_GRAPHICS;
-    std::vector<VkDescriptorSetLayoutBinding> bindings(1 + d.textures.size());
-    bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr};
-    for (u32 k = 0; k < d.textures.size(); k++)
-        bindings[k + 1] = {k + 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, all, nullptr};
-    if (gpu_vertices) {
-        bindings.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
-        for (u32 k = 0; k < d.vs_buffers.size(); k++) bindings.push_back({17 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
-    }
+    std::vector<VkDescriptorSetLayoutBinding> b;
+    b.push_back({0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
+    for (u32 i = 1; i <= IMAGES; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, all, nullptr});
+    for (u32 i = 16; i <= 16 + BUFFERS; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
+    std::vector<VkDescriptorBindingFlags> flags(b.size(), VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+    VkDescriptorSetLayoutBindingFlagsCreateInfo fi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    fi.bindingCount = u32(flags.size());
+    fi.pBindingFlags = flags.data();
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = u32(bindings.size());
-    li.pBindings = bindings.data();
-    vkCreateDescriptorSetLayout(g.device, &li, nullptr, &o.set_layout);
-    VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof d.viewport};
+    li.pNext = &fi;
+    li.bindingCount = u32(b.size());
+    li.pBindings = b.data();
+    if (vkCreateDescriptorSetLayout(g.device, &li, nullptr, &k.set_layout) != VK_SUCCESS) return fail("vkCreateDescriptorSetLayout failed");
+    VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT, 0, 32};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
-    pli.pSetLayouts = &o.set_layout;
+    pli.pSetLayouts = &k.set_layout;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &push;
-    vkCreatePipelineLayout(g.device, &pli, nullptr, &o.layout);
+    if (vkCreatePipelineLayout(g.device, &pli, nullptr, &k.layout) != VK_SUCCESS) return fail("vkCreatePipelineLayout failed");
+    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 + BUFFERS}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMAGES}};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.maxSets = 1;
+    dpi.poolSizeCount = 2;
+    dpi.pPoolSizes = sizes;
+    if (vkCreateDescriptorPool(g.device, &dpi, nullptr, &k.dpool) != VK_SUCCESS) return fail("vkCreateDescriptorPool failed");
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = g.pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(g.device, &cai, &k.cmd);
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    vkCreateFence(g.device, &fci, nullptr, &k.fence);
+    k.ready = true;
+    return true;
+}
 
-    // the pipeline
+VkShaderModule module(const std::string& src, shaderc_shader_kind kind, std::string& why) {
+    auto it = k.modules.find(src);
+    if (it != k.modules.end()) return it->second;
+    std::vector<u32> spv;
+    if (!compile(src, kind, spv, why)) return VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mi.codeSize = spv.size() * 4;
+    mi.pCode = spv.data();
+    VkShaderModule m = VK_NULL_HANDLE;
+    vkCreateShaderModule(g.device, &mi, nullptr, &m);
+    k.modules[src] = m;
+    return m;
+}
+
+VkPipeline pipeline(const Draw& d, std::string& why) {
+    bool gpu_vertices = !d.indices.empty();
+    std::hash<std::string> h;
+    std::string key = std::format("{:x}:{:x}:{:x}:{}:{:x}:{:x}:{:x}:{}:{}", h(d.vs), h(d.gs), h(d.ps), d.format, d.blend, d.mask,
+                                  d.cull, d.attributes, gpu_vertices);
+    auto it = k.pipelines.find(key);
+    if (it != k.pipelines.end()) return it->second;
+    VkShaderModule vsm = module(d.vs, shaderc_vertex_shader, why), psm = module(d.ps, shaderc_fragment_shader, why);
+    VkShaderModule gsm = d.gs.empty() ? VK_NULL_HANDLE : module(d.gs, shaderc_geometry_shader, why);
+    if (!vsm || !psm || (!d.gs.empty() && !gsm)) return VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo stages[3] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                  {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                  {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vsm;
-    stages[0].pName = "main";
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = psm;
-    stages[1].pName = "main";
-    stages[2].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
-    stages[2].module = gsm;
-    stages[2].pName = "main";
+    VkShaderModule mods[3] = {vsm, psm, gsm};
+    VkShaderStageFlagBits kinds[3] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_GEOMETRY_BIT};
+    for (int i = 0; i < 3; i++) {
+        stages[i].stage = kinds[i];
+        stages[i].module = mods[i];
+        stages[i].pName = "main";
+    }
     u32 stride = (1 + d.attributes) * 16;
     VkVertexInputBindingDescription vb{0, stride, VK_VERTEX_INPUT_RATE_VERTEX};
     std::vector<VkVertexInputAttributeDescription> va;
@@ -383,13 +439,13 @@ bool draw(Draw& d, std::string& why) {
     }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport viewport{0, 0, float(d.width), float(d.height), 0, 1};
-    VkRect2D scissor{{d.scissor[0], d.scissor[1]}, {u32(d.scissor[2] - d.scissor[0]), u32(d.scissor[3] - d.scissor[1])}};
     VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vp.viewportCount = 1;
-    vp.pViewports = &viewport;
     vp.scissorCount = 1;
-    vp.pScissors = &scissor;
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    ds.dynamicStateCount = 2;
+    ds.pDynamicStates = dyn;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = VK_CULL_MODE_NONE;  // the CPU's vertices: it culled them already
@@ -414,13 +470,16 @@ bool draw(Draw& d, std::string& why) {
             !blend_factor(asrc, cb.srcAlphaBlendFactor) || !blend_factor(adst, cb.dstAlphaBlendFactor) ||
             !blend_op(cfn, cb.colorBlendOp) || !blend_op(afn, cb.alphaBlendOp)) {
             why = std::format("blending {:#x}", bc);
-            return false;
+            return VK_NULL_HANDLE;
         }
     }
     VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     bs.attachmentCount = 1;
     bs.pAttachments = &cb;
-    for (int c = 0; c < 4; c++) bs.blendConstants[c] = d.blend_color[c];
+    VkDynamicState dyn3[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+    ds.dynamicStateCount = 3;
+    ds.pDynamicStates = dyn3;
+    VkFormat format = VkFormat(d.format);
     VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     ri.colorAttachmentCount = 1;
     ri.pColorAttachmentFormats = &format;
@@ -434,161 +493,231 @@ bool draw(Draw& d, std::string& why) {
     gi.pRasterizationState = &rs;
     gi.pMultisampleState = &ms;
     gi.pColorBlendState = &bs;
-    gi.layout = o.layout;
-    if (vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &gi, nullptr, &o.pipeline) != VK_SUCCESS) {
+    gi.pDynamicState = &ds;
+    gi.layout = k.layout;
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &gi, nullptr, &p) != VK_SUCCESS) {
         why = "vkCreateGraphicsPipelines failed";
+        return VK_NULL_HANDLE;
+    }
+    k.pipelines[key] = p;
+    return p;
+}
+
+VkSampler sampler(const u32* s) {
+    std::array<u32, 4> key = {s[0], s[1], s[2], s[3]};
+    auto it = k.samplers.find(key);
+    if (it != k.samplers.end()) return it->second;
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = ((s[2] >> 20) & 3) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    si.minFilter = ((s[2] >> 22) & 3) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = address_mode(s[0] & 7);
+    si.addressModeV = address_mode((s[0] >> 3) & 7);
+    si.addressModeW = address_mode((s[0] >> 6) & 7);
+    u32 border = (s[3] >> 30) & 3;
+    si.borderColor = border == 2 ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : border == 1 ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    si.maxLod = 0;
+    VkSampler v = VK_NULL_HANDLE;
+    vkCreateSampler(g.device, &si, nullptr, &v);
+    k.samplers[key] = v;
+    return v;
+}
+
+// Textures not used lately go when there are more than the budget
+void evict() {
+    if (k.texture_bytes <= TEXTURE_BUDGET) return;
+    std::vector<std::pair<u64, std::string>> by_age;
+    for (auto& [key, im] : k.textures) by_age.emplace_back(im.used, key);
+    std::sort(by_age.begin(), by_age.end());
+    for (auto& [used, key] : by_age) {
+        if (k.texture_bytes <= TEXTURE_BUDGET / 2) break;
+        GpuImage& im = k.textures[key];
+        k.texture_bytes -= im.bytes;
+        im.destroy();
+        k.textures.erase(key);
+        k.evicted++;
+    }
+}
+
+VkComponentSwizzle swizzle(u32 sel) {
+    switch (sel) {
+        case 0: return VK_COMPONENT_SWIZZLE_ZERO;
+        case 1: return VK_COMPONENT_SWIZZLE_ONE;
+        case 4: return VK_COMPONENT_SWIZZLE_R;
+        case 5: return VK_COMPONENT_SWIZZLE_G;
+        case 6: return VK_COMPONENT_SWIZZLE_B;
+        default: return VK_COMPONENT_SWIZZLE_A;
+    }
+}
+
+bool draw(Draw& d, std::string& why) {
+    if (!prepare_kept()) {
+        why = g.why;
         return false;
     }
-
-    // the target, the textures and the buffers
-    VkDeviceSize target_bytes = VkDeviceSize(d.width) * d.height * 4;
-    VkBuffer staging = o.buffer(target_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, d.target.data());
-    void* readback = nullptr;
-    VkBuffer back = o.buffer(target_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, nullptr, &readback);
-    VkImage target = o.image(VK_IMAGE_TYPE_2D, format, d.width, d.height, 1, 1,
-                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    VkBuffer values = o.buffer(d.values.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, d.values.data());
-    VkBuffer vertices = o.buffer(d.vertices.size() * 4, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, d.vertices.data());
-    VkBuffer indices = o.buffer(d.indices.size() * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, d.indices.data());
-    VkBuffer vs_values = o.buffer(d.vs_values.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, d.vs_values.data());
-    std::vector<VkBuffer> vs_buffers;
-    for (auto& b : d.vs_buffers) {
-        vs_buffers.push_back(o.buffer(b.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, b.data()));
-        if (!vs_buffers.back()) vertices = VK_NULL_HANDLE;
-    }
-    if (!staging || !back || !target || !values || !vertices || !indices || !vs_values) {
-        why = "out of GPU memory";
+    bool gpu_vertices = !d.indices.empty();
+    if (d.textures.size() > IMAGES || d.vs_buffers.size() > BUFFERS) {
+        why = "more than 15 images or buffers";
         return false;
     }
-    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vci.image = target;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VkImageView target_view;
-    vkCreateImageView(g.device, &vci, nullptr, &target_view);
-    o.views.push_back(target_view);
+    VkPipeline pipe = pipeline(d, why);
+    if (!pipe) return false;
+    k.draws++;
+    evict();
 
-    struct Tex {
-        VkImage image;
-        VkBuffer staging;
-        u32 layers;
+    // everything going up, in one buffer: each piece's place in it
+    VkDeviceSize at = 0;
+    auto place = [&](VkDeviceSize bytes) {
+        VkDeviceSize p = at;
+        at = (at + std::max<VkDeviceSize>(bytes, 16) + 255) & ~VkDeviceSize(255);
+        return p;
     };
-    std::vector<Tex> texs;
-    std::vector<VkDescriptorImageInfo> infos(d.textures.size());
-    for (size_t k = 0; k < d.textures.size(); k++) {
-        const Texture& t = d.textures[k];
+    VkDeviceSize target_bytes = VkDeviceSize(d.width) * d.height * 4;
+    VkDeviceSize at_target = place(target_bytes), at_values = place(d.values.size() * 4);
+    VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
+    VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
+    std::vector<VkDeviceSize> at_buffers;
+    for (auto& b : d.vs_buffers) at_buffers.push_back(place(b.size() * 4));
+    // the textures not kept yet, made and uploaded
+    std::vector<GpuImage*> images(d.textures.size());
+    std::vector<VkDeviceSize> at_texels(d.textures.size(), ~VkDeviceSize(0));
+    std::vector<GpuImage> unkept(d.textures.size());
+    for (size_t i = 0; i < d.textures.size(); i++) {
+        Texture& t = d.textures[i];
+        if (!t.key.empty()) {
+            auto it = k.textures.find(t.key);
+            if (it != k.textures.end()) {
+                images[i] = &it->second;
+                images[i]->used = k.draws;
+                continue;
+            }
+        }
         bool three = t.type == 10;
         u32 layers = three ? 1 : t.layers;
-        VkImage im = o.image(three ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, t.width, t.height,
-                             three ? t.layers : 1, layers, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        VkBuffer st = o.buffer(t.rgba.size() * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, t.rgba.data());
-        if (!im || !st) {
+        VkFormat f = t.format ? VkFormat(t.format) : VK_FORMAT_R32G32B32A32_SFLOAT;
+        VkComponentMapping map{};
+        if (t.format) map = {swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
+        GpuImage& im = t.key.empty() ? unkept[i] : k.textures[t.key];
+        if (!make_image(im, three ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
+                        three ? VK_IMAGE_VIEW_TYPE_3D : t.type == 12 || t.type == 13 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, f,
+                        t.width, t.height, three ? t.layers : 1, layers, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
+            if (!t.key.empty()) k.textures.erase(t.key);
             why = "out of GPU memory";
             return false;
         }
-        texs.push_back({im, st, layers});
-        VkImageViewCreateInfo tv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        tv.image = im;
-        tv.viewType = three ? VK_IMAGE_VIEW_TYPE_3D : t.type == 12 || t.type == 13 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-        tv.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        tv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
-        VkImageView view;
-        vkCreateImageView(g.device, &tv, nullptr, &view);
-        o.views.push_back(view);
-        const u32* s = t.sampler;
-        VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-        si.magFilter = ((s[2] >> 20) & 3) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-        si.minFilter = ((s[2] >> 22) & 3) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        si.addressModeU = address_mode(s[0] & 7);
-        si.addressModeV = address_mode((s[0] >> 3) & 7);
-        si.addressModeW = address_mode((s[0] >> 6) & 7);
-        u32 border = (s[3] >> 30) & 3;
-        si.borderColor = border == 2 ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : border == 1 ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-        si.maxLod = 0;
-        VkSampler sampler;
-        vkCreateSampler(g.device, &si, nullptr, &sampler);
-        o.samplers.push_back(sampler);
-        infos[k] = {sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        im.used = k.draws;
+        if (!t.key.empty()) k.texture_bytes += im.bytes;
+        images[i] = &im;
+        at_texels[i] = place(t.format ? VkDeviceSize(t.pitch) * t.height * t.layers * 4 : t.rgba.size() * 4);
+        k.texture_uploads++;
+    }
+    if (!k.upload.reserve(at, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
+        !k.readback.reserve(target_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+        why = "out of memory for the upload";
+        return false;
+    }
+    unsigned char* up = k.upload.p;
+    std::memcpy(up + at_target, d.target, target_bytes);
+    std::memcpy(up + at_values, d.values.data(), d.values.size() * 4);
+    std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
+    std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
+    std::memcpy(up + at_vs_values, d.vs_values.data(), d.vs_values.size() * 4);
+    for (size_t i = 0; i < d.vs_buffers.size(); i++) std::memcpy(up + at_buffers[i], d.vs_buffers[i].data(), d.vs_buffers[i].size() * 4);
+    for (size_t i = 0; i < d.textures.size(); i++) {
+        if (at_texels[i] == ~VkDeviceSize(0)) continue;
+        const Texture& t = d.textures[i];
+        if (t.format) std::memcpy(up + at_texels[i], t.raw, size_t(t.pitch) * t.height * t.layers * 4);
+        else std::memcpy(up + at_texels[i], t.rgba.data(), t.rgba.size() * 4);
     }
 
-    // the descriptor set
-    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 + u32(d.vs_buffers.size())},
-                                     {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max<u32>(1, u32(d.textures.size()))}};
-    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 1;
-    dpi.poolSizeCount = 2;
-    dpi.pPoolSizes = sizes;
-    vkCreateDescriptorPool(g.device, &dpi, nullptr, &o.dpool);
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = o.dpool;
-    dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &o.set_layout;
-    VkDescriptorSet set;
-    vkAllocateDescriptorSets(g.device, &dai, &set);
-    VkDescriptorBufferInfo vinfo{values, 0, VK_WHOLE_SIZE};
-    std::vector<VkWriteDescriptorSet> writes(1 + d.textures.size(), {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET});
-    writes[0].dstSet = set;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].pBufferInfo = &vinfo;
-    for (u32 k = 0; k < d.textures.size(); k++) {
-        writes[k + 1].dstSet = set;
-        writes[k + 1].dstBinding = k + 1;
-        writes[k + 1].descriptorCount = 1;
-        writes[k + 1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[k + 1].pImageInfo = &infos[k];
+    // the target, kept by its format and size
+    GpuImage& target = k.targets[{d.format, d.width, d.height}];
+    if (!target.image &&
+        !make_image(target, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.format), d.width, d.height, 1, 1,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        why = "out of GPU memory";
+        return false;
     }
-    std::vector<VkDescriptorBufferInfo> vs_infos;
-    vs_infos.reserve(1 + vs_buffers.size());
+
+    // the descriptors
+    vkResetDescriptorPool(g.device, k.dpool, 0);
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = k.dpool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &k.set_layout;
+    VkDescriptorSet set;
+    if (vkAllocateDescriptorSets(g.device, &dai, &set) != VK_SUCCESS) {
+        why = "vkAllocateDescriptorSets failed";
+        return false;
+    }
+    std::vector<VkDescriptorBufferInfo> binfo;
+    std::vector<VkDescriptorImageInfo> iinfo;
+    binfo.reserve(2 + d.vs_buffers.size());
+    iinfo.reserve(d.textures.size());
+    std::vector<VkWriteDescriptorSet> writes;
+    auto write_buffer = [&](u32 binding, VkDeviceSize offset, VkDeviceSize bytes) {
+        binfo.push_back({k.upload.buffer, offset, std::max<VkDeviceSize>(bytes, 16)});
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = set;
+        w.dstBinding = binding;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &binfo.back();
+        writes.push_back(w);
+    };
+    write_buffer(0, at_values, d.values.size() * 4);
+    for (u32 i = 0; i < d.textures.size(); i++) {
+        iinfo.push_back({sampler(d.textures[i].sampler), images[i]->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = set;
+        w.dstBinding = 1 + i;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &iinfo.back();
+        writes.push_back(w);
+    }
     if (gpu_vertices) {
-        vs_infos.push_back({vs_values, 0, VK_WHOLE_SIZE});
-        for (VkBuffer b : vs_buffers) vs_infos.push_back({b, 0, VK_WHOLE_SIZE});
-        for (u32 k = 0; k < vs_infos.size(); k++) {
-            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = set;
-            w.dstBinding = 16 + k;
-            w.descriptorCount = 1;
-            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w.pBufferInfo = &vs_infos[k];
-            writes.push_back(w);
-        }
+        write_buffer(16, at_vs_values, d.vs_values.size() * 4);
+        for (u32 i = 0; i < d.vs_buffers.size(); i++) write_buffer(17 + i, at_buffers[i], d.vs_buffers[i].size() * 4);
     }
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
     // the commands
-    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    cai.commandPool = g.pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    vkAllocateCommandBuffers(g.device, &cai, &o.cmd);
-    VkCommandBuffer cmd = o.cmd;
+    VkCommandBuffer cmd = k.cmd;
+    vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin);
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    barrier(cmd, target, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, T, T);
+    barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
     VkBufferImageCopy copy{};
+    copy.bufferOffset = at_target;
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {d.width, d.height, 1};
-    vkCmdCopyBufferToImage(cmd, staging, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-    barrier(cmd, target, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+    vkCmdCopyBufferToImage(cmd, k.upload.buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, T, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-    for (size_t k = 0; k < texs.size(); k++) {
-        const Texture& t = d.textures[k];
-        barrier(cmd, texs[k].image, texs[k].layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-                VK_ACCESS_TRANSFER_WRITE_BIT, T, T);
+    for (size_t i = 0; i < d.textures.size(); i++) {
+        if (at_texels[i] == ~VkDeviceSize(0)) continue;
+        const Texture& t = d.textures[i];
+        GpuImage& im = *images[i];
+        barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
         VkBufferImageCopy c{};
-        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, texs[k].layers};
+        c.bufferOffset = at_texels[i];
+        c.bufferRowLength = t.format ? t.pitch : 0;
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, im.layers};
         c.imageExtent = {t.width, t.height, t.type == 10 ? t.layers : 1};
-        vkCmdCopyBufferToImage(cmd, texs[k].staging, texs[k].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-        barrier(cmd, texs[k].image, texs[k].layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, T, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vkCmdCopyBufferToImage(cmd, k.upload.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+        barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, T,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
     }
     VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = target_view;
+    att.imageView = target.view;
     att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -598,55 +727,70 @@ bool draw(Draw& d, std::string& why) {
     rinfo.colorAttachmentCount = 1;
     rinfo.pColorAttachments = &att;
     vkCmdBeginRendering(cmd, &rinfo);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, k.layout, 0, 1, &set, 0, nullptr);
+    VkViewport viewport{0, 0, float(d.width), float(d.height), 0, 1};
+    VkRect2D scissor{{d.scissor[0], d.scissor[1]}, {u32(d.scissor[2] - d.scissor[0]), u32(d.scissor[3] - d.scissor[1])}};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdSetBlendConstants(cmd, d.blend_color);
     if (gpu_vertices) {
-        vkCmdPushConstants(cmd, o.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof d.viewport, d.viewport);
-        vkCmdBindIndexBuffer(cmd, indices, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdPushConstants(cmd, k.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof d.viewport, d.viewport);
+        vkCmdBindIndexBuffer(cmd, k.upload.buffer, at_indices, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cmd, u32(d.indices.size()), 1, 0, 0, 0);
     } else {
-        VkDeviceSize zero = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &vertices, &zero);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &k.upload.buffer, &at_vertices);
         vkCmdDraw(cmd, u32(d.vertices.size() / ((1 + d.attributes) * 4)), 1, 0, 0);
     }
     vkCmdEndRendering(cmd);
-    barrier(cmd, target, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+    barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, T);
-    vkCmdCopyImageToBuffer(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, back, 1, &copy);
+    copy.bufferOffset = 0;
+    vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
     VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    hb.buffer = back;
+    hb.buffer = k.readback.buffer;
     hb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
     vkEndCommandBuffer(cmd);
-    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    vkCreateFence(g.device, &fi, nullptr, &o.fence);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    if (vkQueueSubmit(g.queue, 1, &si, o.fence) != VK_SUCCESS || vkWaitForFences(g.device, 1, &o.fence, VK_TRUE, 10'000'000'000ull) != VK_SUCCESS) {
+    vkResetFences(g.device, 1, &k.fence);
+    bool done = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS &&
+                vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 10'000'000'000ull) == VK_SUCCESS;
+    for (auto& im : unkept) im.destroy();
+    if (!done) {
         why = "the GPU didn't finish the draw";
         return false;
     }
-    std::memcpy(d.target.data(), readback, target_bytes);
+    std::memcpy(d.result, k.readback.p, target_bytes);
     return true;
 }
 
 }  // namespace
 
+bool has_texture(const std::string& key) {
+    std::lock_guard lock(g_lock);
+    return k.textures.count(key) != 0;
+}
+
 bool run(Draw& d, std::string& why) {
     std::lock_guard lock(g_lock);
+    auto t0 = std::chrono::steady_clock::now();
     if (!init()) {
         why = g.why;
         return false;
     }
-    if (d.ps.find("uint64_t") != std::string::npos && !g.int64) {
+    if ((d.ps.find("uint64_t") != std::string::npos || d.vs.find("uint64_t") != std::string::npos) && !g.int64) {
         why = "the GPU has no 64-bit integers";
         return false;
     }
-    return draw(d, why);
+    bool ok = draw(d, why);
+    k.ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    return ok;
 }
 
 std::string device() {
@@ -658,16 +802,27 @@ std::string device() {
     return s + " (the validation layer reported no problems)";
 }
 
+std::string report() {
+    std::lock_guard lock(g_lock);
+    if (!k.draws) return {};
+    return std::format("{} draws on the GPU took {:.1f} s, uploads and readbacks included; {} pipelines; {} textures uploaded, "
+                       "{} kept at the end ({} MiB), {} let go",
+                       k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
+                       k.texture_bytes >> 20, k.evicted);
+}
+
 }  // namespace mensis::vkdraw
 
 #else  // no Vulkan SDK where this was built
 
 namespace mensis::vkdraw {
+bool has_texture(const std::string&) { return false; }
 bool run(Draw&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";
     return false;
 }
 std::string device() { return {}; }
+std::string report() { return {}; }
 }  // namespace mensis::vkdraw
 
 #endif

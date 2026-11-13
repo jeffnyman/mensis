@@ -84,8 +84,9 @@ and character models rendered from the game's own meshes and textures (`flver.py
   list, and the AVX wall is why an emulator has to run the game's code natively. Run natively,
   on Windows or Linux, the game gets past an engine panic, through 4.8 GiB of memory claimed
   up front, into 48 running threads and its own files, with sound up, and on past its
-  splash screen to its title screen and menu, drawn by its own GPU programs, disassembled and
-  run on the CPU.
+  splash screen to its title screen and menu, drawn by its own GPU programs, disassembled, run
+  on the CPU, and translated for a PC's GPU, where the title screen runs at the game's own 30
+  frames a second.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the
@@ -142,8 +143,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
 16. [The loader](docs/the-loader.md): the game's own start-up run under a CPU emulator, every
     system call it makes, and the AVX instruction that stops it: what an emulator has to do first.
     Then the same run natively, in C++, with the game's threads and files, the GPU's command
-    stream followed, frame after frame, and its shaders run on the CPU, as far as the title
-    screen.
+    stream followed, frame after frame, and its shaders run on the CPU, then translated and
+    run on the PC's GPU, as far as the title screen.
 
 For short answers that point into all of these, start with [questions and
 answers](docs/questions-and-answers.md).
