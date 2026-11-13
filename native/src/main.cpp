@@ -5,9 +5,16 @@
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
 //                   [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...
+//                   [--press F:BUTTONS[,F:BUTTONS]...]
 //
 // Where the Vulkan SDK was there to build with (Windows), the draws are drawn on the PC's GPU;
 // --cpu draws them on the CPU instead, as the Linux build always does.
+//
+// --press holds the controller's buttons down at flip F (for 6 flips), for runs that go past a
+// menu the same way each time: say --press 900:cross,960:down+cross. The buttons: cross,
+// circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3, options, touchpad. In
+// the window (--window), the keyboard is the controller too, and so is an XInput gamepad
+// (docs/the-loader.md has the keys).
 //
 // --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
 // lay folders over each other, first match wins. By default: work/update, then work/base (the
@@ -293,6 +300,7 @@ void write_outputs(const std::string& reason) {
     };
     for (const auto& n : M.notes) s.push_back(n + "\n");
     for (const auto& line : video_report()) s.push_back(line);
+    for (const auto& line : pad_report()) s.push_back(line);
     for (const auto& line : platform::window_report()) s.push_back(line);
     s.insert(s.end(), {"## Where it stopped\n", "```"});
     if (M.fault.valid) {
@@ -530,6 +538,29 @@ int main(int argc, char** argv) {
             M.gpu_check = true;
         } else if (a == "--cpu") {
             M.gpu = false;
+        } else if (a == "--press" && i + 1 < argc) {
+            std::string list = argv[++i];
+            for (size_t at = 0; at <= list.size();) {
+                size_t end = std::min(list.find(',', at), list.size());
+                std::string item = list.substr(at, end - at);
+                size_t colon = item.find(':');
+                u32 bits = 0;
+                bool ok = colon != std::string::npos && colon > 0 &&
+                          item.find_first_not_of("0123456789") == colon;
+                for (size_t b = colon + 1; ok && b <= item.size();) {
+                    size_t plus = std::min(item.find('+', b), item.size());
+                    u32 bit = pad_button(item.substr(b, plus - b));
+                    ok = bit != 0;
+                    bits |= bit;
+                    b = plus + 1;
+                }
+                if (!ok) {
+                    std::cerr << "--press: \"" << item << "\" isn't frame:button[+button...]\n";
+                    return 2;
+                }
+                M.presses.push_back({std::stoull(item.substr(0, colon)), bits});
+                at = end + 1;
+            }
         } else if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
@@ -545,7 +576,8 @@ int main(int argc, char** argv) {
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...\n";
+                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]... "
+                     "[--press F:BUTTONS[,F:BUTTONS]...]\n";
         return 2;
     }
     M.out_dir = pos[2];

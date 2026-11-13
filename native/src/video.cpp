@@ -351,6 +351,11 @@ u64 save_frame(const std::string& path) {
 
 // For the window: a copy of the buffer on screen (empty before the first flip) and its size;
 // returns the flips so far.
+u64 video_flips() {
+    std::lock_guard lock(g_display.m);
+    return g_display.flips;
+}
+
 u64 video_picture(std::vector<u32>& pixels, u32& width, u32& height) {
     std::lock_guard lock(g_display.m);
     const Display& d = g_display;

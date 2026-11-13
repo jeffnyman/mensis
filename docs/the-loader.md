@@ -126,6 +126,27 @@ drawing out, and the game runs at its own 30 frames a second, to a black screen.
 builds run the same code: up to the point where the game's threads started running, they
 made the same calls, from the same places, with the same results.
 
+The game has a controller. In the window, the keyboard is one, and so is an Xbox-style
+(XInput) gamepad, if one is plugged in. This release confirms with Circle and goes back with
+Cross, so Enter is Circle:
+
+| Keys | Buttons |
+|---|---|
+| arrow keys | the directional buttons |
+| Enter, Space | Circle (confirm) |
+| Backspace | Cross (back) |
+| Q, E | Square, Triangle |
+| Z, X, C, V | L1, R1, L2, R2 |
+| B, N | L3, R3 (the sticks pressed) |
+| Escape, T | Options, the touch pad |
+| W A S D, I J K L | the left stick, the right stick |
+
+`--press` presses buttons for a run, from a given frame, for 6 frames, the same way each
+time: `--press 1000:down,1060:circle` picks "Play Offline" from the title menu (the buttons
+by name: cross, circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3,
+options, touchpad; `down+circle` presses two at once). The summary lists the presses the
+game saw.
+
 The game's own files (`/app0/`) are read from `work/update`, then `work/base`: the 1.09
 update's files over the base game's, as [the package](the-package.md) extracts them. Run from
 the repository's root, or name the folders with `--app0` (more than once, first match wins).
@@ -542,13 +563,22 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     times each; the GPU's draws took 2.1 s. The title screen is the same, in the window too, `--gpu-check` gives the
     same as before, and the validation layer reported nothing. The other dispatches stay on the CPU:
     those with branches, and those that store elsewhere, or in other formats.
+33. **A controller.** The game sat on its title menu: it opened the controller of a user
+    it had never been told of (`sceUserServiceGetInitialUser` had no stand-in, so the id was
+    whatever was on its stack), and nothing answered `scePadReadState`. Now there is one user,
+    logged in from the start, and a DualShock 4 for them (`pad.cpp`), which the game reads
+    once a frame: from the window's keyboard, an XInput gamepad, or `--press`. Pressing Cross
+    on "Play Offline" did nothing; this release confirms with Circle. With `--press
+    1000:down,1060:circle` the game goes past its title screen for the first time: it checks
+    for save data, and says "Failed to create save data. Press OK to try again.", since there
+    are no stand-ins for `sceSaveData*` yet.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders (pixel, vertex, compute) translated into GLSL, and `vkdraw.cpp`, the draws and dispatches on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues), `audio.cpp` and `pad.cpp` (the user and the controller); `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders (pixel, vertex, compute) translated into GLSL, and `vkdraw.cpp`, the draws and dispatches on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
 | `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled, and with `--gpu-check` translated into GLSL), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

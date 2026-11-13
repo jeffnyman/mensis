@@ -35,7 +35,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(mensis-loader src/main.cpp src/standins.cpp src/threads.cpp src/files.cpp src/gnm.cpp src/libc.cpp src/audio.cpp src/gpu.cpp src/gcn.cpp src/shade.cpp src/bc7.cpp src/draw.cpp src/translate.cpp src/vkdraw.cpp src/video.cpp ${PLATFORM_SOURCES})
+add_executable(mensis-loader src/main.cpp src/standins.cpp src/threads.cpp src/files.cpp src/gnm.cpp src/libc.cpp src/audio.cpp src/pad.cpp src/gpu.cpp src/gcn.cpp src/shade.cpp src/bc7.cpp src/draw.cpp src/translate.cpp src/vkdraw.cpp src/video.cpp ${PLATFORM_SOURCES})
 target_compile_options(mensis-loader PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 
 if(WIN32)

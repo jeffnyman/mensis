@@ -14,7 +14,9 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <xinput.h>
 
+#include <atomic>
 #include <cstdio>
 #include <format>
 #include <thread>
@@ -63,6 +65,30 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
     e->ContextRecord->Rip = reinterpret_cast<DWORD64>(&mensis_restore);
     e->ContextRecord->Rcx = t->enter.saved_rsp;
     return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// ---- the controller ----
+//
+// The keys held in the window, and an XInput gamepad (an Xbox controller, or another that
+// Windows presents as one), the first connected, through xinput1_4.dll if it is there.
+
+std::atomic<bool> g_keys[256];
+
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+XInputGetStateFn xinput() {
+    static XInputGetStateFn f = [] {
+        HMODULE m = LoadLibraryW(L"xinput1_4.dll");
+        if (!m) m = LoadLibraryW(L"xinput9_1_0.dll");
+        return m ? reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void*>(GetProcAddress(m, "XInputGetState"))) : nullptr;
+    }();
+    return f;
+}
+
+// A stick's axis (-32768 to 32767, up positive) as the PS4's byte (0 to 255, down growing)
+std::uint8_t axis(SHORT v, bool flip) {
+    int x = std::abs(int(v)) < 4000 ? 0 : int(v);  // a small dead zone: a resting stick drifts
+    if (flip) x = -x - 1;
+    return std::uint8_t(std::clamp((x + 32768) >> 8, 0, 255));
 }
 
 // ---- the window (--window) ----
@@ -132,6 +158,13 @@ LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             EndPaint(w, &ps);
             return 0;
         }
+        case WM_KEYDOWN:
+        case WM_KEYUP:
+            if (wp < 256) g_keys[wp] = msg == WM_KEYDOWN;
+            return 0;
+        case WM_KILLFOCUS:  // keys let go of elsewhere aren't seen here
+            for (auto& k : g_keys) k = false;
+            return 0;
         case WM_CLOSE:
             finish("the window was closed");
         default:
@@ -177,6 +210,67 @@ bool open_window() {
 }
 
 std::vector<std::string> window_report() { return vk::report(); }
+
+PadInput pad_input() {
+    PadInput in;
+    struct Key {
+        int vk;
+        u32 bit;
+    };
+    static const Key keys[] = {
+        {VK_UP, 0x10},    {VK_RIGHT, 0x20}, {VK_DOWN, 0x40},  {VK_LEFT, 0x80},   {VK_RETURN, 0x2000}, {VK_SPACE, 0x2000},
+        {VK_BACK, 0x4000}, {'Q', 0x8000},   {'E', 0x1000},    {'Z', 0x400},      {'X', 0x800},        {'C', 0x100},
+        {'V', 0x200},     {'B', 0x2},       {'N', 0x4},       {VK_ESCAPE, 0x8},  {'T', 0x100000},
+    };
+    // Enter and Space are Circle, Backspace Cross: Bloodborne (this release) confirms with Circle
+    for (const Key& k : keys)
+        if (g_keys[k.vk]) in.buttons |= k.bit;
+    // the sticks: W A S D the left, I J K L the right
+    if (g_keys['A']) in.lx = 0;
+    if (g_keys['D']) in.lx = 255;
+    if (g_keys['W']) in.ly = 0;
+    if (g_keys['S']) in.ly = 255;
+    if (g_keys['J']) in.rx = 0;
+    if (g_keys['L']) in.rx = 255;
+    if (g_keys['I']) in.ry = 0;
+    if (g_keys['K']) in.ry = 255;
+    // a gamepad: looked for at most once a second while there is none (asking after a pad that
+    // isn't there is slow)
+    static std::atomic<int> pad{-1};
+    static std::atomic<ULONGLONG> looked{0};
+    XInputGetStateFn get = xinput();
+    if (!get) return in;
+    XINPUT_STATE st{};
+    int p = pad;
+    if (p < 0 || get(DWORD(p), &st) != ERROR_SUCCESS) {
+        pad = -1;
+        ULONGLONG now = GetTickCount64();
+        if (now - looked < 1000) return in;
+        looked = now;
+        for (p = 0; p < 4 && get(DWORD(p), &st) != ERROR_SUCCESS; p++) {}
+        if (p == 4) return in;
+        pad = p;
+    }
+    const XINPUT_GAMEPAD& g = st.Gamepad;
+    static const Key buttons[] = {
+        {XINPUT_GAMEPAD_DPAD_UP, 0x10}, {XINPUT_GAMEPAD_DPAD_RIGHT, 0x20}, {XINPUT_GAMEPAD_DPAD_DOWN, 0x40},
+        {XINPUT_GAMEPAD_DPAD_LEFT, 0x80}, {XINPUT_GAMEPAD_A, 0x4000}, {XINPUT_GAMEPAD_B, 0x2000},
+        {XINPUT_GAMEPAD_X, 0x8000}, {XINPUT_GAMEPAD_Y, 0x1000}, {XINPUT_GAMEPAD_LEFT_SHOULDER, 0x400},
+        {XINPUT_GAMEPAD_RIGHT_SHOULDER, 0x800}, {XINPUT_GAMEPAD_LEFT_THUMB, 0x2}, {XINPUT_GAMEPAD_RIGHT_THUMB, 0x4},
+        {XINPUT_GAMEPAD_START, 0x8}, {XINPUT_GAMEPAD_BACK, 0x100000},
+    };
+    for (const Key& b : buttons)
+        if (g.wButtons & b.vk) in.buttons |= b.bit;
+    in.l2 = std::max(in.l2, g.bLeftTrigger);
+    in.r2 = std::max(in.r2, g.bRightTrigger);
+    if (g.bLeftTrigger > 30) in.buttons |= 0x100;  // L2 and R2 are buttons too, once pressed a little
+    if (g.bRightTrigger > 30) in.buttons |= 0x200;
+    if (in.lx == 128) in.lx = axis(g.sThumbLX, false);
+    if (in.ly == 128) in.ly = axis(g.sThumbLY, true);
+    if (in.rx == 128) in.rx = axis(g.sThumbRX, false);
+    if (in.ry == 128) in.ry = axis(g.sThumbRY, true);
+    return in;
+}
 
 void reserve(u64 addr, u64 size) {
     void* p = VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE,

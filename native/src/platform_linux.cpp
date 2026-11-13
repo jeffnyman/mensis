@@ -71,6 +71,8 @@ bool try_reserve(u64 addr, u64 size) {
 
 void commit(u64, u64) {}
 
+PadInput pad_input() { return {}; }
+
 void protect(u64 addr, u64 size, int access) {
     int prot = access == 0 ? PROT_NONE : access == 1 ? PROT_READ : PROT_READ | PROT_WRITE | PROT_EXEC;
     mprotect(reinterpret_cast<void*>(addr), size, prot);

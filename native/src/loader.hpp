@@ -166,6 +166,7 @@ struct Machine {
     bool gpu = false;  // draw on the PC's GPU what it can (the default where there is Vulkan; --cpu: not)
     std::string out_dir;
     std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
+    std::vector<std::pair<u64, u32>> presses;  // --press: from which flip, which buttons (pad.cpp)
     std::chrono::steady_clock::time_point t0;
     Fault fault;  // the first fault, if a fault stopped the run
 };
@@ -186,6 +187,16 @@ void add_gnm_standins(std::unordered_map<std::string, Standin>& t);  // gnm.cpp
 void add_libc_standins(std::unordered_map<std::string, Standin>& t);  // libc.cpp
 void add_audio_standins(std::unordered_map<std::string, Standin>& t);  // audio.cpp
 void add_video_standins(std::unordered_map<std::string, Standin>& t);  // video.cpp
+void add_pad_standins(std::unordered_map<std::string, Standin>& t);  // pad.cpp
+u32 pad_button(const std::string& name);  // a button's bit, by its name (cross, up, ...); 0 if none
+std::vector<std::string> pad_report();  // for the summary
+u64 video_flips();  // the flips shown so far
+// What the controller reports: its buttons (SCE_PAD_BUTTON_*), the sticks (0 to 255, 128 the
+// middle, y growing downwards) and the triggers (0 to 255)
+struct PadInput {
+    u32 buttons = 0;
+    std::uint8_t lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
+};
 // The command processor (gpu.cpp): a submission to the graphics queue, then `then` (a flip);
 // a compute queue's ring; the ring written up to offset (sceGnmDingDong); the summary's lines.
 void gpu_submit(u32 count, const u64* dcbs, const u32* dcb_bytes, const u64* ccbs,
@@ -252,6 +263,8 @@ void enter_thread(u64 tp);  // on each host thread before it runs game code
 // has none. Closing it ends the run.
 bool open_window();
 std::vector<std::string> window_report();  // how the window was drawn, for the summary
+// The controller: the keys held in the window and an XInput gamepad (Windows); none elsewhere
+PadInput pad_input();
 std::vector<std::string> disassemble(u64 rip);  // the instructions at rip, for the summary
 }  // namespace platform
 
