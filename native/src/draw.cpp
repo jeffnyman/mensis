@@ -18,9 +18,10 @@
 // Not done yet: depth and stencil, clipping to the near plane (a triangle with a vertex
 // behind the eye is skipped), multisampling, mip levels past the first.
 //
-// With --gpu, each draw whose pixel shader can be translated (translate.cpp) is drawn on the
-// PC's GPU instead (vkdraw.cpp): its render target goes up from the game's memory, and comes
-// back into it. The CPU draws the rest, and runs the dispatches.
+// Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
+// translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp): its render target
+// goes up from the game's memory, and comes back into it. The CPU draws the rest, and runs
+// the dispatches.
 //
 // With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, into a copy
 // of the render target as it was before; then the CPU draws it, and the two are compared
@@ -413,7 +414,7 @@ void save_target(u64 number, const Target& t, u32 width, u32 height, const Memor
 std::map<u64, translate::Program> g_programs;  // decoded once each; under g_draw_lock
 u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0;
 std::map<std::string, u64> g_check_skipped;
-u64 g_gpu_draws = 0, g_gpu_vertices = 0;  // --gpu
+u64 g_gpu_draws = 0, g_gpu_vertices = 0;  // drawn on the GPU
 std::map<std::string, u64> g_gpu_skipped;
 
 // A hash of n bytes of memory, to tell whether a texture changed
@@ -1086,15 +1087,16 @@ std::vector<std::string> draw_report() {
     if (!M.draw) return {"## Drawing\n", "Not done (`--no-draw`).\n"};
     std::vector<std::string> s = {
         "## Drawing\n",
-        std::format("Run on the CPU: {} draws, {} triangles, {} pixels ({} pixel-shader waves); {} dispatches, {} groups.\n",
-                    g_draws.load(), g_triangles.load(), g_pixels.load(), g_ps_waves.load(), g_dispatches.load(), g_groups.load()),
+        std::format("{} draws and {} dispatches. On the CPU: {} triangles, {} pixels ({} pixel-shader waves), and the "
+                    "dispatches' {} groups.\n",
+                    g_draws.load(), g_dispatches.load(), g_triangles.load(), g_pixels.load(), g_ps_waves.load(), g_groups.load()),
         std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
                     double(g_dispatch_ns) / 1e9,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};
     if (M.gpu) {
         std::lock_guard lock(g_draw_lock);
         std::string where = vkdraw::device();
-        s.push_back(std::format("On the GPU (`--gpu`){}: {} draws, {} of them with their vertex shaders there too; the CPU drew "
+        s.push_back(std::format("On the GPU{}: {} draws, {} of them with their vertex shaders there too; the CPU drew "
                                 "the rest.\n",
                                 where.empty() ? "" : ", " + where, g_gpu_draws, g_gpu_vertices));
         if (std::string rep = vkdraw::report(); !rep.empty()) s.push_back(rep + ".\n");

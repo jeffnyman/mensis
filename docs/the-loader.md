@@ -117,14 +117,14 @@ disassembled, `draws/`, what the first draws of each pixel shader drew, and `fra
 frame on screen when it stopped. Add `--frames 60` to stop after 60 frames, or `--seconds 20`
 to run longer than the default 10. On Windows, `--window` opens a window on the display, whose
 title counts the frames as they are shown; the run then goes on until the window is closed.
-The game's title screen comes within 70 seconds (`--seconds 75`). `--no-draw` leaves the
-drawing out, and the game runs at its own 30 frames a second, to a black screen. On Windows,
-`--gpu` draws on the PC's GPU every draw it can (all of them, so far), and the game runs at
-its own 30 frames a second to its title screen, which comes within 30 seconds; and
-`--gpu-check` draws each draw saved to `draws/` on the GPU as well as the CPU, and compares
-the two (below, and `draws/index.txt`). The two builds run
-the same code: up to the point where the game's threads started running, they made the same
-calls, from the same places, with the same results.
+On Windows, the draws are drawn on the PC's GPU (all of them, so far), and the game runs at
+its own 30 frames a second to its title screen, which comes within 30 seconds (`--seconds
+30`). `--cpu` draws them on the CPU instead, as the Linux build does, and slower: the title
+screen then comes within 70 seconds (`--seconds 75`). `--gpu-check` draws each draw saved to
+`draws/` on both, and compares the two (below, and `draws/index.txt`). `--no-draw` leaves the
+drawing out, and the game runs at its own 30 frames a second, to a black screen. The two
+builds run the same code: up to the point where the game's threads started running, they
+made the same calls, from the same places, with the same results.
 
 The game's own files (`/app0/`) are read from `work/update`, then `work/base`: the 1.09
 update's files over the base game's, as [the package](the-package.md) extracts them. Run from
@@ -493,8 +493,9 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     menu's text with the same few pixels apart, which says the GPU's triangles cover the very
     pixels the CPU's do. The translations are written to `shaders/` as GLSL, next to the
     listings they came from.
-30. **Drawn on the GPU.** With `--gpu`, the GPU's picture is the one the game gets: each
-    draw is drawn there, its render target sent up from memory and read back into it, so
+30. **Drawn on the GPU.** With `--gpu` (an option at first), the GPU's picture is the one
+    the game gets: each draw is drawn there, its render target sent up from memory and read
+    back into it, so
     the display, the window and `frame.bmp` show the GPU's drawing, and the CPU's stays as
     the reference (`--gpu-check`). The compute dispatches are still the CPU's. The first try
     was no faster, 289 frames in 30 seconds, 21 ms a draw: the readback came through the
@@ -503,14 +504,15 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     in 30 seconds the game shows 808 frames rather than 287, all its draws (5,887) on the GPU,
     to its title screen. In the window, the title screen runs at 30.1 frames a second, the
     game's own pace. Nothing is left to the CPU so far, and the validation layer reported
-    nothing.
+    nothing. Watched in the window, it looked as it should, and plainly faster, and it is now
+    the default on Windows; `--cpu` asks for the CPU's drawing instead.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, the draws on the GPU through Vulkan (`--gpu`, `--gpu-check`); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, the draws on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
 | `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled, and with `--gpu-check` translated into GLSL), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

@@ -4,7 +4,10 @@
 // logged (docs/the-loader.md).
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
-//                   [--frames N] [--log N] [--window] [--no-draw] [--gpu] [--gpu-check] [--app0 DIR]...
+//                   [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...
+//
+// Where the Vulkan SDK was there to build with (Windows), the draws are drawn on the PC's GPU;
+// --cpu draws them on the CPU instead, as the Linux build always does.
 //
 // --app0 names a folder the game's own files (/app0/) are read from; give it more than once to
 // lay folders over each other, first match wins. By default: work/update, then work/base (the
@@ -514,6 +517,9 @@ extern "C" i64 mensis_dispatch(Frame* f) {
 int main(int argc, char** argv) {
     std::vector<std::string> pos;
     bool window = false, seconds_given = false;
+#ifdef MENSIS_VULKAN
+    M.gpu = true;
+#endif
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--window") {
@@ -522,8 +528,8 @@ int main(int argc, char** argv) {
             M.draw = false;
         } else if (a == "--gpu-check") {
             M.gpu_check = true;
-        } else if (a == "--gpu") {
-            M.gpu = true;
+        } else if (a == "--cpu") {
+            M.gpu = false;
         } else if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
@@ -539,7 +545,7 @@ int main(int argc, char** argv) {
     }
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
-                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--gpu] [--gpu-check] [--app0 DIR]...\n";
+                     "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...\n";
         return 2;
     }
     M.out_dir = pos[2];

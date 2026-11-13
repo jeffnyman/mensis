@@ -2,8 +2,9 @@
 //
 // Draws on the PC's GPU, through Vulkan (vkdraw.cpp): the game's vertex and pixel shaders,
 // translated (translate.cpp), into a render target uploaded from the game's memory and read
-// back into it (--gpu), or into a copy, to compare with what the CPU drew (--gpu-check). If
-// the vertex shader isn't translated, the vertices are the CPU's, passed on by a trivial one.
+// back into it (the default, where there is Vulkan), or into a copy, to compare with what the
+// CPU drew (--gpu-check). If the vertex shader isn't translated, the vertices are the CPU's,
+// passed on by a trivial one.
 
 #pragma once
 
