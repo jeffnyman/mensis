@@ -219,8 +219,8 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   arrangement of them not being reproduced. Not done yet: depth and stencil, mip levels past
   the first, a triangle with a vertex behind the eye, multisampling; the summary counts
   whatever a run met that wasn't done.
-* **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel shader becomes
-  GLSL, which the Vulkan SDK's compiler (shaderc) turns into SPIR-V, the form a GPU takes
+* **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel or vertex shader
+  becomes GLSL (`shaders/`, beside its disassembly), which the Vulkan SDK's compiler (shaderc) turns into SPIR-V, the form a GPU takes
   through Vulkan. On the console a wave runs 64 pixels in step; on the PC each pixel runs on
   its own, so each plays one lane of the wave: the vector registers become its variables, and
   the scalar ones too, the same in every pixel. A lane mask (`exec`, `vcc`) is kept as the
@@ -230,11 +230,17 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   found before the draw, by following those instructions with the draw's values, and handed to
   the shader in a buffer, with a texture and sampler bound for each image instruction. The
   interpolation (`v_interp`) becomes the GPU's own, with the qualifier the instruction's inputs
-  imply (perspective or not, centre, centroid or sample, flat). `vkdraw.cpp` draws one draw
-  with it: its triangles as the CPU worked them out, its textures decoded by the CPU (so only
-  the shader, the filtering and the blending are the GPU's), into a copy of the render target.
-  Not yet translated: vertex and compute shaders, branches, buffer and LDS instructions,
-  depth export, gathers, depth-compare sampling; a shader with any of them says so.
+  imply (perspective or not, centre, centroid or sample, flat). A vertex shader's call to its
+  fetch shader is followed, and the fetch shader's instructions put in its place; their loads,
+  each vertex's data by its index, read the buffer's elements as the CPU unpacked them. Its
+  position goes through the console's viewport, recast as Vulkan's, and its parameters become
+  the pixel shader's attributes, as `SPI_PS_INPUT_CNTL` pairs them. Vulkan has no rectangles,
+  so for a rectangle list a geometry shader adds each one's fourth corner. `vkdraw.cpp` draws
+  one draw with them, its textures decoded by the CPU (so the shaders, the triangles, the
+  filtering and the blending are the GPU's), into a copy of the render target. Not yet
+  translated: compute shaders, branches, buffer loads other than by index, stores, LDS
+  instructions, depth export, gathers, depth-compare sampling; a shader with any of them says
+  so, and if it is the vertex shader, the GPU is given the CPU's vertices instead.
 * **The display** keeps the timing: one flip at each vertical blank, 60 a second or the rate
   the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
   queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
@@ -473,6 +479,13 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     likeliest cause is the GPU's bilinear filtering, which weighs the four texels it blends
     with less precision than the CPU's floats. The validation layer reported nothing. The
     vertices are still the CPU's, and the game still sees only the CPU's drawing.
+29. **The vertex shaders too.** The 8 vertex shaders those draws use, each with its fetch
+    shader put in its place, are translated as well, and the GPU now runs both shaders: the
+    triangles are its own, culled and clipped by it, with a geometry shader for the
+    rectangles. The same 16 draws come out as before, 14 the same in every pixel and the
+    menu's text with the same few pixels apart, which says the GPU's triangles cover the very
+    pixels the CPU's do. The translations are written to `shaders/` as GLSL, next to the
+    listings they came from.
 
 ## Files
 
@@ -482,4 +495,4 @@ the repository's root, or name the folders with `--app0` (more than once, first 
 | `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, a draw on the GPU through Vulkan (`--gpu-check`); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled, and with `--gpu-check` translated into GLSL), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

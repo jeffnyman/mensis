@@ -112,6 +112,11 @@ u64 element_address(u64 base, u32 tiling, u32 bytes, u32 pitch, u32 height, u32 
 // for uint/sint formats. The image is prepared.
 void texel_rgba(const Image& t, const Memory& mem, int x, int y, u32 slice, u32 out[4]);
 
+// What a format load (buffer_load_format, tbuffer_load_format) reads of element `index` of the
+// buffer whose descriptor (V#) is v, at `offset` bytes into the element, in format dfmt/nfmt:
+// as the shader sees it, dst_sel applied
+void buffer_element(const u32* v, u32 dfmt, u32 nfmt, u64 offset, u32 index, const Memory& mem, u32 out[4]);
+
 // Pixel (x, y) of a BC7 block as 8-bit RGBA (bc7.cpp); false (and 0) for an invalid block
 bool bc7_texel(const unsigned char* block, u32 x, u32 y, unsigned char out[4]);
 

@@ -115,6 +115,9 @@ bool init() {
     g.int64 = have.shaderInt64;
     VkPhysicalDeviceFeatures want{};
     want.shaderInt64 = have.shaderInt64;
+    if (!have.geometryShader || !have.depthClamp) return fail("a GPU without geometry shaders or depth clamping");
+    want.geometryShader = VK_TRUE;  // a rectangle's fourth corner
+    want.depthClamp = VK_TRUE;  // depth isn't clipped: the console's draws here don't test it
     VkPhysicalDeviceVulkan13Features v13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     v13.dynamicRendering = VK_TRUE;
     v13.shaderDemoteToHelperInvocation = VK_TRUE;  // what discard compiles to for Vulkan 1.3
@@ -318,25 +321,45 @@ bool draw(Draw& d, std::string& why) {
         o.modules.push_back(m);
         return m;
     };
-    VkShaderModule vsm = module(vs_spv), psm = module(ps_spv);
+    VkShaderModule vsm = module(vs_spv), psm = module(ps_spv), gsm = VK_NULL_HANDLE;
+    if (!d.gs.empty()) {
+        std::vector<u32> gs_spv;
+        if (!compile(d.gs, shaderc_geometry_shader, gs_spv, why)) return false;
+        gsm = module(gs_spv);
+    }
+    bool gpu_vertices = !d.indices.empty();
     VkFormat format = VkFormat(d.format);
 
     // the descriptors: the values, then a texture and sampler for each image instruction
+    // and the vertex shader's: its values at 16, its buffers from 17
+    if (d.textures.size() > 15) {
+        why = "more than 15 image instructions";
+        return false;
+    }
+    const VkShaderStageFlags all = VK_SHADER_STAGE_ALL_GRAPHICS;
     std::vector<VkDescriptorSetLayoutBinding> bindings(1 + d.textures.size());
-    bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr};
     for (u32 k = 0; k < d.textures.size(); k++)
-        bindings[k + 1] = {k + 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        bindings[k + 1] = {k + 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, all, nullptr};
+    if (gpu_vertices) {
+        bindings.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
+        for (u32 k = 0; k < d.vs_buffers.size(); k++) bindings.push_back({17 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
+    }
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.bindingCount = u32(bindings.size());
     li.pBindings = bindings.data();
     vkCreateDescriptorSetLayout(g.device, &li, nullptr, &o.set_layout);
+    VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof d.viewport};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &o.set_layout;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &push;
     vkCreatePipelineLayout(g.device, &pli, nullptr, &o.layout);
 
     // the pipeline
-    VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
+    VkPipelineShaderStageCreateInfo stages[3] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
+                                                 {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                  {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vsm;
@@ -344,15 +367,20 @@ bool draw(Draw& d, std::string& why) {
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = psm;
     stages[1].pName = "main";
+    stages[2].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+    stages[2].module = gsm;
+    stages[2].pName = "main";
     u32 stride = (1 + d.attributes) * 16;
     VkVertexInputBindingDescription vb{0, stride, VK_VERTEX_INPUT_RATE_VERTEX};
     std::vector<VkVertexInputAttributeDescription> va;
     for (u32 a = 0; a <= d.attributes; a++) va.push_back({a, 0, VK_FORMAT_R32G32B32A32_SFLOAT, a * 16});
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &vb;
-    vi.vertexAttributeDescriptionCount = u32(va.size());
-    vi.pVertexAttributeDescriptions = va.data();
+    if (!gpu_vertices) {  // the CPU's vertices, through vertex attributes
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &vb;
+        vi.vertexAttributeDescriptionCount = u32(va.size());
+        vi.pVertexAttributeDescriptions = va.data();
+    }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkViewport viewport{0, 0, float(d.width), float(d.height), 0, 1};
@@ -364,7 +392,13 @@ bool draw(Draw& d, std::string& why) {
     vp.pScissors = &scissor;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
-    rs.cullMode = VK_CULL_MODE_NONE;  // the CPU culled them already
+    rs.cullMode = VK_CULL_MODE_NONE;  // the CPU's vertices: it culled them already
+    if (gpu_vertices) {
+        // The CPU's "counter-clockwise" (its area negative, y down) is Vulkan's too
+        rs.cullMode = (d.cull & 1 ? VK_CULL_MODE_FRONT_BIT : 0) | (d.cull & 2 ? VK_CULL_MODE_BACK_BIT : 0);
+        rs.frontFace = (d.cull >> 2) & 1 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.depthClampEnable = VK_TRUE;
+    }
     rs.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -392,7 +426,7 @@ bool draw(Draw& d, std::string& why) {
     ri.pColorAttachmentFormats = &format;
     VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gi.pNext = &ri;
-    gi.stageCount = 2;
+    gi.stageCount = gsm ? 3 : 2;
     gi.pStages = stages;
     gi.pVertexInputState = &vi;
     gi.pInputAssemblyState = &ia;
@@ -415,7 +449,14 @@ bool draw(Draw& d, std::string& why) {
                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     VkBuffer values = o.buffer(d.values.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, d.values.data());
     VkBuffer vertices = o.buffer(d.vertices.size() * 4, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, d.vertices.data());
-    if (!staging || !back || !target || !values || !vertices) {
+    VkBuffer indices = o.buffer(d.indices.size() * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, d.indices.data());
+    VkBuffer vs_values = o.buffer(d.vs_values.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, d.vs_values.data());
+    std::vector<VkBuffer> vs_buffers;
+    for (auto& b : d.vs_buffers) {
+        vs_buffers.push_back(o.buffer(b.size() * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, b.data()));
+        if (!vs_buffers.back()) vertices = VK_NULL_HANDLE;
+    }
+    if (!staging || !back || !target || !values || !vertices || !indices || !vs_values) {
         why = "out of GPU memory";
         return false;
     }
@@ -473,7 +514,7 @@ bool draw(Draw& d, std::string& why) {
     }
 
     // the descriptor set
-    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 + u32(d.vs_buffers.size())},
                                      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max<u32>(1, u32(d.textures.size()))}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 1;
@@ -499,6 +540,21 @@ bool draw(Draw& d, std::string& why) {
         writes[k + 1].descriptorCount = 1;
         writes[k + 1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[k + 1].pImageInfo = &infos[k];
+    }
+    std::vector<VkDescriptorBufferInfo> vs_infos;
+    vs_infos.reserve(1 + vs_buffers.size());
+    if (gpu_vertices) {
+        vs_infos.push_back({vs_values, 0, VK_WHOLE_SIZE});
+        for (VkBuffer b : vs_buffers) vs_infos.push_back({b, 0, VK_WHOLE_SIZE});
+        for (u32 k = 0; k < vs_infos.size(); k++) {
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = set;
+            w.dstBinding = 16 + k;
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.pBufferInfo = &vs_infos[k];
+            writes.push_back(w);
+        }
     }
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
@@ -544,9 +600,15 @@ bool draw(Draw& d, std::string& why) {
     vkCmdBeginRendering(cmd, &rinfo);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.layout, 0, 1, &set, 0, nullptr);
-    VkDeviceSize zero = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertices, &zero);
-    vkCmdDraw(cmd, u32(d.vertices.size() / ((1 + d.attributes) * 4)), 1, 0, 0);
+    if (gpu_vertices) {
+        vkCmdPushConstants(cmd, o.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof d.viewport, d.viewport);
+        vkCmdBindIndexBuffer(cmd, indices, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, u32(d.indices.size()), 1, 0, 0, 0);
+    } else {
+        VkDeviceSize zero = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertices, &zero);
+        vkCmdDraw(cmd, u32(d.vertices.size() / ((1 + d.attributes) * 4)), 1, 0, 0);
+    }
     vkCmdEndRendering(cmd);
     barrier(cmd, target, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, T);

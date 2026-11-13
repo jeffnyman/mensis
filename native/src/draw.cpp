@@ -18,9 +18,10 @@
 // Not done yet: depth and stencil, clipping to the near plane (a triangle with a vertex
 // behind the eye is skipped), multisampling, mip levels past the first.
 //
-// With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, its pixel
-// shader translated (translate.cpp, vkdraw.cpp), into a copy of the render target as it was
-// before; then the CPU draws it, and the two are compared pixel by pixel.
+// With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, its vertex
+// and pixel shaders translated (translate.cpp, vkdraw.cpp), into a copy of the render target
+// as it was before; then the CPU draws it, and the two are compared pixel by pixel. If the
+// vertex shader can't be translated, the GPU is given the CPU's vertices instead.
 
 #include <bit>
 #include <cmath>
@@ -30,6 +31,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 
 #include "shade.hpp"
 #include "translate.hpp"
@@ -405,12 +407,85 @@ void save_target(u64 number, const Target& t, u32 width, u32 height, const Memor
 // ---- --gpu-check: the draw on the PC's GPU too ----
 
 std::map<u64, translate::Program> g_programs;  // decoded once each; under g_draw_lock
-u64 g_checked = 0, g_check_same = 0;
+u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0;
 std::map<std::string, u64> g_check_skipped;
 
-// The draw, as vkdraw needs it, drawn; false (and why) if it couldn't be
-bool gpu_check(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 ps, const Vertices& out, const std::vector<Tri>& tris,
-               const Target* targets, const int clip[4], u32 ps_user, u32 ena, u32 addr, const Memory& mem) {
+// A shader's translation, beside its disassembly: shaders/<vs|ps>-<address>.glsl, the first
+// time it is translated in a run
+void save_glsl(const char* kind, u64 at, const std::string& text) {
+    static std::set<std::string> saved;  // under g_draw_lock
+    std::string name = std::format("{}-{:x}.glsl", kind, at);
+    if (!saved.insert(name).second) return;
+    auto dir = std::filesystem::path(M.out_dir) / "shaders";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / name, std::ios::binary) << text;
+}
+
+// The vertex shader, for the GPU: translated, its buffers read, the triangles' indices, the
+// viewport. False (and why) if it can't be.
+bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u32 attributes, const Target& t,
+                  const std::vector<u32>& index, const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Memory& mem) {
+    u32 users = std::min((r.sh[0x4b] >> 1) & 0x1f, 16u);
+    u32 user[16];
+    for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x4c + k];
+    translate::Program prog = translate::decode(vs, mem, user, users);
+    translate::Values vals = translate::evaluate(prog, user, users, mem);
+    if (prog.why.empty() && !vals.why.empty()) prog.why = vals.why;
+    translate::VsState st;
+    st.user_count = users;
+    st.attributes = attributes;
+    for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
+    for (size_t k = 0; k < vals.buffers.size() && k < 32; k++)
+        if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1u << k;
+    translate::Glsl g = translate::vertex_shader(prog, st);
+    if (!g.why.empty()) {
+        why = "the vertex shader has " + g.why;
+        return false;
+    }
+    u32 vte = reg(r, 0x206, 0x43f);
+    if ((vte >> 8) & 1) {
+        why = "positions not divided by w";
+        return false;
+    }
+    // the console's viewport, then Vulkan's for a viewport the size of the target: x' = a x + b w
+    float xs = vte & 1 ? regf(r, 0x10f, 1) : 1, xo = vte & 2 ? regf(r, 0x110, 0) : 0;
+    float ys = vte & 4 ? regf(r, 0x111, 1) : 1, yo = vte & 8 ? regf(r, 0x112, 0) : 0;
+    float zs = vte & 16 ? regf(r, 0x113, 1) : 1, zo = vte & 32 ? regf(r, 0x114, 0) : 0;
+    float W = float(t.pitch), H = float(t.height);
+    float v[8] = {2 * xs / W, 2 * xo / W - 1, 2 * ys / H, 2 * yo / H - 1, zs, zo, 0, 0};
+    std::memcpy(d.viewport, v, sizeof v);
+    // each buffer load's elements, as the CPU's interpreter unpacks them, and then what an
+    // index past the end reads
+    for (const auto& b : vals.buffers) {
+        u32 stride = (b.v[1] >> 16) & 0x3fff, records = b.v[2];
+        u64 n = stride == 0 ? 1 : records;
+        if (n > (1u << 22)) {
+            why = "vertex buffers of over 4 million elements";
+            return false;
+        }
+        std::vector<u32> data((n + 1) * 4);
+        for (u32 i = 0; i < n; i++) buffer_element(b.v, b.dfmt, b.nfmt, b.offset, i, mem, &data[size_t(i) * 4]);
+        if (stride == 0) std::copy_n(data.begin(), 4, data.begin() + 4);
+        else buffer_element(b.v, b.dfmt, b.nfmt, b.offset, records, mem, &data[n * 4]);
+        d.vs_buffers.push_back(std::move(data));
+    }
+    u32 offset = reg(r, 0x102, 0);  // VGT_INDX_OFFSET
+    for (const auto& tri : tris_in)
+        for (size_t k : tri) d.indices.push_back(index[k] + offset);
+    if (rects) d.gs = translate::rect_geometry_shader(attributes);
+    save_glsl("vs", vs, g.text);
+    d.vs = g.text;
+    d.vs_values = vals.u;
+    d.cull = reg(r, 0x205, 0);
+    return true;
+}
+
+// The draw, as vkdraw needs it, drawn; false (and why) if it couldn't be. vertex_why: why the
+// vertices are the CPU's, if they are.
+bool gpu_check(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const GpuRegs& r, u64 vs, u64 ps,
+               const Vertices& out, const std::vector<Tri>& tris, const std::vector<u32>& index,
+               const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Target* targets, const int clip[4],
+               u32 ps_user, u32 ena, u32 addr, const Memory& mem) {
     const Target& t = targets[0];
     for (u32 k = 1; k < 8; k++)
         if (targets[k].count) {
@@ -460,17 +535,25 @@ bool gpu_check(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 ps, cons
         st.unnormalized.push_back((im.s[0] >> 15) & 1);
     }
     translate::Glsl gl = translate::pixel_shader(prog, st);
+    if (gl.why.empty()) save_glsl("ps", ps, gl.text);
     if (!gl.why.empty()) {
         why = "the shader has " + gl.why;
         return false;
     }
     d.ps = gl.text;
     d.attributes = gl.attributes;
-    d.vs = translate::vertex_shader(gl.attributes);
     d.values = vals.u;
-    // the vertices, in clip space for a viewport the size of the target; the attributes as
-    // SPI_PS_INPUT_CNTL picks them from the vertex shader's parameters
+    bool on_gpu = gpu_vertices(d, vertex_why, r, vs, gl.attributes, t, index, tris_in, rects, mem);
+    if (!on_gpu) {
+        d.indices.clear();
+        d.vs_buffers.clear();
+        d.gs.clear();
+        d.vs = translate::pass_vertex_shader(gl.attributes);
+    }
+    // Or the CPU's vertices, in clip space for a viewport the size of the target; the
+    // attributes as SPI_PS_INPUT_CNTL picks them from the vertex shader's parameters
     float W = float(t.pitch), H = float(t.height);
+    if (!on_gpu)
     for (const Tri& tr : tris)
         for (int k = 0; k < 3; k++) {
             float w = 1 / tr.invw[k];
@@ -731,11 +814,13 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     bool save = g_saved < SAVED && g_saved_by_ps[ps] < 2;
     int area[4] = {x0, y0, x1, y1};
     vkdraw::Draw check;
-    std::string check_why;
+    std::string check_why, vertex_why;
     bool checked = false;
     if (save && M.gpu_check) {
-        checked = gpu_check(check, check_why, r, ps, out, tris, targets, area, ps_user, ena, addr, mem);
+        checked = gpu_check(check, check_why, vertex_why, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user,
+                            ena, addr, mem);
         if (!checked) g_check_skipped[check_why]++;
+        else if (vertex_why.empty()) g_check_gpu_vertices++;
     }
     Pool& p = pool();
     int bands = (y1 - y0) * (x1 - x0) > 64 * 64 ? p.n : 1;
@@ -847,7 +932,10 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         if (number == 0)  // an earlier run's pictures go
             for (const auto& e : std::filesystem::directory_iterator(dir))
                 if (e.path().extension() == ".bmp") std::filesystem::remove(e.path());
-        if (checked) what += "; " + compare(number, check, targets[0], area);
+        if (checked) {
+            what += "; " + compare(number, check, targets[0], area);
+            what += vertex_why.empty() ? ", vertices too" : "; vertices from the CPU: " + vertex_why;
+        }
         else if (M.gpu_check) what += "; not on the GPU: " + check_why;
         for (auto& t : targets)
             if (t.count) {
@@ -939,8 +1027,9 @@ std::vector<std::string> draw_report() {
         std::lock_guard lock(g_draw_lock);
         std::string where = vkdraw::device();
         s.push_back(std::format("GPU check (`--gpu-check`){}: of the draws saved to draws/, {} were drawn on the GPU as well, "
-                                "{} of them the same as the CPU's in every pixel (to 1 in 255); see draws/index.txt.\n",
-                                where.empty() ? "" : ", " + where, g_checked, g_check_same));
+                                "{} of them the same as the CPU's in every pixel (to 1 in 255), and {} with their vertex "
+                                "shaders on the GPU too; see draws/index.txt.\n",
+                                where.empty() ? "" : ", " + where, g_checked, g_check_same, g_check_gpu_vertices));
         if (!g_check_skipped.empty()) {
             s.insert(s.end(), {"Not drawn on the GPU:\n", "| Why | Draws |", "|---|---:|"});
             for (auto& [why, count] : g_check_skipped) s.push_back(std::format("| {} | {} |", why, count));

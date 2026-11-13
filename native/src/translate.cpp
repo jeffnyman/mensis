@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The game's pixel shaders, translated from GCN into GLSL for a PC's GPU.
+// The game's pixel and vertex shaders, translated from GCN into GLSL for a PC's GPU.
 //
 // A GCN wave runs 64 lanes in step; a GPU through Vulkan runs each pixel as an invocation of
 // its own. So each invocation plays one lane: the VGPRs become its own variables, and the
@@ -18,9 +18,16 @@
 // from the game's memory and handed to the shader in a buffer (U). Each image instruction's
 // descriptors are found the same way, and become a texture and sampler bound for it.
 //
-// Not yet: branches, buffer and LDS instructions, depth export, gathers, depth-compare
-// sampling, offsets, and the rarer ALU ops. A shader with any of them isn't translated, and
-// says what stopped it.
+// A vertex shader calls a fetch shader (s_swappc_b64), which reads the vertex's data through
+// buffer descriptors and returns (s_setpc_b64); the fetch shader's instructions are put in
+// the vertex shader's place, where it calls. Its loads (buffer_load_format,
+// tbuffer_load_format, by the vertex's index) read a buffer's elements as the CPU unpacked
+// them before the draw, one uvec4 each, with the value an index past the end reads after
+// them.
+//
+// Not yet: branches, buffer loads other than by index, stores, LDS instructions, depth
+// export, gathers, depth-compare sampling, offsets, and the rarer ALU ops. A shader with any
+// of them isn't translated, and says what stopped it.
 
 #include "translate.hpp"
 
@@ -63,12 +70,14 @@ u32 inline_float(u32 code) {
 
 // ---- decoding ----
 
-Program decode(u64 pc, const shade::Memory& mem) {
-    Program p;
+namespace {
+
+// Decodes from pc into p until s_endpgm (or, for a fetch shader, its s_setpc_b64)
+void decode_into(Program& p, u64 pc, const shade::Memory& mem, const u32* user, u32 user_count, bool fetch) {
     for (int n = 0; n < 4096; n++) {
         if (!mem.ok(pc, 4)) {
             p.why = "code outside the game's memory";
-            return p;
+            return;
         }
         Inst in;
         in.at = pc;
@@ -119,13 +128,13 @@ Program decode(u64 pc, const shade::Memory& mem) {
                 case 0x3e: in.enc = EXP; size = 8; break;
                 default:
                     p.why = std::format("instruction format {:#x}", enc);
-                    return p;
+                    return;
             }
         }
         if (size == 8) {
             if (!mem.ok(pc + 4, 4)) {
                 p.why = "code outside the game's memory";
-                return p;
+                return;
             }
             in.w1 = *reinterpret_cast<const u32*>(pc + 4);
             if (in.enc == VOP3) {  // a literal can't follow VOP3 on this generation
@@ -135,26 +144,53 @@ Program decode(u64 pc, const shade::Memory& mem) {
         if (lit) {
             if (!mem.ok(pc + size, 4)) {
                 p.why = "code outside the game's memory";
-                return p;
+                return;
             }
             in.lit = *reinterpret_cast<const u32*>(pc + size);
             size += 4;
         }
-        p.code.push_back(in);
         pc += size;
+        if (in.enc == SOP1) {
+            u32 op = (w0 >> 8) & 0xff, src = w0 & 0xff;
+            if (op == 32) {  // s_setpc_b64: a fetch shader's return
+                if (fetch) return;
+                p.why = "s_setpc_b64";
+                return;
+            }
+            if (op == 33) {  // s_swappc_b64: a call to the fetch shader, whose address is user data
+                if (fetch || src + 1 >= user_count) {
+                    p.why = "a call to an address the shader works out";
+                    return;
+                }
+                p.code.push_back(in);  // kept for its destination (the return address)
+                decode_into(p, user[src] | (u64(user[src + 1]) << 32), mem, user, user_count, true);
+                if (!p.why.empty()) return;
+                continue;
+            }
+        }
+        p.code.push_back(in);
         if (in.enc == SOPP) {
             u32 op = (w0 >> 16) & 0x7f;
-            if (op == 1) return p;  // s_endpgm
+            if (op == 1) {  // s_endpgm
+                if (fetch) p.why = "a fetch shader that ends";
+                return;
+            }
             if ((op >= 2 && op <= 9) || op == 10) {
                 p.why = op == 10 ? "s_barrier" : "branches";
-                return p;
+                return;
             }
         }
         if (in.enc == DS) p.why = "LDS instructions";
-        if (in.enc == MUBUF || in.enc == MTBUF) p.why = "buffer instructions";
-        if (!p.why.empty()) return p;
+        if (!p.why.empty()) return;
     }
     p.why = "no s_endpgm in 4096 instructions";
+}
+
+}  // namespace
+
+Program decode(u64 pc, const shade::Memory& mem, const u32* user, u32 user_count) {
+    Program p;
+    decode_into(p, pc, mem, user, user_count, false);
     return p;
 }
 
@@ -277,6 +313,27 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                 v.images.push_back(im);
                 break;
             }
+            case MUBUF: case MTBUF: {
+                bool typed = in.enc == MTBUF;
+                u32 op = typed ? (w0 >> 16) & 7 : (w0 >> 18) & 0x7f;
+                if (op > 3) {
+                    v.why = std::format("{} op {}", typed ? "MTBUF" : "MUBUF", op);
+                    return v;
+                }
+                Values::Buffer b;
+                bool ok = true;
+                u32 srsrc = ((in.w1 >> 16) & 0x1f) * 4;
+                for (u32 k = 0; k < 4; k++) b.v[k] = get(srsrc + k, 0, ok);
+                b.offset = (w0 & 0xfff) + get(in.w1 >> 24, 0, ok);
+                b.dfmt = typed ? (w0 >> 19) & 0xf : (b.v[3] >> 15) & 15;
+                b.nfmt = typed ? (w0 >> 23) & 7 : (b.v[3] >> 12) & 7;
+                if (!ok) {
+                    v.why = "a buffer descriptor the shader works out";
+                    return v;
+                }
+                v.buffers.push_back(b);
+                break;
+            }
             default: break;
         }
     }
@@ -296,9 +353,11 @@ namespace {
 
 struct Writer {
     const PsState& st;
+    bool vertex = false;  // a vertex shader (else a pixel shader)
     std::string body, why;
     u32 slot = 16;  // the next scalar load's place in U
     u32 image = 0;  // the next image instruction's binding
+    u32 buffer = 0;  // the next buffer load's
     u32 attrs = 0;  // how many attributes are read
     std::string interp[32];  // each attribute's interpolation qualifier
     bool outputs[8] = {};
@@ -366,6 +425,7 @@ struct Writer {
     void vector(const Inst& in);
     void interp_op(const Inst& in);
     void image_op(const Inst& in);
+    void buffer_op(const Inst& in);
     void export_op(const Inst& in);
 };
 
@@ -392,6 +452,7 @@ void Writer::scalar(const Inst& in) {
             std::string a = src(s0, in.lit);
             switch (op) {
                 case 3: line(std::format("{} = {};", sdst(dst), a)); return;
+                case 33: return;  // s_swappc_b64: the fetch shader follows, put in its place
                 case 4: line(std::format("{{ uint lo = {}, hi = {}; {} = lo; {} = hi; }}", a, src_hi(s0, in.lit), sdst(dst), sdst(dst + 1))); return;
                 case 7: line(std::format("{} = ~{}; scc = {} != 0u;", sdst(dst), a, sdst(dst))); return;
                 case 8: line(std::format("{{ uint lo = ~{}, hi = ~{}; {} = lo; {} = hi; scc = (lo | hi) != 0u; }}", a, src_hi(s0, in.lit), sdst(dst), sdst(dst + 1))); return;
@@ -693,6 +754,10 @@ int input_bit(u32 addr, u32 vgpr) {
 }
 
 void Writer::interp_op(const Inst& in) {
+    if (vertex) {
+        fail("v_interp in a vertex shader");
+        return;
+    }
     u32 w0 = in.w0;
     u32 op = (w0 >> 16) & 3, attr = (w0 >> 10) & 0x3f, chan = (w0 >> 8) & 3, s = w0 & 0xff, dst = (w0 >> 18) & 0xff;
     if (attr >= 32) {
@@ -727,6 +792,10 @@ void Writer::image_op(const Inst& in) {
     u32 op = (w0 >> 18) & 0x7f, dmask = (w0 >> 8) & 0xf;
     bool da = (w0 >> 14) & 1;
     (void)da;
+    if (vertex) {
+        fail("images in a vertex shader");
+        return;
+    }
     u32 vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
     if (image >= st.image_types.size()) {
         fail("image instructions not found before the draw");
@@ -807,10 +876,60 @@ void Writer::image_op(const Inst& in) {
         if ((dmask >> c) & 1) vwrite((vdata + r++) & 255, std::format("floatBitsToUint(i{}.{})", image, xyzw[c]));
 }
 
+// A format load by index (idxen): element vN of the buffer as the CPU unpacked it
+void Writer::buffer_op(const Inst& in) {
+    u32 w0 = in.w0, w1 = in.w1;
+    bool typed = in.enc == MTBUF;
+    u32 op = typed ? (w0 >> 16) & 7 : (w0 >> 18) & 0x7f;
+    bool offen = (w0 >> 12) & 1, idxen = (w0 >> 13) & 1, addr64 = (w0 >> 15) & 1;
+    u32 vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
+    if (op > 3) {
+        fail(std::format("{} op {}", typed ? "MTBUF" : "MUBUF", op));
+        return;
+    }
+    if (!idxen || offen || addr64 || (!typed && ((w0 >> 16) & 1))) {
+        fail("buffer loads other than by index");
+        return;
+    }
+    if ((st.add_tid >> buffer) & 1) {
+        fail("buffers indexed by lane");
+        return;
+    }
+    vgprs.insert(vaddr);
+    u32 k = buffer++;
+    line(std::format("uvec4 b{0} = B{0}[min(v{1}, uint(B{0}.length()) - 1u)];", k, vaddr));
+    static const char xyzw[] = "xyzw";
+    for (u32 c = 0; c <= op; c++) vwrite((vdata + c) & 255, std::format("b{}.{}", k, xyzw[c]));
+}
+
 void Writer::export_op(const Inst& in) {
     u32 w0 = in.w0, w1 = in.w1;
     u32 en = w0 & 0xf, target = (w0 >> 4) & 0x3f;
     bool compr = (w0 >> 10) & 1;
+    if (vertex) {  // a position (pos0-3: 12-15) or a parameter (param0-31: 32-63)
+        if (compr) {
+            fail("compressed exports from a vertex shader");
+            return;
+        }
+        if (target >= 13 && target <= 15) return;  // pos1-3 (clip distances...): not used here
+        if (target != 12 && (target < 32 || target > 63)) {
+            fail(std::format("vertex export to {}", target));
+            return;
+        }
+        std::string c[4];
+        for (u32 k = 0; k < 4; k++) {
+            if ((en >> k) & 1) {
+                u32 r = (w1 >> (8 * k)) & 0xff;
+                vgprs.insert(r);
+                c[k] = std::format("uintBitsToFloat(v{})", r);
+            } else {
+                c[k] = k == 3 ? "1.0" : "0.0";
+            }
+        }
+        std::string to = target == 12 ? "pos" : std::format("P{}", target - 32);
+        line(std::format("if (exec_lo != 0u) {} = vec4({}, {}, {}, {});", to, c[0], c[1], c[2], c[3]));
+        return;
+    }
     if (target == 9) {  // null: the pixel is kept, nothing written
         line("if (exec_lo != 0u) exported = true;");
         return;
@@ -887,6 +1006,100 @@ uint f2h_rtz(float x) { return f2h_mode(x, true); }
 
 }  // namespace
 
+namespace {
+
+// The instructions, into w.body; false (and w.why) if one can't be translated
+bool translate_body(Writer& w, const Program& p) {
+    for (const Inst& in : p.code) {
+        switch (in.enc) {
+            case SOP2: case SOPK: case SOP1: case SOPC: case SOPP: case SMRD: w.scalar(in); break;
+            case VOP1: case VOP2: case VOPC: case VOP3: w.vector(in); break;
+            case VINTRP: w.interp_op(in); break;
+            case MIMG: w.image_op(in); break;
+            case MUBUF: case MTBUF: w.buffer_op(in); break;
+            case EXP: w.export_op(in); break;
+            default: w.fail("instruction format"); break;
+        }
+        if (!w.why.empty()) return false;
+    }
+    return true;
+}
+
+// The registers' declarations: the SGPRs (the user ones from U), then the VGPRs from init
+std::string registers(const Writer& w, u32 user_count, const std::string& exec, std::map<u32, std::string>& init) {
+    std::string s = std::format("    uint exec_lo = {}, exec_hi = exec_lo;\n", exec);
+    s += "    uint vcc_lo = 0u, vcc_hi = 0u, m0 = 0u, dummy = 0u;\n    bool scc = false, exported = false;\n";
+    for (u32 k = 0; k < 104; k++)
+        s += std::format("    uint s{} = {};\n", k, k < user_count && k < 16 ? std::format("U[{}]", k) : "0u");
+    u32 top = w.vgprs.empty() ? 0 : *w.vgprs.rbegin() + 1;
+    for (u32 k = 0; k < top; k++) s += std::format("    uint v{} = {};\n", k, init.count(k) ? init[k] : "0u");
+    return s;
+}
+
+}  // namespace
+
+Glsl vertex_shader(const Program& p, const VsState& vs) {
+    Glsl g;
+    if (!p.why.empty()) {
+        g.why = p.why;
+        return g;
+    }
+    PsState none;
+    none.add_tid = vs.add_tid;
+    Writer w(none);
+    w.vertex = true;
+    if (!translate_body(w, p)) {
+        g.why = w.why;
+        return g;
+    }
+    std::string s = "#version 450\n";
+    s += "layout(set = 0, binding = 16, std430) readonly buffer Values { uint U[]; };\n";
+    for (u32 k = 0; k < w.buffer; k++)
+        s += std::format("layout(set = 0, binding = {}, std430) readonly buffer Buffer{} {{ uvec4 B{}[]; }};\n", 17 + k, k, k);
+    s += "layout(push_constant) uniform Viewport { vec4 xy; vec2 z; } X;\n";
+    for (u32 a = 0; a < vs.attributes; a++) s += std::format("layout(location = {}) out vec4 a{};\n", a, a);
+    s += HELPERS;
+    s += "\nvoid main() {\n";
+    std::map<u32, std::string> init = {{0, "uint(gl_VertexIndex)"}};  // v0: the vertex's index
+    s += registers(w, vs.user_count, "0xffffffffu", init);
+    s += "    vec4 pos = vec4(0.0, 0.0, 0.0, 1.0);\n";
+    for (u32 k = 0; k < 32; k++) s += std::format("    vec4 P{} = vec4(0.0);\n", k);
+    s += w.body;
+    // the console's viewport, as Vulkan's: x' = X.xy.x * x + X.xy.y * w, and so on (vkdraw)
+    s += "    gl_Position = vec4(X.xy.x * pos.x + X.xy.y * pos.w, X.xy.z * pos.y + X.xy.w * pos.w, X.z.x * pos.z + X.z.y * pos.w, pos.w);\n";
+    // the pixel shader's attributes, as SPI_PS_INPUT_CNTL picks them from the parameters
+    for (u32 a = 0; a < vs.attributes; a++) {
+        u32 cntl = vs.input_cntl[a], offset = cntl & 0x3f;
+        if (offset & 0x20) {
+            u32 dv = (cntl >> 8) & 3;
+            float rgb = dv >= 2 ? 1.0f : 0.0f, alpha = dv == 1 || dv == 3 ? 1.0f : 0.0f;
+            s += std::format("    a{} = vec4({:.1f}, {:.1f}, {:.1f}, {:.1f});\n", a, rgb, rgb, rgb, alpha);
+        } else if (offset < 32) {
+            s += std::format("    a{} = P{};\n", a, offset);
+        } else {
+            s += std::format("    a{} = vec4(0.0);\n", a);
+        }
+    }
+    s += "}\n";
+    if (s.find("uint64_t") != std::string::npos)
+        s.insert(s.find('\n') + 1, "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n");
+    g.text = s;
+    g.buffers = w.buffer;
+    return g;
+}
+
+std::string rect_geometry_shader(u32 attributes) {
+    std::string s = "#version 450\nlayout(triangles) in;\nlayout(triangle_strip, max_vertices = 4) out;\n";
+    for (u32 a = 0; a < attributes; a++) s += std::format("layout(location = {}) in vec4 i{}[];\nlayout(location = {}) out vec4 a{};\n", a, a, a, a);
+    s += "void main() {\n    for (int k = 0; k < 3; k++) {\n        gl_Position = gl_in[k].gl_Position;\n";
+    for (u32 a = 0; a < attributes; a++) s += std::format("        a{0} = i{0}[k];\n", a);
+    s += "        EmitVertex();\n    }\n";
+    s += "    // the fourth corner: b + c - a\n    gl_Position = gl_in[1].gl_Position + gl_in[2].gl_Position - gl_in[0].gl_Position;\n";
+    for (u32 a = 0; a < attributes; a++) s += std::format("    a{0} = i{0}[1] + i{0}[2] - i{0}[0];\n", a);
+    s += "    EmitVertex();\n}\n";
+    return s;
+}
+
 Glsl pixel_shader(const Program& p, const PsState& st) {
     Glsl g;
     if (!p.why.empty()) {
@@ -894,19 +1107,9 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
         return g;
     }
     Writer w(st);
-    for (const Inst& in : p.code) {
-        switch (in.enc) {
-            case SOP2: case SOPK: case SOP1: case SOPC: case SOPP: case SMRD: w.scalar(in); break;
-            case VOP1: case VOP2: case VOPC: case VOP3: w.vector(in); break;
-            case VINTRP: w.interp_op(in); break;
-            case MIMG: w.image_op(in); break;
-            case EXP: w.export_op(in); break;
-            default: w.fail("instruction format"); break;
-        }
-        if (!w.why.empty()) {
-            g.why = w.why;
-            return g;
-        }
+    if (!translate_body(w, p)) {
+        g.why = w.why;
+        return g;
     }
     std::string s = "#version 450\n";
     s += "layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };\n";
@@ -921,10 +1124,6 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
         if (w.outputs[k]) s += std::format("layout(location = {}) out vec4 o{};\n", k, k);
     s += HELPERS;
     s += "\nvoid main() {\n";
-    s += "    uint exec_lo = gl_HelperInvocation ? 0u : 0xffffffffu, exec_hi = exec_lo;\n";
-    s += "    uint vcc_lo = 0u, vcc_hi = 0u, m0 = 0u, dummy = 0u;\n    bool scc = false, exported = false;\n";
-    for (u32 k = 0; k < 104; k++)
-        s += std::format("    uint s{} = {};\n", k, k < st.user_count && k < 16 ? std::format("U[{}]", k) : "0u");
     // the input VGPRs, as SPI_PS_INPUT_ADDR lays them out and SPI_PS_INPUT_ENA fills them
     std::map<u32, std::string> init;
     {
@@ -947,8 +1146,7 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
             vg += u32(sizes[bit]);
         }
     }
-    u32 top = w.vgprs.empty() ? 0 : *w.vgprs.rbegin() + 1;
-    for (u32 k = 0; k < top; k++) s += std::format("    uint v{} = {};\n", k, init.count(k) ? init[k] : "0u");
+    s += registers(w, st.user_count, "gl_HelperInvocation ? 0u : 0xffffffffu", init);
     s += w.body;
     s += "    if (!exported) discard;\n}\n";
     if (s.find("uint64_t") != std::string::npos)
@@ -958,7 +1156,7 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     return g;
 }
 
-std::string vertex_shader(u32 attributes) {
+std::string pass_vertex_shader(u32 attributes) {
     std::string s = "#version 450\nlayout(location = 0) in vec4 position;\n";
     for (u32 a = 0; a < attributes; a++) s += std::format("layout(location = {}) in vec4 i{};\n", a + 1, a);
     for (u32 a = 0; a < attributes; a++) s += std::format("layout(location = {}) out vec4 a{};\n", a, a);

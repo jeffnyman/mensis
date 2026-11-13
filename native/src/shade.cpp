@@ -1920,6 +1920,16 @@ Result run(Wave& w, u64 pc, Io& io, const Memory& mem) {
     return {Stop::fault, pc};
 }
 
+void buffer_element(const u32* v, u32 dfmt, u32 nfmt, u64 offset, u32 index, const Memory& mem, u32 out[4]) {
+    Buffer b(v);
+    u32 raw[4] = {0, 0, 0, is_int(nfmt) ? 1u : u(1.0f)};
+    Layout l = layout(dfmt);
+    bool in_range = b.stride == 0 ? offset < b.records : index < b.records;
+    u64 at = b.base + offset + u64(b.stride) * index;
+    if (l.count && in_range && mem.ok(at, u64(l.bytes))) unpack(dfmt, nfmt, reinterpret_cast<const unsigned char*>(at), raw);
+    swizzle(b.sel, is_int(nfmt), raw, out);
+}
+
 void texel_rgba(const Image& t, const Memory& mem, int x, int y, u32 slice, u32 out[4]) {
     u32 raw[4];
     texel(t, mem, x, y, slice, raw);

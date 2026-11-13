@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// One draw on the PC's GPU, through Vulkan (vkdraw.cpp), for --gpu-check: the game's pixel
-// shader, translated (translate.cpp), over triangles whose vertices the CPU worked out, into
-// a copy of the render target, read back to compare with what the CPU drew.
+// One draw on the PC's GPU, through Vulkan (vkdraw.cpp), for --gpu-check: the game's vertex
+// and pixel shaders, translated (translate.cpp), into a copy of the render target, read back
+// to compare with what the CPU drew. If the vertex shader isn't translated, the vertices are
+// the CPU's, passed on by a trivial one.
 
 #pragma once
 
@@ -23,7 +24,17 @@ struct Texture {
 struct Draw {
     std::string vs, ps;  // GLSL
     u32 attributes = 0;
-    std::vector<float> vertices;  // each vertex: its position (clip space), then each attribute
+    std::vector<float> vertices;  // the CPU's: each vertex's position (clip space), then attributes
+    // Or the vertex shader on the GPU too (indices not empty): each triangle's three vertices'
+    // indices (a rectangle's three corners, with the geometry shader gs adding the fourth),
+    // the vertex shader's values and buffers (a uvec4 an element), the console's viewport as
+    // the vertex shader applies it (x' = a x + b w for x, y, z), and culling
+    std::vector<u32> indices;
+    std::string gs;
+    std::vector<u32> vs_values;
+    std::vector<std::vector<u32>> vs_buffers;
+    float viewport[8] = {};
+    u32 cull = 0;  // PA_SU_SC_MODE_CNTL: bit 0 the front faces, bit 1 the back, bit 2 front is clockwise
     std::vector<u32> values;  // the shader's U: user SGPRs and what its scalar loads read
     std::vector<Texture> textures;
     u32 width = 0, height = 0;
