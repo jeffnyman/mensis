@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The game's shaders translated for a PC's GPU (translate.cpp): GCN instructions into GLSL,
-// which the Vulkan SDK's compiler (shaderc) turns into SPIR-V. So far pixel and vertex
-// shaders, and only those without branches; what can't be translated says why, and the CPU
-// (shade.cpp) still draws everything.
+// which the Vulkan SDK's compiler (shaderc) turns into SPIR-V. So far pixel, vertex and
+// compute shaders, and only those without branches; what can't be translated says why, and
+// is left to the CPU (shade.cpp).
 
 #pragma once
 
@@ -44,9 +44,11 @@ struct Values {
         u32 offset = 0, dfmt = 0, nfmt = 0;
     };
     std::vector<Buffer> buffers;
+    std::vector<Buffer> stores;  // each buffer store's, the same way
     std::string why;  // empty if all of them were found
 };
-Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::Memory& mem);
+// compute: the SGPRs after the user ones (the group's number) differ from group to group
+Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::Memory& mem, bool compute = false);
 
 // What else the translation depends on, from the draw's registers
 struct PsState {
@@ -67,6 +69,16 @@ struct VsState {
     u32 add_tid = 0;
 };
 
+// A compute shader's: its user SGPRs, which others it is given (COMPUTE_PGM_RSRC2), the
+// threads in a group, and where in U each buffer store's place is (three values each: the
+// first pixel it writes, the image's width, and the elements in the buffer), filled in by
+// vkdraw once it knows which image it writes
+struct CsState {
+    u32 user_count = 0, rsrc2 = 0;
+    u32 threads[3] = {1, 1, 1};
+    u32 store_slot = 0;
+};
+
 struct Glsl {
     std::string text, why;
     u32 attributes = 0;  // how many interpolated inputs (attributes 0 to n-1) it reads
@@ -79,6 +91,10 @@ Glsl pixel_shader(const Program& p, const PsState& s);
 Glsl vertex_shader(const Program& p, const VsState& s);
 // For a rectangle list: each three corners in, the fourth (b + c - a) added
 std::string rect_geometry_shader(u32 attributes);
+
+// The compute shader. Its buffer stores (by index, of 8-bit RGBA) go into storage images at
+// bindings 32 onwards, viewed as 32-bit uints, each element a texel, as in memory.
+Glsl compute_shader(const Program& p, const CsState& s);
 
 // A trivial vertex shader that passes on a position and n attributes, computed on the CPU
 std::string pass_vertex_shader(u32 attributes);

@@ -52,12 +52,28 @@ struct Draw {
     // The render target, 4 bytes a pixel in rows: the game's memory (`address`), kept on the
     // GPU; or, if address is 0, read from `target` and the result written to `result`
     u64 address = 0;
+    u32 rows = 0;  // the kept target's rows in memory: past its height, to a multiple of 8 (0: its height)
     const unsigned char* target = nullptr;
     unsigned char* result = nullptr;
     u32 blend = 0, mask = 15;  // CB_BLEND0_CONTROL, and which of R, G, B, A are written
     float blend_color[4] = {};
     int scissor[4] = {};  // x0, y0, x1, y1
 };
+
+// A compute dispatch: its GLSL, its U (the store places in it filled in here), the groups,
+// and each buffer store's bytes in memory, which must be in a render target kept on the GPU
+struct Dispatch {
+    std::string cs;
+    std::vector<u32> values;
+    u32 store_slot = 0;
+    u32 groups[3] = {1, 1, 1};
+    struct Store {
+        u64 address = 0, bytes = 0;
+        u32 records = 0;  // the buffer's elements
+    };
+    std::vector<Store> stores;
+};
+bool dispatch(Dispatch& d, std::string& why);
 
 bool has_texture(const std::string& key);
 // A fault at addr (a write, or a read): if it is in a render target kept on the GPU, the

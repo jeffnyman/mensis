@@ -41,6 +41,7 @@
 #include <cstring>
 #include <format>
 #include <map>
+#include <set>
 #include <mutex>
 
 namespace mensis::vkdraw {
@@ -308,8 +309,9 @@ struct GpuImage {
 };
 
 bool make_image(GpuImage& im, VkImageType type, VkImageViewType view_type, VkFormat format, u32 w, u32 h, u32 depth, u32 layers,
-                VkImageUsageFlags usage, VkComponentMapping swizzle = {}) {
+                VkImageUsageFlags usage, VkComponentMapping swizzle = {}, VkImageCreateFlags flags = 0) {
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.flags = flags;
     ii.imageType = type;
     ii.format = format;
     ii.extent = {w, h, depth};
@@ -356,9 +358,10 @@ struct Kept {
     VkDeviceSize texture_bytes = 0;
     std::map<std::array<u32, 4>, VkSampler> samplers;
     std::map<std::array<u32, 3>, GpuImage> targets;  // --gpu-check's: by format, width, height
-    u64 draws = 0, texture_uploads = 0, evicted = 0;
+    std::map<std::string, VkPipeline> compute;  // by source
+    u64 draws = 0, texture_uploads = 0, evicted = 0, dispatches = 0;
     u64 target_uploads = 0, readbacks = 0, writes = 0, let_go = 0, target_textures = 0;
-    u64 ns = 0;  // the time the draws took, uploads and readbacks included
+    u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
 };
 Kept k;
 
@@ -369,6 +372,7 @@ struct Resident {
     u64 base = 0, bytes = 0, lo = 0, hi = 0;
     u32 format = 0, width = 0, height = 0;
     GpuImage image;
+    VkImageView uints = VK_NULL_HANDLE;  // the same, each texel a 32-bit uint: for a compute shader's stores
     State state = memory;
     // copies of it, for draws that read it as a texture: by format, width, height and swizzle
     std::map<std::array<u32, 4>, GpuImage> copies;
@@ -377,16 +381,18 @@ std::map<u64, Resident> g_resident;  // by address
 thread_local bool t_inside = false;  // this thread holds g_lock
 
 constexpr u32 IMAGES = 15, BUFFERS = 15;  // a pixel shader's textures (1-15), a vertex shader's buffers (17-31)
+constexpr u32 STORES = 4;  // a compute shader's storage images (32-35)
 constexpr VkDeviceSize TEXTURE_BUDGET = VkDeviceSize(2) << 30;
 
 // One descriptor set layout for every draw, with each binding there to be used or not
 bool prepare_kept() {
     if (k.ready) return true;
-    const VkShaderStageFlags all = VK_SHADER_STAGE_ALL_GRAPHICS;
+    const VkShaderStageFlags all = VK_SHADER_STAGE_ALL;
     std::vector<VkDescriptorSetLayoutBinding> b;
     b.push_back({0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
     for (u32 i = 1; i <= IMAGES; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, all, nullptr});
     for (u32 i = 16; i <= 16 + BUFFERS; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all, nullptr});
+    for (u32 i = 32; i < 32 + STORES; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, all, nullptr});
     std::vector<VkDescriptorBindingFlags> flags(b.size(), VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
     VkDescriptorSetLayoutBindingFlagsCreateInfo fi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     fi.bindingCount = u32(flags.size());
@@ -403,10 +409,12 @@ bool prepare_kept() {
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &push;
     if (vkCreatePipelineLayout(g.device, &pli, nullptr, &k.layout) != VK_SUCCESS) return fail("vkCreatePipelineLayout failed");
-    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 + BUFFERS}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMAGES}};
+    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 + BUFFERS},
+                                     {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMAGES},
+                                     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, STORES}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 1;
-    dpi.poolSizeCount = 2;
+    dpi.poolSizeCount = 3;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(g.device, &dpi, nullptr, &k.dpool) != VK_SUCCESS) return fail("vkCreateDescriptorPool failed");
     VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -614,6 +622,7 @@ void let_go(u64 base) {
     Resident& r = g_resident[base];
     read_back(r);
     platform::protect(r.lo, r.hi - r.lo, 2);
+    if (r.uints) vkDestroyImageView(g.device, r.uints, nullptr);
     r.image.destroy();
     for (auto& [key, im] : r.copies) im.destroy();
     g_resident.erase(base);
@@ -629,23 +638,32 @@ void read_back_pages(u64 lo, u64 hi) {
 // The draw's target, kept: the one at its address if it is the same format and size, else a
 // new one, once any it shares pages with are let go
 Resident* resident(const Draw& d, std::string& why) {
-    u64 bytes = u64(d.width) * d.height * 4;
+    u32 rows = std::max(d.rows, d.height);
+    u64 bytes = u64(d.width) * rows * 4;
     u64 lo = d.address & ~u64(0xfff), hi = (d.address + bytes + 0xfff) & ~u64(0xfff);
     std::vector<u64> in_way;
     for (auto& [base, r] : g_resident)
-        if (r.lo < hi && lo < r.hi && !(base == d.address && r.format == d.format && r.width == d.width && r.height == d.height))
+        if (r.lo < hi && lo < r.hi && !(base == d.address && r.format == d.format && r.width == d.width && r.height == rows))
             in_way.push_back(base);
     for (u64 base : in_way) let_go(base);
     auto it = g_resident.find(d.address);
     if (it != g_resident.end()) return &it->second;
     Resident r;
     r.base = d.address, r.bytes = bytes, r.lo = lo, r.hi = hi;
-    r.format = d.format, r.width = d.width, r.height = d.height;
-    if (!make_image(r.image, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.format), d.width, d.height, 1, 1,
-                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+    r.format = d.format, r.width = d.width, r.height = rows;
+    if (!make_image(r.image, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.format), d.width, rows, 1, 1,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_STORAGE_BIT,
+                    {}, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) {
         why = "out of GPU memory";
         return nullptr;
     }
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = r.image.image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = VK_FORMAT_R32_UINT;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCreateImageView(g.device, &vi, nullptr, &r.uints);
     return &(g_resident[d.address] = std::move(r));
 }
 
@@ -702,7 +720,7 @@ bool draw(Draw& d, std::string& why) {
         at = (at + std::max<VkDeviceSize>(bytes, 16) + 255) & ~VkDeviceSize(255);
         return p;
     };
-    VkDeviceSize target_bytes = VkDeviceSize(d.width) * d.height * 4;
+    VkDeviceSize target_bytes = kept ? res->bytes : VkDeviceSize(d.width) * d.height * 4;
     VkDeviceSize at_target = place(upload_target ? target_bytes : 0), at_values = place(d.values.size() * 4);
     VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
     VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
@@ -855,7 +873,7 @@ bool draw(Draw& d, std::string& why) {
     VkBufferImageCopy copy{};
     copy.bufferOffset = at_target;
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {d.width, d.height, 1};
+    copy.imageExtent = {d.width, kept ? res->height : d.height, 1};
     if (upload_target) {
         barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
@@ -953,6 +971,135 @@ bool has_texture(const std::string& key) {
     return k.textures.count(key) != 0;
 }
 
+bool dispatch(Dispatch& d, std::string& why) {
+    std::lock_guard lock(g_lock);
+    struct Inside {
+        Inside() { t_inside = true; }
+        ~Inside() { t_inside = false; }
+    } inside;
+    auto t0 = std::chrono::steady_clock::now();
+    if (!init() || !prepare_kept()) {
+        why = g.why;
+        return false;
+    }
+    if (d.stores.size() > STORES) {
+        why = "more than 4 buffer stores";
+        return false;
+    }
+    if (d.cs.find("uint64_t") != std::string::npos && !g.int64) {
+        why = "the GPU has no 64-bit integers";
+        return false;
+    }
+    // each store's target, kept here, with what's in memory not the newer
+    std::vector<Resident*> into(d.stores.size());
+    for (size_t i = 0; i < d.stores.size(); i++) {
+        const Dispatch::Store& s = d.stores[i];
+        for (auto& [base, r] : g_resident)
+            if (s.address >= base && s.address + s.bytes <= base + r.bytes && (s.address - base) % 4 == 0) into[i] = &r;
+        if (!into[i] || into[i]->state == Resident::memory) {
+            why = "stores into memory that isn't a render target kept on the GPU";
+            return false;
+        }
+        Resident& r = *into[i];
+        u32 slot = d.store_slot + 3 * u32(i);
+        if (d.values.size() < slot + 3) d.values.resize(slot + 3);
+        d.values[slot] = u32((s.address - r.base) / 4);  // the first pixel, the width, the elements
+        d.values[slot + 1] = r.width;
+        d.values[slot + 2] = s.records;
+    }
+    auto it = k.compute.find(d.cs);
+    VkPipeline pipe = it == k.compute.end() ? VK_NULL_HANDLE : it->second;
+    if (!pipe) {
+        VkShaderModule m = module(d.cs, shaderc_compute_shader, why);
+        if (!m) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = m;
+        ci.stage.pName = "main";
+        ci.layout = k.layout;
+        if (vkCreateComputePipelines(g.device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe) != VK_SUCCESS) {
+            why = "vkCreateComputePipelines failed";
+            return false;
+        }
+        k.compute[d.cs] = pipe;
+    }
+    if (!k.upload.reserve(std::max<VkDeviceSize>(d.values.size() * 4, 16),
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        why = "out of memory for the upload";
+        return false;
+    }
+    std::memcpy(k.upload.p, d.values.data(), d.values.size() * 4);
+    vkResetDescriptorPool(g.device, k.dpool, 0);
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = k.dpool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &k.set_layout;
+    VkDescriptorSet set;
+    if (vkAllocateDescriptorSets(g.device, &dai, &set) != VK_SUCCESS) {
+        why = "vkAllocateDescriptorSets failed";
+        return false;
+    }
+    VkDescriptorBufferInfo bi{k.upload.buffer, 0, std::max<VkDeviceSize>(d.values.size() * 4, 16)};
+    std::vector<VkDescriptorImageInfo> ii(d.stores.size());
+    std::vector<VkWriteDescriptorSet> writes;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.pBufferInfo = &bi;
+    writes.push_back(w);
+    for (size_t i = 0; i < d.stores.size(); i++) {
+        ii[i] = {VK_NULL_HANDLE, into[i]->uints, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet s{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        s.dstSet = set;
+        s.dstBinding = 32 + u32(i);
+        s.descriptorCount = 1;
+        s.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        s.pImageInfo = &ii[i];
+        writes.push_back(s);
+    }
+    vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
+
+    VkCommandBuffer cmd = k.cmd;
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &begin);
+    const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               X = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    std::set<Resident*> targets(into.begin(), into.end());
+    for (Resident* r : targets)  // from as draws leave it, for the shader to write
+        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT, C | T, X);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, k.layout, 0, 1, &set, 0, nullptr);
+    vkCmdDispatch(cmd, d.groups[0], d.groups[1], d.groups[2]);
+    for (Resident* r : targets)
+        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, RW,
+                X, C);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkResetFences(g.device, 1, &k.fence);
+    if (vkQueueSubmit(g.queue, 1, &si, k.fence) != VK_SUCCESS ||
+        vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 10'000'000'000ull) != VK_SUCCESS) {
+        why = "the GPU didn't finish the dispatch";
+        return false;
+    }
+    for (Resident* r : targets)
+        if (r->state != Resident::gpu) {  // the memory is now the older
+            platform::protect(r->lo, r->hi - r->lo, 0);
+            r->state = Resident::gpu;
+        }
+    k.dispatches++;
+    k.dispatch_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    return true;
+}
+
 bool touched(u64 addr, bool write) {
     if (t_inside) return false;  // this thread is in the middle of a draw
     std::lock_guard lock(g_lock);
@@ -1010,7 +1157,8 @@ std::string report() {
                        "the end ({} MiB), {} let go. Render targets kept there: {} at the end; taken up from memory {} times, "
                        "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times",
                        k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
-                       k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures);
+                       k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures) +
+           (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s", k.dispatches, double(k.dispatch_ns) / 1e9) : "");
 }
 
 }  // namespace mensis::vkdraw
@@ -1020,6 +1168,10 @@ std::string report() {
 namespace mensis::vkdraw {
 bool has_texture(const std::string&) { return false; }
 bool touched(u64, bool) { return false; }
+bool dispatch(Dispatch&, std::string& why) {
+    why = "no Vulkan in this build (the Windows build has it)";
+    return false;
+}
 bool run(Draw&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";
     return false;

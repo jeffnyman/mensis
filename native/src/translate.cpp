@@ -25,7 +25,11 @@
 // them before the draw, one uvec4 each, with the value an index past the end reads after
 // them.
 //
-// Not yet: branches, buffer loads other than by index, stores, LDS instructions, depth
+// A compute shader runs a thread an invocation, in groups as the dispatch's. Its buffer stores
+// so far: by index, of 8-bit RGBA, into a render target kept on the GPU, as a storage image
+// viewed as uints, each element packed exactly as the CPU's interpreter packs it.
+//
+// Not yet: branches, buffer loads other than by index, other stores, LDS instructions, depth
 // export, gathers, depth-compare sampling, offsets, and the rarer ALU ops. A shader with any
 // of them isn't translated, and says what stopped it.
 
@@ -196,7 +200,7 @@ Program decode(u64 pc, const shade::Memory& mem, const u32* user, u32 user_count
 
 // ---- the draw's values ----
 
-Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::Memory& mem) {
+Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::Memory& mem, bool compute) {
     Values v;
     u32 s[128] = {};
     bool known[128] = {};
@@ -204,7 +208,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
         v.u.push_back(k < user_count ? user[k] : 0);
         if (k < user_count) s[k] = user[k], known[k] = true;
     }
-    if (user_count < 104) known[user_count] = true;  // the primitive mask, 0 here
+    if (user_count < 104 && !compute) known[user_count] = true;  // the primitive mask, 0 here
     auto forget = [&](u32 code, u32 n) {
         for (u32 k = 0; k < n; k++)
             if (code + k < 128) known[code + k] = false;
@@ -316,7 +320,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
             case MUBUF: case MTBUF: {
                 bool typed = in.enc == MTBUF;
                 u32 op = typed ? (w0 >> 16) & 7 : (w0 >> 18) & 0x7f;
-                if (op > 3) {
+                if (op > 3 && (typed || op > 7)) {
                     v.why = std::format("{} op {}", typed ? "MTBUF" : "MUBUF", op);
                     return v;
                 }
@@ -331,7 +335,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                     v.why = "a buffer descriptor the shader works out";
                     return v;
                 }
-                v.buffers.push_back(b);
+                (op > 3 ? v.stores : v.buffers).push_back(b);
                 break;
             }
             default: break;
@@ -354,6 +358,8 @@ namespace {
 struct Writer {
     const PsState& st;
     bool vertex = false;  // a vertex shader (else a pixel shader)
+    const CsState* cs = nullptr;  // a compute shader's
+    u32 store = 0;  // the next buffer store's
     std::string body, why;
     u32 slot = 16;  // the next scalar load's place in U
     u32 image = 0;  // the next image instruction's binding
@@ -883,6 +889,20 @@ void Writer::buffer_op(const Inst& in) {
     u32 op = typed ? (w0 >> 16) & 7 : (w0 >> 18) & 0x7f;
     bool offen = (w0 >> 12) & 1, idxen = (w0 >> 13) & 1, addr64 = (w0 >> 15) & 1;
     u32 vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
+    if (!typed && op >= 4 && op <= 7 && cs) {  // buffer_store_format, by index
+        if (!idxen || offen || addr64) {
+            fail("buffer stores other than by index");
+            return;
+        }
+        vgprs.insert(vaddr);
+        u32 slot = cs->store_slot + 3 * store++;
+        std::string c[4] = {"0u", "0u", "0u", "0u"};
+        for (u32 k = 0; k <= op - 4; k++) c[k] = "unorm8(" + src(256 + ((vdata + k) & 255), 0) + ")";
+        line(std::format("if (exec_lo != 0u && v{0} < U[{1}]) {{ uint p = v{0} + U[{2}]; imageStore(S{3}, ivec2(int(p % U[{4}]), int(p / U[{4}])), "
+                         "uvec4({5} | ({6} << 8) | ({7} << 16) | ({8} << 24))); }}",
+                         vaddr, slot + 2, slot, store - 1, slot + 1, c[0], c[1], c[2], c[3]));
+        return;
+    }
     if (op > 3) {
         fail(std::format("{} op {}", typed ? "MTBUF" : "MUBUF", op));
         return;
@@ -1026,11 +1046,13 @@ bool translate_body(Writer& w, const Program& p) {
 }
 
 // The registers' declarations: the SGPRs (the user ones from U), then the VGPRs from init
-std::string registers(const Writer& w, u32 user_count, const std::string& exec, std::map<u32, std::string>& init) {
+std::string registers(const Writer& w, u32 user_count, const std::string& exec, std::map<u32, std::string>& init,
+                      const std::map<u32, std::string>& sinit = {}) {
     std::string s = std::format("    uint exec_lo = {}, exec_hi = exec_lo;\n", exec);
     s += "    uint vcc_lo = 0u, vcc_hi = 0u, m0 = 0u, dummy = 0u;\n    bool scc = false, exported = false;\n";
     for (u32 k = 0; k < 104; k++)
-        s += std::format("    uint s{} = {};\n", k, k < user_count && k < 16 ? std::format("U[{}]", k) : "0u");
+        s += std::format("    uint s{} = {};\n", k,
+                         k < user_count && k < 16 ? std::format("U[{}]", k) : sinit.count(k) ? sinit.at(k) : "0u");
     u32 top = w.vgprs.empty() ? 0 : *w.vgprs.rbegin() + 1;
     for (u32 k = 0; k < top; k++) s += std::format("    uint v{} = {};\n", k, init.count(k) ? init[k] : "0u");
     return s;
@@ -1153,6 +1175,52 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
         s.insert(s.find('\n') + 1, "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n");
     g.text = s;
     g.attributes = w.attrs;
+    return g;
+}
+
+Glsl compute_shader(const Program& p, const CsState& cs) {
+    Glsl g;
+    if (!p.why.empty()) {
+        g.why = p.why;
+        return g;
+    }
+    PsState none;
+    Writer w(none);
+    w.cs = &cs;
+    if (!translate_body(w, p)) {
+        g.why = w.why;
+        return g;
+    }
+    if (w.image || w.buffer) {
+        g.why = "images or buffer loads in a compute shader";
+        return g;
+    }
+    std::string s = "#version 450\n";
+    s += std::format("layout(local_size_x = {}, local_size_y = {}, local_size_z = {}) in;\n", cs.threads[0], cs.threads[1],
+                     cs.threads[2]);
+    s += "layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };\n";
+    for (u32 k = 0; k < w.store; k++) s += std::format("layout(set = 0, binding = {}, r32ui) uniform writeonly uimage2D S{};\n", 32 + k, k);
+    s += HELPERS;
+    // a float into 8 unsigned bits, as the CPU's interpreter packs it (shade.cpp)
+    s += "uint unorm8(uint x) { float f = uintBitsToFloat(x); f = isnan(f) ? 0.0 : clamp(f, 0.0, 1.0); return uint(roundEven(f * 255.0)); }\n";
+    s += "\nvoid main() {\n";
+    // v0-v2: the thread in its group; after the user SGPRs, the group's number (x, y, z, as
+    // enabled), then the wave's in the group
+    std::map<u32, std::string> init = {{0, "gl_LocalInvocationID.x"}, {1, "gl_LocalInvocationID.y"}, {2, "gl_LocalInvocationID.z"}};
+    std::map<u32, std::string> sinit;
+    u32 next = std::min(cs.user_count, 16u);
+    static const char xyz[] = "xyz";
+    for (int d = 0; d < 3; d++)
+        if ((cs.rsrc2 >> (7 + d)) & 1) sinit[next++] = std::format("gl_WorkGroupID.{}", xyz[d]);
+    if ((cs.rsrc2 >> 10) & 1) sinit[next++] = "gl_LocalInvocationIndex / 64u";
+    for (u32 k = 0; k < 3; k++) w.vgprs.insert(k);
+    s += registers(w, cs.user_count, "0xffffffffu", init, sinit);
+    s += w.body;
+    s += "}\n";
+    if (s.find("uint64_t") != std::string::npos)
+        s.insert(s.find('\n') + 1, "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n");
+    g.text = s;
+    g.buffers = w.store;
     return g;
 }
 

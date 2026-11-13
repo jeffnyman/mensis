@@ -221,7 +221,7 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   arrangement of them not being reproduced. Not done yet: depth and stencil, mip levels past
   the first, a triangle with a vertex behind the eye, multisampling; the summary counts
   whatever a run met that wasn't done.
-* **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel or vertex shader
+* **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel, vertex or compute shader
   becomes GLSL (`shaders/`, beside its disassembly), which the Vulkan SDK's compiler (shaderc) turns into SPIR-V, the form a GPU takes
   through Vulkan. On the console a wave runs 64 pixels in step; on the PC each pixel runs on
   its own, so each plays one lane of the wave: the vector registers become its variables, and
@@ -245,16 +245,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   rows goes up as it is in memory, or, if it is a render target kept there (the frame's
   picture, read by the next pass), is copied on the GPU; any other is decoded by the CPU, as
   the CPU's interpreter reads it (so the shaders, the triangles, the filtering and the
-  blending are the GPU's).
-- **Render targets kept on the GPU.** A render target stays on the GPU from draw to draw, and
+  blending are the GPU's). A compute shader runs a thread to an invocation, in groups as the
+  dispatch's, its group number and thread number where the console puts them; its stores so
+  far are buffer stores by index, of 8-bit RGBA, into a render target kept on the GPU, which
+  it writes as an image of 32-bit values, each packed exactly as the CPU's interpreter packs
+  it. Not yet translated: branches, buffer loads other than by index, other stores, LDS
+  instructions, depth export, gathers, depth-compare sampling; a shader with any of them says
+  so, and is left to the CPU (for a vertex shader, the GPU is given the CPU's vertices
+  instead).
+* **Render targets kept on the GPU.** A render target stays on the GPU from draw to draw, and
   its memory is guarded by the pages' protection: while the GPU's picture is the newer,
   nothing may touch the memory, and once the two are the same, it may be read. Whatever
   touches it (the window, the CPU's dispatches and draws, the game) faults, and the fault
   handler brings the picture back into the memory first; a write makes the memory the newer,
-  and the next draw takes it up again. Not yet
-  translated: compute shaders, branches, buffer loads other than by index, stores, LDS
-  instructions, depth export, gathers, depth-compare sampling; a shader with any of them says
-  so, and if it is the vertex shader, the GPU is given the CPU's vertices instead.
+  and the next draw takes it up again. It is kept to a multiple of 8 rows, as the console lays
+  a target out, since a compute shader may write the rows past its height.
 * **The display** keeps the timing: one flip at each vertical blank, 60 a second or the rate
   the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
   queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
@@ -525,13 +530,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     draws (5,944) took 4.0 s rather than 11.2, and textures uploaded fell from 812 to 45;
     the title screen is the same, the window too, and the validation layer reported nothing.
     `--gpu-check` gives the same as before (16 draws compared, 14 the same in every pixel).
+32. **Compute shaders on the GPU.** What was left was the once-a-frame clear: a compute
+    shader writing one colour over the main picture, through buffer stores, some 16,000
+    groups a frame, nearly all the CPU's compute work, and the reason the picture came back
+    into memory and went up again each frame. Compute shaders are now translated too, and a
+    dispatch runs on the GPU when its stores all go into render targets kept there, written
+    straight into the image. The clear writes 1,088 rows of a 1,080-row target (the console
+    lays targets out in 8-row tiles), so the kept image now has those rows too. In 30
+    seconds: the 758 clears on the GPU took 0.3 s, the CPU's dispatches 1.6 s rather than 6.5,
+    and the main picture went up from memory 4 times and came back 17, rather than some 770
+    times each; the GPU's draws took 2.1 s. The title screen is the same, in the window too, `--gpu-check` gives the
+    same as before, and the validation layer reported nothing. The other dispatches stay on the CPU:
+    those with branches, and those that store elsewhere, or in other formats.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, the draws on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders (pixel, vertex, compute) translated into GLSL, and `vkdraw.cpp`, the draws and dispatches on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
 | `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled, and with `--gpu-check` translated into GLSL), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

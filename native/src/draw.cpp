@@ -20,8 +20,9 @@
 //
 // Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
 // translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp), into its render
-// target kept there, which comes back into the game's memory when something touches it. The
-// CPU draws the rest, and runs the dispatches.
+// target kept there, which comes back into the game's memory when something touches it. So is
+// each dispatch whose compute shader can be translated, and whose stores all go into render
+// targets kept there. The CPU runs the rest.
 //
 // With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, into a copy
 // of the render target as it was before; then the CPU draws it, and the two are compared
@@ -416,6 +417,8 @@ u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0;
 std::map<std::string, u64> g_check_skipped;
 u64 g_gpu_draws = 0, g_gpu_vertices = 0;  // drawn on the GPU
 std::map<std::string, u64> g_gpu_skipped;
+u64 g_gpu_dispatches = 0, g_gpu_groups = 0;  // run on the GPU
+std::map<std::string, u64> g_gpu_dispatch_skipped;
 
 // A hash of n bytes of memory, to tell whether a texture changed
 u64 hash_memory(const unsigned char* p, u64 n) {
@@ -646,6 +649,8 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     }
     d.width = t.pitch;
     d.height = t.height;
+    u32 rows = (t.height + 7) / 8 * 8;  // as the console lays a target out, which a compute shader may write
+    d.rows = mem.ok(t.base, u64(t.pitch) * rows * 4) ? rows : t.height;
     // VkFormat: R8G8B8A8 unorm 37, srgb 43; B8G8R8A8 unorm 44, srgb 50 (COMP_SWAP alt: B first)
     d.format = t.swap == 0 ? (t.nfmt == 9 ? 43 : 37) : (t.nfmt == 9 ? 50 : 44);
     d.blend = t.blend;
@@ -1013,6 +1018,58 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     return saved(std::format("{} triangles, {} pixels", tris.size(), pixels.load()), "");
 }
 
+// The dispatch on the GPU: false (and why) if it can't be
+bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory& mem, std::string& why) {
+    auto it = g_programs.find(cs);
+    if (it == g_programs.end()) it = g_programs.emplace(cs, translate::decode(cs, mem)).first;
+    const translate::Program& prog = it->second;
+    if (!prog.why.empty()) {
+        why = "the shader has " + prog.why;
+        return false;
+    }
+    u32 rsrc2 = r.sh[0x213], users = std::min((rsrc2 >> 1) & 0x1f, 16u);
+    u32 user[16];
+    for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x240 + k];
+    translate::Values vals = translate::evaluate(prog, user, users, mem, true);
+    if (!vals.why.empty()) {
+        why = "the shader has " + vals.why;
+        return false;
+    }
+    if (vals.stores.empty()) {
+        why = "no buffer stores";
+        return false;
+    }
+    vkdraw::Dispatch d;
+    for (auto& b : vals.stores) {
+        u64 base = b.v[0] | (u64(b.v[1] & 0xfff) << 32);
+        u32 stride = (b.v[1] >> 16) & 0x3fff;
+        bool swizzled = (b.v[1] >> 31) & 1, add_tid = (b.v[3] >> 23) & 1;
+        if (stride != 4 || b.dfmt != 10 || b.nfmt != 0 || swizzled || add_tid || b.offset % 4) {
+            why = std::format("buffer stores of format {}, number type {}, stride {}", b.dfmt, b.nfmt, stride);
+            return false;
+        }
+        d.stores.push_back({base + b.offset, u64(b.v[2]) * 4, b.v[2]});
+    }
+    translate::CsState st;
+    st.user_count = users;
+    st.rsrc2 = rsrc2;
+    st.threads[0] = std::max(r.sh[0x207] & 0xffff, 1u);
+    st.threads[1] = std::max(r.sh[0x208] & 0xffff, 1u);
+    st.threads[2] = std::max(r.sh[0x209] & 0xffff, 1u);
+    st.store_slot = u32(vals.u.size());
+    translate::Glsl gl = translate::compute_shader(prog, st);
+    if (!gl.why.empty()) {
+        why = "the shader has " + gl.why;
+        return false;
+    }
+    save_glsl("cs", cs, gl.text);
+    d.cs = gl.text;
+    d.values = vals.u;
+    d.store_slot = st.store_slot;
+    d.groups[0] = gx, d.groups[1] = gy, d.groups[2] = gz;
+    return vkdraw::dispatch(d, why);
+}
+
 std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     if (!M.draw) return {};
     std::lock_guard draw_lock(g_draw_lock);
@@ -1027,6 +1084,15 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     u32 tx = std::max(r.sh[0x207] & 0xffff, 1u), ty = std::max(r.sh[0x208] & 0xffff, 1u), tz = std::max(r.sh[0x209] & 0xffff, 1u);
     u32 threads = tx * ty * tz, nwaves = (threads + LANES - 1) / LANES;
     u64 groups = u64(gx) * gy * gz;
+    if (M.gpu) {
+        std::string why;
+        if (gpu_compute(r, cs, gx, gy, gz, mem, why)) {
+            g_gpu_dispatches++;
+            g_gpu_groups += groups;
+            return std::format("on the GPU: {} groups", groups);
+        }
+        g_gpu_dispatch_skipped[why]++;
+    }
     std::atomic<u64> next{0};
     struct NoIo : Io {
         void exp(u32, const Vec* const[4], bool, u64) override { note("exports from a compute shader"); }
@@ -1101,6 +1167,12 @@ std::vector<std::string> draw_report() {
         if (!g_gpu_skipped.empty()) {
             s.insert(s.end(), {"Drawn on the CPU instead:\n", "| Why | Draws |", "|---|---:|"});
             for (auto& [why, count] : g_gpu_skipped) s.push_back(std::format("| {} | {} |", why, count));
+            s.push_back("");
+        }
+        s.push_back(std::format("Dispatches on the GPU: {}, of {} groups; the CPU ran the rest.\n", g_gpu_dispatches, g_gpu_groups));
+        if (!g_gpu_dispatch_skipped.empty()) {
+            s.insert(s.end(), {"Dispatches run on the CPU instead:\n", "| Why | Dispatches |", "|---|---:|"});
+            for (auto& [why, count] : g_gpu_dispatch_skipped) s.push_back(std::format("| {} | {} |", why, count));
             s.push_back("");
         }
     }
