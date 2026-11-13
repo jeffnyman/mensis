@@ -3,7 +3,8 @@
 # The native loader: Bloodborne's executable run directly on the CPU (docs/the-loader.md).
 # x86-64 only, on Windows or Linux.
 #
-# Windows (Visual Studio 2022 Build Tools with "C++ Clang tools for Windows"):
+# Windows (Visual Studio 2022 Build Tools with "C++ Clang tools for Windows", and the Vulkan
+# SDK, which the window draws through):
 #
 #     pwsh native/build.ps1
 #
@@ -22,7 +23,7 @@ if(WIN32)
     if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         message(FATAL_ERROR "build with clang (native/build.ps1 does): the assembly is GNU syntax")
     endif()
-    set(PLATFORM_SOURCES src/platform_windows.cpp src/enter_windows.S)
+    set(PLATFORM_SOURCES src/platform_windows.cpp src/enter_windows.S src/vulkan.cpp)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PLATFORM_SOURCES src/platform_linux.cpp src/enter_linux.S)
 else()
@@ -39,7 +40,10 @@ target_compile_options(mensis-loader PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -We
 
 if(WIN32)
     target_compile_definitions(mensis-loader PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_link_libraries(mensis-loader PRIVATE user32 gdi32)
+    find_package(Vulkan REQUIRED)  # from the Vulkan SDK (its installer sets VULKAN_SDK)
+    target_link_libraries(mensis-loader PRIVATE user32 gdi32 Vulkan::Vulkan)
+    # Vulkan's structures are filled field by field after their type
+    set_source_files_properties(src/vulkan.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
 else()
     find_package(Threads REQUIRED)
     target_link_libraries(mensis-loader PRIVATE Threads::Threads)

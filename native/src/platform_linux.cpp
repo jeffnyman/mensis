@@ -96,6 +96,7 @@ void enter_thread(u64 tp) {
 }
 
 bool open_window() { return false; }  // not yet: frame.bmp shows the screen at the end
+std::vector<std::string> window_report() { return {}; }
 
 // The instructions at rip, through objdump, read without faulting if rip isn't mapped.
 std::vector<std::string> disassemble(u64 rip) {

@@ -5,8 +5,9 @@
 #     pwsh native/build.ps1
 #
 # Needs the Visual Studio 2022 Build Tools (or Visual Studio) with the "Desktop development with
-# C++" workload and its "C++ Clang tools for Windows" component, and CMake. Finds them with
-# vswhere and sets up their environment, so it runs from any shell.
+# C++" workload and its "C++ Clang tools for Windows" component, CMake, and the Vulkan SDK
+# (vulkan.lunarg.com; CMake finds it through the VULKAN_SDK its installer sets). Finds the
+# compiler with vswhere and sets up its environment, so it runs from any shell.
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

@@ -247,6 +247,7 @@ void enter_thread(u64 tp);  // on each host thread before it runs game code
 // A window showing the display (--window), on a thread of its own; false if this platform
 // has none. Closing it ends the run.
 bool open_window();
+std::vector<std::string> window_report();  // how the window was drawn, for the summary
 std::vector<std::string> disassemble(u64 rip);  // the instructions at rip, for the summary
 }  // namespace platform
 

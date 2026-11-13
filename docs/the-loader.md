@@ -94,7 +94,8 @@ AVX isn't rare in this game. Of the executable's 26.8 million instructions, **1.
 `native/` is the next step: the same loader in C++, running the game's code directly on the
 CPU. It runs on Windows and on Linux, on any x86-64 machine. On Windows it needs the Visual
 Studio 2022 Build Tools with the "Desktop development with C++" workload and its "C++ Clang
-tools for Windows" component:
+tools for Windows" component, and the Vulkan SDK (free, from vulkan.lunarg.com; its "Core"
+is enough), which the window draws through:
 
 ```
 pwsh native/build.ps1
@@ -220,8 +221,9 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
   queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
   flip chose: in the window (`--window`, Windows; a copy 30 times a second, scaled to the
-  window, through GDI) and, at the end, in `frame.bmp`. The buffers are in one of the GPU's
-  macro-tiled modes, which the loader's drawing keeps in rows, so both show them as they are.
+  window on the PC's GPU, through Vulkan, `vulkan.cpp`) and, at the end, in `frame.bmp`. The
+  buffers are in one of the GPU's macro-tiled modes, which the loader's drawing keeps in
+  rows, so both show them as they are.
 * **Sound** is taken and discarded, at the pace of a real audio port: `sceAudioOutOutput`
   waits until the port's next buffer is due (256 samples at 48 kHz, every 5.3 ms), as the
   sound library's audio thread expects.
@@ -432,13 +434,23 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     best: 12 gave 255 frames, 8 gave 185. What is left is the interpreting itself, each
     instruction taken apart again for each wave; much faster would mean translating the
     shaders, to the CPU's own instructions or to a PC GPU's.
+27. **Vulkan.** The way chosen is the PC's GPU, through Vulkan, which is how PS4 emulators
+    run their games: the game's shaders translated into programs for it, which would run
+    thousands of pixels at once. The first step is the window: it is now drawn through
+    Vulkan rather than GDI, on the GPU that can present to it (a discrete one first), the
+    display's buffer copied up to the GPU and scaled into the window there. The drawing is
+    still the CPU's. The validation layer, which comes with the Vulkan SDK and reports any
+    wrong use of Vulkan, is on whenever it is installed, and the summary says what it found.
+    In a 75-second run on an RTX 5090, to the title screen (760 frames), and in one with the
+    window resized, minimised, restored and maximised, it found nothing. If Vulkan can't be
+    used, the window falls back to GDI and the summary says why.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
 | `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled), `draws/` (the first draws of each pixel shader, as drawn) and `frame.bmp` (the screen when it stopped) |

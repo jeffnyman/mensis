@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "loader.hpp"
+#include "vulkan.hpp"
 
 using namespace mensis;
 
@@ -61,13 +62,21 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
 // ---- the window (--window) ----
 //
 // The display's buffer on screen, scaled to the window, redrawn 30 times a second; the title
-// counts the flips and their rate.
+// counts the flips and their rate. Drawn through Vulkan (vulkan.cpp), or through GDI if Vulkan
+// can't be used.
 
 std::vector<u32> g_pixels;
 u32 g_width = 0, g_height = 0;
 u64 g_flips = 0, g_flips_then = 0;
 ULONGLONG g_then = 0;
 double g_rate = 0;
+bool g_vulkan = false;
+
+void present_vulkan(HWND w) {
+    RECT r;
+    GetClientRect(w, &r);
+    vk::present(g_pixels.data(), g_width, g_height, u32(r.right), u32(r.bottom));
+}
 
 LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -82,7 +91,10 @@ LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             std::wstring title = g_flips ? std::format(L"Mensis: frame {}, {:.1f} a second", g_flips, g_rate)
                                          : std::wstring(L"Mensis: starting");
             SetWindowTextW(w, title.c_str());
-            InvalidateRect(w, nullptr, FALSE);
+            if (g_vulkan)
+                present_vulkan(w);
+            else
+                InvalidateRect(w, nullptr, FALSE);
             return 0;
         }
         case WM_ERASEBKGND:
@@ -90,6 +102,11 @@ LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(w, &ps);
+            if (g_vulkan) {
+                EndPaint(w, &ps);
+                present_vulkan(w);
+                return 0;
+            }
             RECT r;
             GetClientRect(w, &r);
             if (g_width) {
@@ -138,6 +155,9 @@ bool open_window() {
             std::fprintf(stderr, "can't open the window (error %lu)\n", GetLastError());
             return;
         }
+        std::string error;
+        g_vulkan = vk::open(inst, w, error);
+        if (!g_vulkan) std::fprintf(stderr, "the window uses GDI: Vulkan couldn't be used: %s\n", error.c_str());
         ShowWindow(w, SW_SHOW);
         g_then = GetTickCount64();
         SetTimer(w, 1, 33, nullptr);
@@ -149,6 +169,8 @@ bool open_window() {
     }).detach();
     return true;
 }
+
+std::vector<std::string> window_report() { return vk::report(); }
 
 void reserve(u64 addr, u64 size) {
     void* p = VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE,

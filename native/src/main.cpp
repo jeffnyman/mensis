@@ -290,6 +290,7 @@ void write_outputs(const std::string& reason) {
     };
     for (const auto& n : M.notes) s.push_back(n + "\n");
     for (const auto& line : video_report()) s.push_back(line);
+    for (const auto& line : platform::window_report()) s.push_back(line);
     s.insert(s.end(), {"## Where it stopped\n", "```"});
     if (M.fault.valid) {
         const auto& g = M.fault;
