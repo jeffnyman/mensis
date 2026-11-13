@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Draws on the PC's GPU, through Vulkan, one at a time: each one's render target goes up from
-// the game's memory and comes back into it (or into a copy, for --gpu-check) before the next.
-// The GLSL is compiled to SPIR-V by the Vulkan SDK's shaderc. Kept between draws: the compiled
-// shaders and pipelines (one descriptor set layout serves them all), the samplers, a render
-// target of each format and size, one buffer for what goes up and one for what comes back,
-// and the textures, by their descriptor and a hash of the memory they read, so a texture
-// that hasn't changed isn't decoded or uploaded again (up to 2 GiB of them; those not used
-// lately go first). A texture is uploaded as it is in memory if the GPU reads that format the
-// same way (8-bit RGBA, in rows), else as 32-bit floats, decoded on the CPU exactly as the
-// CPU's interpreter reads them.
+// Draws on the PC's GPU, through Vulkan, one at a time. The GLSL is compiled to SPIR-V by the
+// Vulkan SDK's shaderc. Kept between draws: the compiled shaders and pipelines (one descriptor
+// set layout serves them all), the samplers, one buffer for what goes up and one for what
+// comes back, the textures, and the render targets.
+//
+// A texture is kept by its descriptor and a hash of the memory it reads, so a texture that
+// hasn't changed isn't decoded or uploaded again (up to 2 GiB of them; those not used lately
+// go first). It is uploaded as it is in memory if the GPU reads that format the same way
+// (8-bit RGBA, in rows), else as 32-bit floats, decoded on the CPU exactly as the CPU's
+// interpreter reads them.
+//
+// A render target is kept by its address, and goes up from the game's memory only when the
+// memory may be newer than the GPU's copy. Its memory is guarded instead, by the pages'
+// protection: while the GPU's picture is newer, nothing may touch the memory; when the two are
+// the same, the memory may be read. A touch faults, and the fault handler (platform_windows.cpp)
+// asks touched(): the picture comes back into the memory, which may then be read; a write
+// makes the memory the newer, and the next draw takes it up again. So whatever reads the
+// memory sees the picture (the window, the CPU's dispatches and draws, the game itself), but a
+// target the GPU draws into again and again stays there in between. A target that shares a
+// page with another lets the other go (back into memory) first. A draw that reads a kept
+// target as a texture (the whole of it, in rows) is given a copy of it made on the GPU. For
+// --gpu-check, the draw goes into a copy instead: a target of that format and size, uploaded
+// and read back.
 //
 // Built where the Vulkan SDK is (Windows, so far: MENSIS_VULKAN); elsewhere run() says so.
 
@@ -342,11 +355,26 @@ struct Kept {
     std::map<std::string, GpuImage> textures;
     VkDeviceSize texture_bytes = 0;
     std::map<std::array<u32, 4>, VkSampler> samplers;
-    std::map<std::array<u32, 3>, GpuImage> targets;  // by format, width, height
+    std::map<std::array<u32, 3>, GpuImage> targets;  // --gpu-check's: by format, width, height
     u64 draws = 0, texture_uploads = 0, evicted = 0;
+    u64 target_uploads = 0, readbacks = 0, writes = 0, let_go = 0, target_textures = 0;
     u64 ns = 0;  // the time the draws took, uploads and readbacks included
 };
 Kept k;
+
+// A render target in the game's memory, kept on the GPU: the pages it is in (lo to hi), and
+// which is the newer, the GPU's picture or the memory (or neither)
+struct Resident {
+    enum State { gpu, same, memory };
+    u64 base = 0, bytes = 0, lo = 0, hi = 0;
+    u32 format = 0, width = 0, height = 0;
+    GpuImage image;
+    State state = memory;
+    // copies of it, for draws that read it as a texture: by format, width, height and swizzle
+    std::map<std::array<u32, 4>, GpuImage> copies;
+};
+std::map<u64, Resident> g_resident;  // by address
+thread_local bool t_inside = false;  // this thread holds g_lock
 
 constexpr u32 IMAGES = 15, BUFFERS = 15;  // a pixel shader's textures (1-15), a vertex shader's buffers (17-31)
 constexpr VkDeviceSize TEXTURE_BUDGET = VkDeviceSize(2) << 30;
@@ -540,6 +568,87 @@ void evict() {
     }
 }
 
+// The GPU's picture back into the memory, which may then be read
+bool read_back(Resident& r) {
+    if (r.state != Resident::gpu) return true;
+    if (!k.readback.reserve(r.bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
+    VkCommandBuffer cmd = k.cmd;
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &begin);
+    const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {r.width, r.height, 1};
+    vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
+    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, T, C);
+    VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hb.buffer = k.readback.buffer;
+    hb.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkResetFences(g.device, 1, &k.fence);
+    if (vkQueueSubmit(g.queue, 1, &si, k.fence) != VK_SUCCESS ||
+        vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 10'000'000'000ull) != VK_SUCCESS)
+        return false;
+    platform::protect(r.lo, r.hi - r.lo, 2);
+    std::memcpy(reinterpret_cast<void*>(r.base), k.readback.p, r.bytes);
+    platform::protect(r.lo, r.hi - r.lo, 1);
+    r.state = Resident::same;
+    k.readbacks++;
+    return true;
+}
+
+// The target let go: back into the memory, which is left unguarded
+void let_go(u64 base) {
+    Resident& r = g_resident[base];
+    read_back(r);
+    platform::protect(r.lo, r.hi - r.lo, 2);
+    r.image.destroy();
+    for (auto& [key, im] : r.copies) im.destroy();
+    g_resident.erase(base);
+    k.let_go++;
+}
+
+// Every kept target in the pages from lo to hi back into the memory
+void read_back_pages(u64 lo, u64 hi) {
+    for (auto& [base, r] : g_resident)
+        if (r.lo < hi && lo < r.hi) read_back(r);
+}
+
+// The draw's target, kept: the one at its address if it is the same format and size, else a
+// new one, once any it shares pages with are let go
+Resident* resident(const Draw& d, std::string& why) {
+    u64 bytes = u64(d.width) * d.height * 4;
+    u64 lo = d.address & ~u64(0xfff), hi = (d.address + bytes + 0xfff) & ~u64(0xfff);
+    std::vector<u64> in_way;
+    for (auto& [base, r] : g_resident)
+        if (r.lo < hi && lo < r.hi && !(base == d.address && r.format == d.format && r.width == d.width && r.height == d.height))
+            in_way.push_back(base);
+    for (u64 base : in_way) let_go(base);
+    auto it = g_resident.find(d.address);
+    if (it != g_resident.end()) return &it->second;
+    Resident r;
+    r.base = d.address, r.bytes = bytes, r.lo = lo, r.hi = hi;
+    r.format = d.format, r.width = d.width, r.height = d.height;
+    if (!make_image(r.image, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.format), d.width, d.height, 1, 1,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        why = "out of GPU memory";
+        return nullptr;
+    }
+    return &(g_resident[d.address] = std::move(r));
+}
+
 VkComponentSwizzle swizzle(u32 sel) {
     switch (sel) {
         case 0: return VK_COMPONENT_SWIZZLE_ZERO;
@@ -563,6 +672,26 @@ bool draw(Draw& d, std::string& why) {
     }
     VkPipeline pipe = pipeline(d, why);
     if (!pipe) return false;
+    // the target: kept, or --gpu-check's copy, by its format and size
+    bool kept = d.address != 0;
+    Resident* res = nullptr;
+    if (kept && !(res = resident(d, why))) return false;
+    // a texture read as it is in memory: copied on the GPU from a kept target there, if it is
+    // that target laid out the same way; else any kept target there goes back into memory first
+    std::vector<Resident*> from_target(d.textures.size(), nullptr);
+    for (size_t i = 0; i < d.textures.size(); i++) {
+        const Texture& t = d.textures[i];
+        if (!t.raw) continue;
+        auto it = g_resident.find(u64(t.raw));
+        if (it != g_resident.end() && it->second.state != Resident::memory && t.type == 9 && t.layers == 1 &&
+            t.pitch == it->second.width && t.width <= it->second.width && t.height <= it->second.height) {
+            from_target[i] = &it->second;
+            continue;
+        }
+        u64 at = u64(t.raw), end = at + u64(t.pitch) * t.height * t.layers * 4;
+        read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff));
+    }
+    bool upload_target = !kept || res->state == Resident::memory;
     k.draws++;
     evict();
 
@@ -574,7 +703,7 @@ bool draw(Draw& d, std::string& why) {
         return p;
     };
     VkDeviceSize target_bytes = VkDeviceSize(d.width) * d.height * 4;
-    VkDeviceSize at_target = place(target_bytes), at_values = place(d.values.size() * 4);
+    VkDeviceSize at_target = place(upload_target ? target_bytes : 0), at_values = place(d.values.size() * 4);
     VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
     VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
     std::vector<VkDeviceSize> at_buffers;
@@ -585,6 +714,18 @@ bool draw(Draw& d, std::string& why) {
     std::vector<GpuImage> unkept(d.textures.size());
     for (size_t i = 0; i < d.textures.size(); i++) {
         Texture& t = d.textures[i];
+        if (Resident* r = from_target[i]) {  // an image kept for it, by its format, size and swizzle
+            u32 sw = t.swizzle[0] | t.swizzle[1] << 3 | t.swizzle[2] << 6 | t.swizzle[3] << 9;
+            GpuImage& im = r->copies[{t.format, t.width, t.height, sw}];
+            VkComponentMapping map{swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
+            if (!im.image && !make_image(im, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(t.format), t.width, t.height, 1, 1,
+                                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
+                why = "out of GPU memory";
+                return false;
+            }
+            images[i] = &im;
+            continue;
+        }
         if (!t.key.empty()) {
             auto it = k.textures.find(t.key);
             if (it != k.textures.end()) {
@@ -614,12 +755,12 @@ bool draw(Draw& d, std::string& why) {
     }
     if (!k.upload.reserve(at, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
-        !k.readback.reserve(target_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+        (!kept && !k.readback.reserve(target_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true))) {
         why = "out of memory for the upload";
         return false;
     }
     unsigned char* up = k.upload.p;
-    std::memcpy(up + at_target, d.target, target_bytes);
+    if (upload_target) std::memcpy(up + at_target, kept ? reinterpret_cast<const unsigned char*>(d.address) : d.target, target_bytes);
     std::memcpy(up + at_values, d.values.data(), d.values.size() * 4);
     std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
     std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
@@ -632,9 +773,8 @@ bool draw(Draw& d, std::string& why) {
         else std::memcpy(up + at_texels[i], t.rgba.data(), t.rgba.size() * 4);
     }
 
-    // the target, kept by its format and size
-    GpuImage& target = k.targets[{d.format, d.width, d.height}];
-    if (!target.image &&
+    GpuImage& target = kept ? res->image : k.targets[{d.format, d.width, d.height}];
+    if (!kept && !target.image &&
         !make_image(target, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.format), d.width, d.height, 1, 1,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         why = "out of GPU memory";
@@ -691,15 +831,41 @@ bool draw(Draw& d, std::string& why) {
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin);
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
+    const VkPipelineStageFlags C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    // the textures that are kept targets, copied first (before this draw changes its own)
+    for (size_t i = 0; i < d.textures.size(); i++) {
+        Resident* r = from_target[i];
+        if (!r) continue;
+        GpuImage& im = *images[i];
+        barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
+        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
+        VkImageCopy ic{};
+        ic.srcSubresource = ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        ic.extent = {d.textures[i].width, d.textures[i].height, 1};
+        vkCmdCopyImage(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
+        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_READ_BIT, RW, T, C);
+        barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT, T, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+        k.target_textures++;
+    }
     VkBufferImageCopy copy{};
     copy.bufferOffset = at_target;
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {d.width, d.height, 1};
-    vkCmdCopyBufferToImage(cmd, k.upload.buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-    barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, T, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    if (upload_target) {
+        barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
+        vkCmdCopyBufferToImage(cmd, k.upload.buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, RW, T, C);
+    } else {  // as the last draw or readback left it
+        barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, RW, C | T, C);
+    }
     for (size_t i = 0; i < d.textures.size(); i++) {
         if (at_texels[i] == ~VkDeviceSize(0)) continue;
         const Texture& t = d.textures[i];
@@ -743,17 +909,19 @@ bool draw(Draw& d, std::string& why) {
         vkCmdDraw(cmd, u32(d.vertices.size() / ((1 + d.attributes) * 4)), 1, 0, 0);
     }
     vkCmdEndRendering(cmd);
-    barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, T);
-    copy.bufferOffset = 0;
-    vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
-    VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    hb.buffer = k.readback.buffer;
-    hb.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+    if (!kept) {  // --gpu-check's copy comes back now
+        barrier(cmd, target.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
+        copy.bufferOffset = 0;
+        vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
+        VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hb.buffer = k.readback.buffer;
+        hb.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+    }
     vkEndCommandBuffer(cmd);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -766,7 +934,15 @@ bool draw(Draw& d, std::string& why) {
         why = "the GPU didn't finish the draw";
         return false;
     }
-    std::memcpy(d.result, k.readback.p, target_bytes);
+    if (!kept) {
+        std::memcpy(d.result, k.readback.p, target_bytes);
+        return true;
+    }
+    if (upload_target) k.target_uploads++;
+    if (res->state != Resident::gpu) {  // the memory is now the older: guarded from any touch
+        platform::protect(res->lo, res->hi - res->lo, 0);
+        res->state = Resident::gpu;
+    }
     return true;
 }
 
@@ -777,8 +953,33 @@ bool has_texture(const std::string& key) {
     return k.textures.count(key) != 0;
 }
 
+bool touched(u64 addr, bool write) {
+    if (t_inside) return false;  // this thread is in the middle of a draw
+    std::lock_guard lock(g_lock);
+    t_inside = true;
+    bool ours = false;
+    for (auto& [base, r] : g_resident) {
+        if (addr < r.lo || addr >= r.hi) continue;
+        ours = true;
+        if (r.state == Resident::gpu && !read_back(r)) {
+            ours = false;  // the GPU failed: the fault stands
+        } else if (r.state == Resident::same && write) {  // the memory is now the newer
+            platform::protect(r.lo, r.hi - r.lo, 2);
+            r.state = Resident::memory;
+            k.writes++;
+        }
+        break;  // (if another thread has dealt with it already, the access is simply tried again)
+    }
+    t_inside = false;
+    return ours;
+}
+
 bool run(Draw& d, std::string& why) {
     std::lock_guard lock(g_lock);
+    struct Inside {
+        Inside() { t_inside = true; }
+        ~Inside() { t_inside = false; }
+    } inside;
     auto t0 = std::chrono::steady_clock::now();
     if (!init()) {
         why = g.why;
@@ -805,10 +1006,11 @@ std::string device() {
 std::string report() {
     std::lock_guard lock(g_lock);
     if (!k.draws) return {};
-    return std::format("{} draws on the GPU took {:.1f} s, uploads and readbacks included; {} pipelines; {} textures uploaded, "
-                       "{} kept at the end ({} MiB), {} let go",
+    return std::format("{} draws on the GPU took {:.1f} s, uploads included; {} pipelines; {} textures uploaded, {} kept at "
+                       "the end ({} MiB), {} let go. Render targets kept there: {} at the end; taken up from memory {} times, "
+                       "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times",
                        k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
-                       k.texture_bytes >> 20, k.evicted);
+                       k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures);
 }
 
 }  // namespace mensis::vkdraw
@@ -817,6 +1019,7 @@ std::string report() {
 
 namespace mensis::vkdraw {
 bool has_texture(const std::string&) { return false; }
+bool touched(u64, bool) { return false; }
 bool run(Draw&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";
     return false;

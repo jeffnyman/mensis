@@ -241,6 +241,8 @@ namespace platform {
 void reserve(u64 addr, u64 size);  // address space at exactly addr; dies if it's taken
 bool try_reserve(u64 addr, u64 size);  // the same, but says whether it could
 void commit(u64 addr, u64 size);  // make reserved memory usable (read, write, execute)
+// What committed memory may be used for: 0 nothing, 1 reading, 2 anything (as committed)
+void protect(u64 addr, u64 size, int access);
 // After loading: whatever the CPU needs before the game's code runs. Returns the
 // displacement the thread-pointer loads are rewritten to read through gs.
 u32 prepare();

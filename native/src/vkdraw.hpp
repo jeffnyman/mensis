@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Draws on the PC's GPU, through Vulkan (vkdraw.cpp): the game's vertex and pixel shaders,
-// translated (translate.cpp), into a render target uploaded from the game's memory and read
-// back into it (the default, where there is Vulkan), or into a copy, to compare with what the
-// CPU drew (--gpu-check). If the vertex shader isn't translated, the vertices are the CPU's,
-// passed on by a trivial one.
+// translated (translate.cpp), into a render target in the game's memory, which is kept on the
+// GPU from draw to draw and comes back into the memory when something touches it (the
+// default, where there is Vulkan); or into a copy, to compare with what the CPU drew
+// (--gpu-check). If the vertex shader isn't translated, the vertices are the CPU's, passed on
+// by a trivial one.
 
 #pragma once
 
@@ -48,8 +49,9 @@ struct Draw {
     std::vector<Texture> textures;
     u32 width = 0, height = 0;
     u32 format = 0;  // a VkFormat
-    // The render target, 4 bytes a pixel in rows: read from `target`, the result written to
-    // `result` (the same, to draw into the game's memory)
+    // The render target, 4 bytes a pixel in rows: the game's memory (`address`), kept on the
+    // GPU; or, if address is 0, read from `target` and the result written to `result`
+    u64 address = 0;
     const unsigned char* target = nullptr;
     unsigned char* result = nullptr;
     u32 blend = 0, mask = 15;  // CB_BLEND0_CONTROL, and which of R, G, B, A are written
@@ -58,6 +60,10 @@ struct Draw {
 };
 
 bool has_texture(const std::string& key);
+// A fault at addr (a write, or a read): if it is in a render target kept on the GPU, the
+// picture goes back into the memory, or the memory is let be written, and true: the access
+// can be tried again
+bool touched(u64 addr, bool write);
 // Draws it; false, with the reason, if it couldn't
 bool run(Draw& d, std::string& why);
 std::string device();  // the GPU it runs on, and what the validation layer reported

@@ -238,13 +238,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   position goes through the console's viewport, recast as Vulkan's, and its parameters become
   the pixel shader's attributes, as `SPI_PS_INPUT_CNTL` pairs them. Vulkan has no rectangles,
   so for a rectangle list a geometry shader adds each one's fourth corner. `vkdraw.cpp` draws
-  with them, a draw at a time: the render target goes up from the game's memory and comes
-  back into it (`--gpu`), or into a copy (`--gpu-check`). Kept on the GPU between draws: the
-  compiled shaders and pipelines, the samplers, and the textures, by their descriptor and a
-  hash of the memory they read, so a texture that hasn't changed isn't made again. One in
-  8-bit RGBA in rows (the frame's picture, read by the next pass) goes up as it is in memory;
-  any other is decoded by the CPU, as the CPU's interpreter reads it (so the shaders, the
-  triangles, the filtering and the blending are the GPU's). Not yet
+  with them, a draw at a time, into the render target kept on the GPU (below), or into a copy
+  (`--gpu-check`). Kept on the GPU between draws: the compiled shaders and pipelines, the
+  samplers, the render targets, and the textures, by their descriptor and a hash of the
+  memory they read, so a texture that hasn't changed isn't made again. One in 8-bit RGBA in
+  rows goes up as it is in memory, or, if it is a render target kept there (the frame's
+  picture, read by the next pass), is copied on the GPU; any other is decoded by the CPU, as
+  the CPU's interpreter reads it (so the shaders, the triangles, the filtering and the
+  blending are the GPU's).
+- **Render targets kept on the GPU.** A render target stays on the GPU from draw to draw, and
+  its memory is guarded by the pages' protection: while the GPU's picture is the newer,
+  nothing may touch the memory, and once the two are the same, it may be read. Whatever
+  touches it (the window, the CPU's dispatches and draws, the game) faults, and the fault
+  handler brings the picture back into the memory first; a write makes the memory the newer,
+  and the next draw takes it up again. Not yet
   translated: compute shaders, branches, buffer loads other than by index, stores, LDS
   instructions, depth export, gathers, depth-compare sampling; a shader with any of them says
   so, and if it is the vertex shader, the GPU is given the CPU's vertices instead.
@@ -506,13 +513,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     game's own pace. Nothing is left to the CPU so far, and the validation layer reported
     nothing. Watched in the window, it looked as it should, and plainly faster, and it is now
     the default on Windows; `--cpu` asks for the CPU's drawing instead.
+31. **Render targets kept on the GPU.** Each draw still sent its render target up (8 MB for
+    the 1920x1080 picture) and read it back, though the next draw was very often into the
+    same one. A trace of the packets showed why the simple fix, reading back at the fences
+    the CPU waits on, wouldn't do: the game writes one after almost every draw. Instead the
+    targets stay on the GPU, their memory guarded (above), and come back only when
+    something touches them. That showed two touches a frame: a compute shader, run on the
+    CPU, writes over the main picture once a frame (a clear, it seems), so it is read back
+    and taken up again once a frame rather than 7 times; and the next pass reads the
+    picture as a texture, which is now copied on the GPU instead. In 30 seconds the GPU's
+    draws (5,944) took 4.0 s rather than 11.2, and textures uploaded fell from 812 to 45;
+    the title screen is the same, the window too, and the validation layer reported nothing.
+    `--gpu-check` gives the same as before (16 draws compared, 14 the same in every pixel).
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, the draws on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, the draws on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
 | `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled, and with `--gpu-check` translated into GLSL), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

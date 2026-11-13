@@ -7,7 +7,9 @@
 // register is touched.
 //
 // A fault is caught by a vectored exception handler, which records it and resumes the thread in
-// mensis_restore, back on the loader's stack.
+// mensis_restore, back on the loader's stack. But first, it may be a touch of a render target
+// kept on the PC's GPU (vkdraw.cpp), whose memory is guarded: then the picture comes back into
+// the memory, and the thread goes on.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -19,6 +21,7 @@
 #include <vector>
 
 #include "loader.hpp"
+#include "vkdraw.hpp"
 #include "vulkan.hpp"
 
 using namespace mensis;
@@ -28,9 +31,12 @@ namespace {
 DWORD g_slot = TLS_OUT_OF_INDEXES;
 
 LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
+    const EXCEPTION_RECORD* r = e->ExceptionRecord;
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters > 1 && r->ExceptionInformation[0] <= 1 &&
+        vkdraw::touched(r->ExceptionInformation[1], r->ExceptionInformation[0] == 1))
+        return EXCEPTION_CONTINUE_EXECUTION;  // any thread's, the loader's too
     GameThread* t = current_thread();
     if (!t || !t->enter.saved_rsp) return EXCEPTION_CONTINUE_SEARCH;
-    const EXCEPTION_RECORD* r = e->ExceptionRecord;
     std::string what;
     switch (r->ExceptionCode) {
         case EXCEPTION_ACCESS_VIOLATION: {
@@ -215,6 +221,12 @@ u32 prepare() {
     if (g_slot == TLS_OUT_OF_INDEXES || g_slot >= 64)
         die("no Windows TLS slot below 64 is free (the TEB holds only the first 64)");
     return 0x1480 + 8 * g_slot;
+}
+
+void protect(u64 addr, u64 size, int access) {
+    DWORD old;
+    VirtualProtect(reinterpret_cast<void*>(addr), size,
+                   access == 0 ? PAGE_NOACCESS : access == 1 ? PAGE_READONLY : PAGE_EXECUTE_READWRITE, &old);
 }
 
 void install_fault_handler() { AddVectoredExceptionHandler(1, on_exception); }

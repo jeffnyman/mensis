@@ -19,9 +19,9 @@
 // behind the eye is skipped), multisampling, mip levels past the first.
 //
 // Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
-// translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp): its render target
-// goes up from the game's memory, and comes back into it. The CPU draws the rest, and runs
-// the dispatches.
+// translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp), into its render
+// target kept there, which comes back into the game's memory when something touches it. The
+// CPU draws the rest, and runs the dispatches.
 //
 // With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, into a copy
 // of the render target as it was before; then the CPU draws it, and the two are compared
@@ -898,9 +898,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         vkdraw::Draw gd;
         std::string why, vwhy;
         if (prepare_gpu(gd, why, vwhy, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user, ena, addr, mem)) {
-            auto* p = reinterpret_cast<unsigned char*>(targets[0].base);
-            gd.target = p;
-            gd.result = p;
+            gd.address = targets[0].base;
             if (vkdraw::run(gd, why)) {
                 g_gpu_draws++;
                 g_gpu_vertices += vwhy.empty();

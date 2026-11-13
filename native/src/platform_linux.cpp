@@ -71,6 +71,11 @@ bool try_reserve(u64 addr, u64 size) {
 
 void commit(u64, u64) {}
 
+void protect(u64 addr, u64 size, int access) {
+    int prot = access == 0 ? PROT_NONE : access == 1 ? PROT_READ : PROT_READ | PROT_WRITE | PROT_EXEC;
+    mprotect(reinterpret_cast<void*>(addr), size, prot);
+}
+
 u32 prepare() {
     constexpr unsigned long HWCAP2_FSGSBASE_BIT = 1ul << 1;
     if (!(getauxval(AT_HWCAP2) & HWCAP2_FSGSBASE_BIT))
