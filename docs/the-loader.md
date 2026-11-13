@@ -118,7 +118,9 @@ frame on screen when it stopped. Add `--frames 60` to stop after 60 frames, or `
 to run longer than the default 10. On Windows, `--window` opens a window on the display, whose
 title counts the frames as they are shown; the run then goes on until the window is closed.
 The game's title screen comes within 70 seconds (`--seconds 75`). `--no-draw` leaves the
-drawing out, and the game runs at its own 30 frames a second, to a black screen. The two builds run
+drawing out, and the game runs at its own 30 frames a second, to a black screen. On Windows,
+`--gpu-check` draws each draw saved to `draws/` on the PC's GPU as well, and compares the two
+(below, and `draws/index.txt`). The two builds run
 the same code: up to the point where the game's threads started running, they made the same
 calls, from the same places, with the same results.
 
@@ -217,6 +219,22 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   arrangement of them not being reproduced. Not done yet: depth and stencil, mip levels past
   the first, a triangle with a vertex behind the eye, multisampling; the summary counts
   whatever a run met that wasn't done.
+* **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel shader becomes
+  GLSL, which the Vulkan SDK's compiler (shaderc) turns into SPIR-V, the form a GPU takes
+  through Vulkan. On the console a wave runs 64 pixels in step; on the PC each pixel runs on
+  its own, so each plays one lane of the wave: the vector registers become its variables, and
+  the scalar ones too, the same in every pixel. A lane mask (`exec`, `vcc`) is kept as the
+  pixel's own bit, all ones or all zeros, so the bitwise instructions that combine masks give
+  each pixel its own bit of the result, as they would on the console. What the shader reads
+  through its scalar loads (constants, descriptors) is the same for all a draw's pixels; it is
+  found before the draw, by following those instructions with the draw's values, and handed to
+  the shader in a buffer, with a texture and sampler bound for each image instruction. The
+  interpolation (`v_interp`) becomes the GPU's own, with the qualifier the instruction's inputs
+  imply (perspective or not, centre, centroid or sample, flat). `vkdraw.cpp` draws one draw
+  with it: its triangles as the CPU worked them out, its textures decoded by the CPU (so only
+  the shader, the filtering and the blending are the GPU's), into a copy of the render target.
+  Not yet translated: vertex and compute shaders, branches, buffer and LDS instructions,
+  depth export, gathers, depth-compare sampling; a shader with any of them says so.
 * **The display** keeps the timing: one flip at each vertical blank, 60 a second or the rate
   the game asks for, each reported in `sceVideoOutGetFlipStatus` and as an event to the event
   queues that asked for one (`sceKernelWaitEqueue`). What it shows is the frame buffer the last
@@ -444,13 +462,24 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     In a 75-second run on an RTX 5090, to the title screen (760 frames), and in one with the
     window resized, minimised, restored and maximised, it found nothing. If Vulkan can't be
     used, the window falls back to GDI and the summary says why.
+28. **The pixel shaders on the GPU.** Each of the 8 pixel shaders the game uses up to its
+    title screen is translated into GLSL (`translate.cpp`) and drawn on the GPU
+    (`--gpu-check`), and the result compared with the CPU's, pixel by pixel; with how many
+    pixels the draw changed, so that "the same" can't only mean "left as they were". In a
+    75-second run, 16 draws: 14 come out the same in every pixel (to 1 in 255), among them the
+    colour correction that makes each frame's picture for the display, the splash screen's
+    text and the title screen's backgrounds. The other 2, the menu's text, differ in 5 and 6
+    of their 3,600 and 3,000 pixels, by 3 in 255 at most, at the faint edges of letters: the
+    likeliest cause is the GPU's bilinear filtering, which weighs the four texels it blends
+    with less precision than the CPU's floats. The validation layer reported nothing. The
+    vertices are still the CPU's, and the game still sees only the CPU's drawing.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues) and `audio.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders translated into GLSL, and `vkdraw.cpp`, a draw on the GPU through Vulkan (`--gpu-check`); and for each platform `platform_*.cpp` (memory, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
-| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled), `draws/` (the first draws of each pixel shader, as drawn) and `frame.bmp` (the screen when it stopped) |
+| `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

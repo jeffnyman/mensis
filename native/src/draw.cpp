@@ -17,6 +17,10 @@
 //
 // Not done yet: depth and stencil, clipping to the near plane (a triangle with a vertex
 // behind the eye is skipped), multisampling, mip levels past the first.
+//
+// With --gpu-check, each draw saved to draws/ is drawn on the PC's GPU as well, its pixel
+// shader translated (translate.cpp, vkdraw.cpp), into a copy of the render target as it was
+// before; then the CPU draws it, and the two are compared pixel by pixel.
 
 #include <bit>
 #include <cmath>
@@ -24,9 +28,12 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <map>
 #include <mutex>
 
 #include "shade.hpp"
+#include "translate.hpp"
+#include "vkdraw.hpp"
 
 namespace mensis {
 namespace {
@@ -352,10 +359,29 @@ Target target(const GpuRegs& r, u32 k) {
 constexpr u64 SAVED = 80;
 std::map<u64, int> g_saved_by_ps;  // under g_draw_lock
 
+// A 32-bit BMP of w x h pixels, B, G, R, A in memory, rows top down
+void write_bmp(const std::filesystem::path& path, u32 w, u32 h, const std::vector<unsigned char>& px) {
+    std::ofstream bmp(path, std::ios::binary);
+    u32 size = 54 + u32(px.size());
+    unsigned char h54[54] = {'B', 'M'};
+    auto put = [&](int at, u32 v) { std::memcpy(h54 + at, &v, 4); };
+    put(2, size);
+    put(10, 54);
+    put(14, 40);
+    put(18, w);
+    put(22, u32(-std::int32_t(h)));
+    h54[26] = 1;
+    h54[28] = 32;
+    put(34, u32(px.size()));
+    bmp.write(reinterpret_cast<const char*>(h54), 54);
+    bmp.write(reinterpret_cast<const char*>(px.data()), std::streamsize(px.size()));
+}
+
 void save_target(u64 number, const Target& t, u32 width, u32 height, const Memory& mem, const std::string& what) {
     auto dir = std::filesystem::path(M.out_dir) / "draws";
     std::filesystem::create_directories(dir);
-    std::ofstream(dir / "index.txt", std::ios::binary | std::ios::app)
+    // the index starts afresh with each run's first draw
+    std::ofstream(dir / "index.txt", std::ios::binary | (number == 0 ? std::ios::trunc : std::ios::app))
         << std::format("{:03} {}x{} at {:#x}, format {} number type {}, tile mode {}: {}\n", number, t.pitch, t.height,
                        t.base, t.format, t.nfmt, t.tiling, what);
     u32 w = std::min({t.pitch, width, 4096u}), h = std::min({t.height, height, 4096u});  // to the scissor
@@ -373,20 +399,178 @@ void save_target(u64 number, const Target& t, u32 width, u32 height, const Memor
                 px[(size_t(y) * w + x) * 4 + size_t(2 - c)] = (unsigned char)std::clamp(int(std::lround(v * 255)), 0, 255);
             }
         }
-    std::ofstream bmp(dir / std::format("{:03}.bmp", number), std::ios::binary);
-    u32 size = 54 + u32(px.size());
-    unsigned char h54[54] = {'B', 'M'};
-    auto put = [&](int at, u32 v) { std::memcpy(h54 + at, &v, 4); };
-    put(2, size);
-    put(10, 54);
-    put(14, 40);
-    put(18, w);
-    put(22, u32(-std::int32_t(h)));
-    h54[26] = 1;
-    h54[28] = 32;
-    put(34, u32(px.size()));
-    bmp.write(reinterpret_cast<const char*>(h54), 54);
-    bmp.write(reinterpret_cast<const char*>(px.data()), std::streamsize(px.size()));
+    write_bmp(dir / std::format("{:03}.bmp", number), w, h, px);
+}
+
+// ---- --gpu-check: the draw on the PC's GPU too ----
+
+std::map<u64, translate::Program> g_programs;  // decoded once each; under g_draw_lock
+u64 g_checked = 0, g_check_same = 0;
+std::map<std::string, u64> g_check_skipped;
+
+// The draw, as vkdraw needs it, drawn; false (and why) if it couldn't be
+bool gpu_check(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 ps, const Vertices& out, const std::vector<Tri>& tris,
+               const Target* targets, const int clip[4], u32 ps_user, u32 ena, u32 addr, const Memory& mem) {
+    const Target& t = targets[0];
+    for (u32 k = 1; k < 8; k++)
+        if (targets[k].count) {
+            why = "draws to more than one render target";
+            return false;
+        }
+    if (!t.count) {
+        why = "draws to a render target other than the first";
+        return false;
+    }
+    if (t.format != 10 || (t.nfmt != 0 && t.nfmt != 9) || t.swap > 1) {
+        why = std::format("render targets of format {}, number type {}, swap {}", t.format, t.nfmt, t.swap);
+        return false;
+    }
+    if (!t.rows) {
+        why = "micro-tiled render targets";
+        return false;
+    }
+    u64 bytes = u64(t.pitch) * t.height * 4;
+    if (!mem.ok(t.base, bytes)) {
+        why = "a render target outside the GPU's memory";
+        return false;
+    }
+    auto it = g_programs.find(ps);
+    if (it == g_programs.end()) it = g_programs.emplace(ps, translate::decode(ps, mem)).first;
+    const translate::Program& prog = it->second;
+    if (!prog.why.empty()) {
+        why = "the shader has " + prog.why;
+        return false;
+    }
+    u32 user[16];
+    for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x0c + k];
+    u32 users = std::min(ps_user, 16u);
+    translate::Values vals = translate::evaluate(prog, user, users, mem);
+    if (!vals.why.empty()) {
+        why = "the shader has " + vals.why;
+        return false;
+    }
+    translate::PsState st;
+    st.user_count = users;
+    st.ena = ena;
+    st.addr = addr;
+    for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
+    st.col_format = reg(r, 0x1c5, 0);
+    for (auto& im : vals.images) {
+        st.image_types.push_back(im.t[3] >> 28);
+        st.unnormalized.push_back((im.s[0] >> 15) & 1);
+    }
+    translate::Glsl gl = translate::pixel_shader(prog, st);
+    if (!gl.why.empty()) {
+        why = "the shader has " + gl.why;
+        return false;
+    }
+    d.ps = gl.text;
+    d.attributes = gl.attributes;
+    d.vs = translate::vertex_shader(gl.attributes);
+    d.values = vals.u;
+    // the vertices, in clip space for a viewport the size of the target; the attributes as
+    // SPI_PS_INPUT_CNTL picks them from the vertex shader's parameters
+    float W = float(t.pitch), H = float(t.height);
+    for (const Tri& tr : tris)
+        for (int k = 0; k < 3; k++) {
+            float w = 1 / tr.invw[k];
+            float pos[4] = {(2 * tr.x[k] / W - 1) * w, (2 * tr.y[k] / H - 1) * w, std::clamp(tr.z[k], 0.0f, 1.0f) * w, w};
+            d.vertices.insert(d.vertices.end(), pos, pos + 4);
+            for (u32 a = 0; a < gl.attributes; a++) {
+                u32 cntl = reg(r, 0x191 + a, a), offset = cntl & 0x3f;
+                for (u32 c = 0; c < 4; c++) {
+                    float v = 0;
+                    if (offset & 0x20) {
+                        u32 dv = (cntl >> 8) & 3;
+                        v = c == 3 ? (dv == 1 || dv == 3 ? 1.0f : 0.0f) : (dv >= 2 ? 1.0f : 0.0f);
+                    } else if (offset < out.params) {
+                        v = out.param[(tr.v[k] * out.params + offset) * 4 + c];
+                    }
+                    d.vertices.push_back(v);
+                }
+            }
+        }
+    // the textures, each texel as the CPU's interpreter reads it
+    for (auto& im : vals.images) {
+        Image ti(im.t);
+        ti.prepare(mem);
+        vkdraw::Texture tx;
+        tx.type = ti.type;
+        tx.width = ti.width;
+        tx.height = ti.type == 8 || ti.type == 12 ? 1 : ti.height;
+        tx.layers = ti.array() ? ti.last_array - ti.base_array + 1 : ti.type == 10 ? ti.depth : 1;
+        if (ti.nfmt == 4 || ti.nfmt == 5) {
+            why = "integer textures";
+            return false;
+        }
+        if (u64(tx.width) * tx.height * tx.layers > (1u << 24)) {
+            why = "textures of over 16 million texels";
+            return false;
+        }
+        std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
+        tx.rgba.resize(size_t(tx.width) * tx.height * tx.layers * 4);
+        float* o = tx.rgba.data();
+        for (u32 l = 0; l < tx.layers; l++) {
+            u32 slice = ti.array() ? ti.base_array + l : ti.type == 10 ? l : 0;
+            for (u32 y = 0; y < tx.height; y++)
+                for (u32 x = 0; x < tx.width; x++, o += 4) {
+                    u32 v[4];
+                    texel_rgba(ti, mem, int(x), int(y), slice, v);
+                    std::memcpy(o, v, 16);
+                }
+        }
+        d.textures.push_back(std::move(tx));
+    }
+    d.width = t.pitch;
+    d.height = t.height;
+    // VkFormat: R8G8B8A8 unorm 37, srgb 43; B8G8R8A8 unorm 44, srgb 50 (COMP_SWAP alt: B first)
+    d.format = t.swap == 0 ? (t.nfmt == 9 ? 43 : 37) : (t.nfmt == 9 ? 50 : 44);
+    d.target.assign(reinterpret_cast<const unsigned char*>(t.base), reinterpret_cast<const unsigned char*>(t.base) + bytes);
+    d.blend = t.blend;
+    d.mask = t.mask;
+    for (int c = 0; c < 4; c++) d.blend_color[c] = regf(r, 0x105 + u32(c), 0);
+    for (int k = 0; k < 4; k++) d.scissor[k] = clip[k];
+    d.before = d.target;
+    return vkdraw::run(d, why);
+}
+
+// The GPU's picture against the CPU's, now in the target: how many pixels differ by more than
+// 1 in 255 in any channel, and by how much at most, and how many the draw changed (on the
+// GPU), so that "the same" isn't only "left as they were". Saves the GPU's as NNN-gpu.bmp.
+std::string compare(u64 number, const vkdraw::Draw& d, const Target& t, const int clip[4]) {
+    u64 n = 0, differ = 0, changed = 0;
+    int most = 0;
+    for (int y = clip[1]; y < clip[3] && u32(y) < d.height; y++)
+        for (int x = clip[0]; x < clip[2] && u32(x) < d.width; x++) {
+            size_t at = (size_t(y) * d.width + size_t(x)) * 4;
+            const auto* cpu = reinterpret_cast<const unsigned char*>(t.base) + at;
+            int m = 0;
+            for (int c = 0; c < 4; c++) m = std::max(m, std::abs(int(cpu[c]) - int(d.target[at + size_t(c)])));
+            n++;
+            differ += m > 1;
+            changed += std::memcmp(&d.before[at], &d.target[at], 4) != 0;
+            most = std::max(most, m);
+        }
+    u32 w = std::min({d.width, u32(clip[2]), 4096u}), h = std::min({d.height, u32(clip[3]), 4096u});
+    std::vector<unsigned char> px(size_t(w) * h * 4);
+    bool rgba = t.swap == 0;
+    for (u32 y = 0; y < h; y++)
+        for (u32 x = 0; x < w; x++) {
+            const unsigned char* p = &d.target[(size_t(y) * d.width + x) * 4];
+            unsigned char* q = &px[(size_t(y) * w + x) * 4];
+            q[0] = rgba ? p[2] : p[0];
+            q[1] = p[1];
+            q[2] = rgba ? p[0] : p[2];
+            q[3] = 0;
+        }
+    write_bmp(std::filesystem::path(M.out_dir) / "draws" / std::format("{:03}-gpu.bmp", number), w, h, px);
+    g_checked++;
+    if (!differ) {
+        g_check_same++;
+        return std::format("on the GPU: the same in all {} pixels ({} of them changed by the draw)", n, changed);
+    }
+    return std::format("on the GPU: {} of {} pixels differ by more than 1 in 255 (by {} at most; {} changed by the draw)", differ, n,
+                       most, changed);
 }
 
 // The triangles a primitive type makes of n vertices
@@ -544,6 +728,15 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     u32 ps_user = (r.sh[0x0b] >> 1) & 0x1f;
     u32 ena = reg(r, 0x1b3, 0), addr = reg(r, 0x1b4, 0);
     if (!addr) addr = ena;
+    bool save = g_saved < SAVED && g_saved_by_ps[ps] < 2;
+    int area[4] = {x0, y0, x1, y1};
+    vkdraw::Draw check;
+    std::string check_why;
+    bool checked = false;
+    if (save && M.gpu_check) {
+        checked = gpu_check(check, check_why, r, ps, out, tris, targets, area, ps_user, ena, addr, mem);
+        if (!checked) g_check_skipped[check_why]++;
+    }
     Pool& p = pool();
     int bands = (y1 - y0) * (x1 - x0) > 64 * 64 ? p.n : 1;
     int qy0 = y0 & ~1, rows = ((y1 - qy0 + 1) / 2 + bands - 1) / bands * 2;
@@ -646,13 +839,22 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     g_pixels += pixels;
     g_ps_waves += waves;
     std::string what = std::format("{} triangles, {} pixels", tris.size(), pixels.load());
-    if (g_saved < SAVED && g_saved_by_ps[ps]++ < 2)
-        if (u64 number = g_saved++; number < SAVED)
+    if (save) {
+        g_saved_by_ps[ps]++;
+        u64 number = g_saved++;
+        auto dir = std::filesystem::path(M.out_dir) / "draws";
+        std::filesystem::create_directories(dir);
+        if (number == 0)  // an earlier run's pictures go
+            for (const auto& e : std::filesystem::directory_iterator(dir))
+                if (e.path().extension() == ".bmp") std::filesystem::remove(e.path());
+        if (checked) what += "; " + compare(number, check, targets[0], area);
+        else if (M.gpu_check) what += "; not on the GPU: " + check_why;
         for (auto& t : targets)
             if (t.count) {
                 save_target(number, t, u32(x1), u32(y1), mem, std::format("vs {:#x}, ps {:#x}: {}", vs, ps, what));
                 break;
             }
+    }
     return what;
 }
 
@@ -733,6 +935,18 @@ std::vector<std::string> draw_report() {
         std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
                     double(g_dispatch_ns) / 1e9,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};
+    if (M.gpu_check) {
+        std::lock_guard lock(g_draw_lock);
+        std::string where = vkdraw::device();
+        s.push_back(std::format("GPU check (`--gpu-check`){}: of the draws saved to draws/, {} were drawn on the GPU as well, "
+                                "{} of them the same as the CPU's in every pixel (to 1 in 255); see draws/index.txt.\n",
+                                where.empty() ? "" : ", " + where, g_checked, g_check_same));
+        if (!g_check_skipped.empty()) {
+            s.insert(s.end(), {"Not drawn on the GPU:\n", "| Why | Draws |", "|---|---:|"});
+            for (auto& [why, count] : g_check_skipped) s.push_back(std::format("| {} | {} |", why, count));
+            s.push_back("");
+        }
+    }
     auto n = notes();
     if (!n.empty()) {
         s.insert(s.end(), {"Not done, or done only in part:\n", "| What | Times |", "|---|---:|"});

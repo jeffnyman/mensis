@@ -108,6 +108,10 @@ struct Image {
 // loader, here) writes and reads them, rows serve as well.
 u64 element_address(u64 base, u32 tiling, u32 bytes, u32 pitch, u32 height, u32 x, u32 y, u32 slice);
 
+// Texel (x, y) of slice `slice` as a shader reads it (dst_sel applied): floats, or integers
+// for uint/sint formats. The image is prepared.
+void texel_rgba(const Image& t, const Memory& mem, int x, int y, u32 slice, u32 out[4]);
+
 // Pixel (x, y) of a BC7 block as 8-bit RGBA (bc7.cpp); false (and 0) for an invalid block
 bool bc7_texel(const unsigned char* block, u32 x, u32 y, unsigned char out[4]);
 

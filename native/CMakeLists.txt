@@ -35,15 +35,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(mensis-loader src/main.cpp src/standins.cpp src/threads.cpp src/files.cpp src/gnm.cpp src/libc.cpp src/audio.cpp src/gpu.cpp src/gcn.cpp src/shade.cpp src/bc7.cpp src/draw.cpp src/video.cpp ${PLATFORM_SOURCES})
+add_executable(mensis-loader src/main.cpp src/standins.cpp src/threads.cpp src/files.cpp src/gnm.cpp src/libc.cpp src/audio.cpp src/gpu.cpp src/gcn.cpp src/shade.cpp src/bc7.cpp src/draw.cpp src/translate.cpp src/vkdraw.cpp src/video.cpp ${PLATFORM_SOURCES})
 target_compile_options(mensis-loader PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 
 if(WIN32)
     target_compile_definitions(mensis-loader PRIVATE _CRT_SECURE_NO_WARNINGS)
     find_package(Vulkan REQUIRED)  # from the Vulkan SDK (its installer sets VULKAN_SDK)
     target_link_libraries(mensis-loader PRIVATE user32 gdi32 Vulkan::Vulkan)
+    # --gpu-check: the SDK's shader compiler (shaderc), as a DLL from the SDK's Bin, which its
+    # installer puts on PATH
+    find_library(SHADERC_SHARED shaderc_shared HINTS "$ENV{VULKAN_SDK}/Lib" REQUIRED)
+    target_link_libraries(mensis-loader PRIVATE ${SHADERC_SHARED})
+    target_compile_definitions(mensis-loader PRIVATE MENSIS_VULKAN)
     # Vulkan's structures are filled field by field after their type
-    set_source_files_properties(src/vulkan.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+    set_source_files_properties(src/vulkan.cpp src/vkdraw.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
 else()
     find_package(Threads REQUIRED)
     target_link_libraries(mensis-loader PRIVATE Threads::Threads)

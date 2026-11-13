@@ -1920,4 +1920,10 @@ Result run(Wave& w, u64 pc, Io& io, const Memory& mem) {
     return {Stop::fault, pc};
 }
 
+void texel_rgba(const Image& t, const Memory& mem, int x, int y, u32 slice, u32 out[4]) {
+    u32 raw[4];
+    texel(t, mem, x, y, slice, raw);
+    swizzle(t.sel, is_int(t.nfmt), raw, out);
+}
+
 }  // namespace mensis::shade
