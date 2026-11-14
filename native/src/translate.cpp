@@ -29,13 +29,24 @@
 // so far: by index, of 8-bit RGBA, into a render target kept on the GPU, as a storage image
 // viewed as uints, each element packed exactly as the CPU's interpreter packs it.
 //
-// Not yet: branches, buffer loads other than by index, other stores, LDS instructions, depth
-// export, gathers, depth-compare sampling, offsets, and the rarer ALU ops. A shader with any
-// of them isn't translated, and says what stopped it.
+// Branches, forward only so far. s_cbranch_execz skips code when no lane is on; the code then
+// does nothing a lane can see (its vector writes go where exec is set, and compilers put the
+// branch in only to save the time), so here it is gone through. The other branches (s_branch,
+// s_cbranch_scc0 and _scc1) go on scalar values, the same in every lane, and are taken: a
+// variable says which label the code is skipping to, each stretch of code runs only while it
+// is 0, and the label it names sets it back. scc set by a 64-bit operation on lane masks
+// differs from lane to lane here (each lane holds only its own bit): s_cbranch_scc0 on that is
+// taken when no lane's bit is left (a shader's pixels all killed, say), and is gone through,
+// as execz is; s_cbranch_scc1 on it isn't translated.
+//
+// Not yet: loops (branches backwards), branches on vcc, buffer loads other than by index,
+// other stores, LDS instructions, depth export, gathers, depth-compare sampling, offsets, and
+// the rarer ALU ops. A shader with any of them isn't translated, and says what stopped it.
 
 #include "translate.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <format>
 #include <map>
@@ -180,8 +191,12 @@ void decode_into(Program& p, u64 pc, const shade::Memory& mem, const u32* user, 
                 return;
             }
             if ((op >= 2 && op <= 9) || op == 10) {
-                p.why = op == 10 ? "s_barrier" : "branches";
-                return;
+                std::int16_t offset = std::int16_t(w0 & 0xffff);
+                bool forward = offset >= 0 && (op == 2 || op == 4 || op == 5 || op == 8);
+                if (!forward) {
+                    p.why = op == 10 ? "s_barrier" : offset < 0 ? "loops" : "branches on vcc, or taken when exec isn't 0";
+                    return;
+                }
             }
         }
         if (in.enc == DS) p.why = "LDS instructions";
@@ -225,8 +240,27 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
         ok = false;
         return 0;
     };
+    // a branch's label, and the registers as they were at the branch: at the label, any the
+    // code skipped may have changed aren't known
+    std::map<u64, std::pair<std::array<u32, 128>, std::array<bool, 128>>> labels;
     for (const Inst& in : p.code) {
         u32 w0 = in.w0;
+        if (auto it = labels.find(in.at); it != labels.end()) {
+            for (u32 k = 0; k < 128; k++)
+                if (s[k] != it->second.first[k] || known[k] != it->second.second[k]) known[k] = false;
+            labels.erase(it);
+        }
+        if (in.enc == SOPP) {
+            u32 op = (w0 >> 16) & 0x7f;
+            if (op == 2 || op == 4 || op == 5) {
+                u64 to = in.at + 4 + u64(std::int64_t(std::int16_t(w0 & 0xffff)) * 4);
+                if (!labels.count(to)) {
+                    auto& snap = labels[to];
+                    std::copy_n(s, 128, snap.first.begin());
+                    std::copy_n(known, 128, snap.second.begin());
+                }
+            }
+        }
         switch (in.enc) {
             case SOP1: {
                 u32 op = (w0 >> 8) & 0xff, dst = (w0 >> 16) & 0x7f, src = w0 & 0xff;
@@ -345,7 +379,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
 }
 
 std::string PsState::key() const {
-    std::string k = std::format("{}:{:x}:{:x}:{:x}", user_count, ena, addr, col_format);
+    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}", user_count, ena, addr, col_format, barycentric);
     for (u32 c : input_cntl) k += std::format(":{:x}", c);
     for (size_t i = 0; i < image_types.size(); i++) k += std::format(":t{}{}", image_types[i], unnormalized[i] ? "u" : "");
     return k;
@@ -360,10 +394,12 @@ struct Writer {
     bool vertex = false;  // a vertex shader (else a pixel shader)
     const CsState* cs = nullptr;  // a compute shader's
     u32 store = 0;  // the next buffer store's
+    bool scc_lanes = false;  // scc was last set by an operation on lane masks: it differs from lane to lane
     std::string body, why;
     u32 slot = 16;  // the next scalar load's place in U
     u32 image = 0;  // the next image instruction's binding
     u32 buffer = 0;  // the next buffer load's
+    u32 buffers = 0;  // the buffers they read (fewer, if loads share them)
     u32 attrs = 0;  // how many attributes are read
     std::string interp[32];  // each attribute's interpolation qualifier
     bool outputs[8] = {};
@@ -427,6 +463,12 @@ struct Writer {
         line(std::format("{{ uint m = (exec_lo != 0u && ({})) ? 0xffffffffu : 0u; {} = m; {} = m; }}", cond, lo, hi));
     }
 
+    std::map<u64, u32> labels;  // each branch's target, numbered from 1
+    u32 label(u64 at) {
+        auto [it, added] = labels.emplace(at, u32(labels.size() + 1));
+        return it->second;
+    }
+
     void scalar(const Inst& in);
     void vector(const Inst& in);
     void interp_op(const Inst& in);
@@ -441,6 +483,21 @@ void Writer::scalar(const Inst& in) {
         case SOPP: {
             u32 op = (w0 >> 16) & 0x7f;
             if (op == 1 || op == 0 || op == 12 || (op >= 13 && op <= 17) || op == 19 || op == 20 || op == 21) return;
+            if (op == 8) return;  // s_cbranch_execz: gone through (above)
+            if (op == 2 || op == 4 || op == 5) {  // s_branch, s_cbranch_scc0, _scc1 (forward)
+                // scc from lane masks: scc0 is taken when no lane's bit is left, which, like
+                // execz, only saves the time, and is gone through; scc1 can't be told here
+                if (op == 4 && scc_lanes) return;
+                if (op == 5 && scc_lanes) {
+                    fail("a branch on scc1 from lane masks");
+                    return;
+                }
+                u64 to = in.at + 4 + u64(std::int64_t(std::int16_t(w0 & 0xffff)) * 4);
+                line(std::format("if ({}) skip = {}u;", op == 2 ? "true" : op == 4 ? "!scc" : "scc", label(to)));
+                line("}");
+                line("if (skip == 0u) {");
+                return;
+            }
             fail(std::format("SOPP op {}", op));
             return;
         }
@@ -553,6 +610,10 @@ std::string alu(u32 op, bool& is_float) {
         case 0x140: return "((fa == 0.0 || fb == 0.0) ? 0.0 : fa * fb) + fc";
         case 0x141: return "fa * fb + fc";
         case 0x14b: case 0x16f: return "fma(fa, fb, fc)";
+        case 0x144: return "float(cube_face(fa, fb, fc))";
+        case 0x145: return "cube_sc(fa, fb, fc)";
+        case 0x146: return "cube_tc(fa, fb, fc)";
+        case 0x147: return "2.0 * cube_ma(fa, fb, fc)";
         case 0x151: return "min(min(fa, fb), fc)";
         case 0x154: return "max(max(fa, fb), fc)";
         case 0x157: return "max(min(fa, fb), min(max(fa, fb), fc))";
@@ -567,8 +628,8 @@ std::string alu(u32 op, bool& is_float) {
         case 0x1a4: return "floor(fa)";
         case 0x1a5: return "exp2(fa)";
         case 0x1a7: return "log2(fa)";
-        case 0x1aa: return "1.0 / fa";
-        case 0x1ae: return "inversesqrt(fa)";
+        case 0x1a8: case 0x1a9: case 0x1aa: case 0x1ab: return "1.0 / fa";  // (the clamped and legacy forms as the plain)
+        case 0x1ac: case 0x1ad: case 0x1ae: return "inversesqrt(fa)";
         case 0x1b3: return "sqrt(fa)";
         case 0x1b5: return "sin(fa * 6.28318530718)";
         case 0x1b6: return "cos(fa * 6.28318530718)";
@@ -790,6 +851,18 @@ void Writer::interp_op(const Inst& in) {
     interp[attr] = q;
     attrs = std::max(attrs, attr + 1);
     static const char xyzw[] = "xyzw";
+    if (st.barycentric) {  // the corners' values, as the console interpolates them
+        char c = xyzw[chan];
+        std::string v;
+        if (q == "flat") {
+            v = std::format("a{}[0].{}", attr, c);
+        } else {
+            const char* b = q.rfind("noperspective", 0) == 0 ? "gl_BaryCoordNoPerspEXT" : "gl_BaryCoordEXT";
+            v = std::format("(a{0}[0].{1} + {2}.y * (a{0}[1].{1} - a{0}[0].{1}) + {2}.z * (a{0}[2].{1} - a{0}[0].{1}))", attr, c, b);
+        }
+        vwrite(dst, std::format("floatBitsToUint({})", v));
+        return;
+    }
     vwrite(dst, std::format("floatBitsToUint(a{}.{})", attr, xyzw[chan]));
 }
 
@@ -809,10 +882,15 @@ void Writer::image_op(const Inst& in) {
     }
     u32 type = st.image_types[image];
     bool unnorm = st.unnormalized[image];
-    std::string t = std::format("t{}", image);
+    std::string t = std::format("t{}", st.image_slot.empty() ? image : st.image_slot[image]);
+    bool integer = image < st.integer.size() && st.integer[image];
     image++;
-    if (type != 8 && type != 9 && type != 10 && type != 12 && type != 13) {
+    if (type != 8 && type != 9 && type != 10 && type != 11 && type != 12 && type != 13) {
         fail(std::format("images of type {}", type));
+        return;
+    }
+    if (type == 11 && unnorm) {
+        fail("unnormalized cube sampling");
         return;
     }
     auto va = [&](u32 k) {
@@ -830,8 +908,8 @@ void Writer::image_op(const Inst& in) {
             default: c = std::format("ivec3(int({}), int({}), int({}))", va(0), va(1), va(2)); break;
         }
         line(std::format("ivec{0} c{1} = {2}; ivec{0} n{1} = textureSize({3}, 0);", type == 8 || type == 9 ? 2 : 3, image, c, t));
-        result = std::format("all(greaterThanEqual(c{0}, ivec{1}(0))) && all(lessThan(c{0}, n{0})) ? texelFetch({2}, c{0}, 0) : vec4(0.0, 0.0, 0.0, 1.0)",
-                             image, type == 8 || type == 9 ? 2 : 3, t);
+        result = std::format("all(greaterThanEqual(c{0}, ivec{1}(0))) && all(lessThan(c{0}, n{0})) ? texelFetch({2}, c{0}, 0) : {3}(0.0, 0.0, 0.0, 1.0)",
+                             image, type == 8 || type == 9 ? 2 : 3, t, integer ? "uvec4" : "vec4");
     } else if (op >= 32 && op < 64) {
         u32 k = (op - 32) & 31, m = k & 7;
         if (k & 8) {
@@ -849,7 +927,7 @@ void Writer::image_op(const Inst& in) {
         u32 at = 0;
         std::string bias;
         if (m == 5 || m == 6) bias = fva(at++);
-        u32 n = type == 8 ? 1 : type == 10 || type == 13 ? 3 : 2;
+        u32 n = type == 8 ? 1 : type == 10 || type == 11 || type == 13 ? 3 : 2;
         std::string x = fva(at), y = n > 1 ? fva(at + 1) : "", z = n > 2 ? fva(at + 2) : "";
         std::string lod = m == 4 ? fva(at + n) : "";
         std::string size = std::format("vec3(textureSize({}, 0){})", t, type == 8 || type == 9 ? ", 1" : "");
@@ -864,6 +942,8 @@ void Writer::image_op(const Inst& in) {
             case 8: c = std::format("vec2({}, 0.5)", x); break;
             case 9: c = std::format("vec2({}, {})", x, y); break;
             case 12: c = std::format("vec3({}, 0.5, {})", x, y); break;
+            // a cube, as the CPU reads it: six slices, its face's coordinates coming as 1 to 2
+            case 11: c = std::format("vec3({} - 1.0, {} - 1.0, {})", x, y, z); break;
             default: c = std::format("vec3({}, {}, {})", x, y, z); break;
         }
         if (m == 4) result = std::format("textureLod({}, {}, {})", t, c, lod);
@@ -875,11 +955,13 @@ void Writer::image_op(const Inst& in) {
         fail(std::format("image op {}", op));
         return;
     }
-    line(std::format("vec4 i{} = {};", image, result));
+    // an integer texture's texels are as the CPU's interpreter reads them, bits and all
+    line(std::format("{} i{} = {};", integer ? "uvec4" : "vec4", image, result));
     u32 r = 0;
     static const char xyzw[] = "xyzw";
     for (u32 c = 0; c < 4; c++)
-        if ((dmask >> c) & 1) vwrite((vdata + r++) & 255, std::format("floatBitsToUint(i{}.{})", image, xyzw[c]));
+        if ((dmask >> c) & 1)
+            vwrite((vdata + r++) & 255, integer ? std::format("i{}.{}", image, xyzw[c]) : std::format("floatBitsToUint(i{}.{})", image, xyzw[c]));
 }
 
 // A format load by index (idxen): element vN of the buffer as the CPU unpacked it
@@ -916,8 +998,9 @@ void Writer::buffer_op(const Inst& in) {
         return;
     }
     vgprs.insert(vaddr);
-    u32 k = buffer++;
-    line(std::format("uvec4 b{0} = B{0}[min(v{1}, uint(B{0}.length()) - 1u)];", k, vaddr));
+    u32 k = buffer++, slot = k < st.buffer_slot.size() ? st.buffer_slot[k] : k;
+    buffers = std::max(buffers, slot + 1);
+    line(std::format("uvec4 b{0} = B{2}[min(v{1}, uint(B{2}.length()) - 1u)];", k, vaddr, slot));
     static const char xyzw[] = "xyzw";
     for (u32 c = 0; c <= op; c++) vwrite((vdata + c) & 255, std::format("b{}.{}", k, xyzw[c]));
 }
@@ -989,6 +1072,27 @@ void Writer::export_op(const Inst& in) {
 }
 
 const char* HELPERS = R"(
+// a cube map's face for a direction (+x, -x, +y, -y, +z, -z: 0-5), and its coordinates and
+// major axis, as v_cubeid, v_cubesc, v_cubetc and v_cubema give them
+int cube_face(float x, float y, float z) {
+    float ax = abs(x), ay = abs(y), az = abs(z);
+    if (az >= ax && az >= ay) return z < 0.0 ? 5 : 4;
+    if (ay >= ax) return y < 0.0 ? 3 : 2;
+    return x < 0.0 ? 1 : 0;
+}
+float cube_sc(float x, float y, float z) {
+    const float sx[6] = float[6](0.0, 0.0, 1.0, 1.0, 1.0, -1.0), sz[6] = float[6](-1.0, 1.0, 0.0, 0.0, 0.0, 0.0);
+    int k = cube_face(x, y, z);
+    return sx[k] * x + sz[k] * z;
+}
+float cube_tc(float x, float y, float z) {
+    int k = cube_face(x, y, z);
+    return k == 2 ? z : k == 3 ? -z : -y;
+}
+float cube_ma(float x, float y, float z) {
+    int k = cube_face(x, y, z);
+    return k < 2 ? x : k < 4 ? y : z;
+}
 // a half's bits as a float, and a float to a half (rounded to nearest even, or toward zero), bit
 // by bit as the CPU's interpreter does them
 float h2f(uint h) {
@@ -1030,7 +1134,17 @@ namespace {
 
 // The instructions, into w.body; false (and w.why) if one can't be translated
 bool translate_body(Writer& w, const Program& p) {
+    w.line("uint skip = 0u;  // the label being skipped to, if any");
+    w.line("if (skip == 0u) {");
+    std::set<u64> reached;
     for (const Inst& in : p.code) {
+        if (auto it = w.labels.find(in.at); it != w.labels.end()) {
+            w.line("}");
+            w.line(std::format("if (skip == {}u) skip = 0u;", it->second));
+            w.line("if (skip == 0u) {");
+            reached.insert(in.at);
+        }
+        size_t before = w.body.size();
         switch (in.enc) {
             case SOP2: case SOPK: case SOP1: case SOPC: case SOPP: case SMRD: w.scalar(in); break;
             case VOP1: case VOP2: case VOPC: case VOP3: w.vector(in); break;
@@ -1041,7 +1155,20 @@ bool translate_body(Writer& w, const Program& p) {
             default: w.fail("instruction format"); break;
         }
         if (!w.why.empty()) return false;
+        // scc, if this set it: from lane masks (64-bit bitwise operations, s_not_b64, s_wqm_b64,
+        // s_*_saveexec_b64) or not
+        if (w.body.find("scc = ", before) != std::string::npos) {
+            u32 op1 = (in.w0 >> 8) & 0xff, op2 = (in.w0 >> 23) & 0x7f;
+            w.scc_lanes = (in.enc == SOP1 && (op1 == 8 || op1 == 10 || (op1 >= 36 && op1 <= 43))) ||
+                          (in.enc == SOP2 && op2 >= 15 && op2 <= 29 && (op2 & 1));
+        }
     }
+    w.line("}");
+    for (auto& [at, n] : w.labels)
+        if (!reached.count(at)) {
+            w.fail("a branch to somewhere other than an instruction ahead");
+            return false;
+        }
     return true;
 }
 
@@ -1077,7 +1204,8 @@ Glsl vertex_shader(const Program& p, const VsState& vs) {
     std::string s = "#version 450\n";
     s += "layout(set = 0, binding = 16, std430) readonly buffer Values { uint U[]; };\n";
     for (u32 k = 0; k < w.buffer; k++)
-        s += std::format("layout(set = 0, binding = {}, std430) readonly buffer Buffer{} {{ uvec4 B{}[]; }};\n", 17 + k, k, k);
+        s += std::format("layout(set = 0, binding = {}, std430) readonly buffer Buffer{} {{ uvec4 B{}[]; }};\n", k < 15 ? 17 + k : 72 + (k - 15),
+                         k, k);
     s += "layout(push_constant) uniform Viewport { vec4 xy; vec2 z; } X;\n";
     for (u32 a = 0; a < vs.attributes; a++) s += std::format("layout(location = {}) out vec4 a{};\n", a, a);
     s += HELPERS;
@@ -1135,13 +1263,21 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     }
     std::string s = "#version 450\n";
     s += "layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };\n";
+    std::set<u32> declared;
     for (u32 k = 0; k < w.image; k++) {
+        u32 slot = st.image_slot.empty() ? k : st.image_slot[k];
+        if (!declared.insert(slot).second) continue;
         u32 type = st.image_types[k];
-        const char* sampler = type == 10 ? "sampler3D" : type == 12 || type == 13 ? "sampler2DArray" : "sampler2D";
-        s += std::format("layout(set = 0, binding = {}) uniform {} t{};\n", k + 1, sampler, k);
+        const char* sampler = type == 10 ? "sampler3D" : type == 11 || type == 12 || type == 13 ? "sampler2DArray" : "sampler2D";
+        bool integer = k < st.integer.size() && st.integer[k];
+        s += std::format("layout(set = 0, binding = {}) uniform {}{} t{};\n", slot < 15 ? slot + 1 : 40 + (slot - 15), integer ? "u" : "",
+                         sampler, slot);
     }
+    for (u32 k = 0; k < w.buffers; k++)
+        s += std::format("layout(set = 0, binding = {}, std430) readonly buffer Buffer{} {{ uvec4 B{}[]; }};\n", 56 + k, k, k);
     for (u32 a = 0; a < w.attrs; a++)
-        s += std::format("layout(location = {}) {} in vec4 a{};\n", a, w.interp[a].empty() ? "smooth" : w.interp[a], a);
+        s += st.barycentric ? std::format("layout(location = {}) pervertexEXT in vec4 a{}[3];\n", a, a)
+                            : std::format("layout(location = {}) {} in vec4 a{};\n", a, w.interp[a].empty() ? "smooth" : w.interp[a], a);
     for (u32 k = 0; k < 8; k++)
         if (w.outputs[k]) s += std::format("layout(location = {}) out vec4 o{};\n", k, k);
     s += HELPERS;
@@ -1171,10 +1307,13 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     s += registers(w, st.user_count, "gl_HelperInvocation ? 0u : 0xffffffffu", init);
     s += w.body;
     s += "    if (!exported) discard;\n}\n";
+    if (st.barycentric) s.insert(s.find('\n') + 1, "#extension GL_EXT_fragment_shader_barycentric : require\n");
     if (s.find("uint64_t") != std::string::npos)
         s.insert(s.find('\n') + 1, "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n");
     g.text = s;
     g.attributes = w.attrs;
+    g.buffers = w.buffers;
+    for (u32 k = 0; k < 8; k++) g.outputs |= u32(w.outputs[k]) << k;
     return g;
 }
 

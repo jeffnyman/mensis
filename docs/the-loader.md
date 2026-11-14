@@ -261,29 +261,46 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   each pixel its own bit of the result, as they would on the console. What the shader reads
   through its scalar loads (constants, descriptors) is the same for all a draw's pixels; it is
   found before the draw, by following those instructions with the draw's values, and handed to
-  the shader in a buffer, with a texture and sampler bound for each image instruction. The
-  interpolation (`v_interp`) becomes the GPU's own, with the qualifier the instruction's inputs
-  imply (perspective or not, centre, centroid or sample, flat). A vertex shader's call to its
+  the shader in a buffer, with a texture and sampler bound for each texture the image
+  instructions read (those that read the same one share it). The interpolation (`v_interp`)
+  is done as the console does it, P0 + i (P1 − P0) + j (P2 − P0), from the triangle's three
+  corners and the barycentrics the GPU hands the shader (`VK_KHR_fragment_shader_barycentric`),
+  perspective or not: an attribute the same at all three corners then comes out exactly that,
+  as a shader that turns it into a whole number (an index) needs. On a GPU without that, the
+  GPU's own interpolation is used. Branches, forward ones so far: `s_cbranch_execz` skips code
+  when no lane is on, which then does nothing a lane can see, so it is simply gone through; so
+  is `s_cbranch_scc0` on a lane mask (taken when no pixel is left, after the shader has killed
+  some); the others (`s_branch`, `s_cbranch_scc0` and `_scc1` on scalar values, the same in
+  every lane) are taken, a variable saying which label the code is skipping to. A vertex shader's call to its
   fetch shader is followed, and the fetch shader's instructions put in its place; their loads,
   each vertex's data by its index, read the buffer's elements as the CPU unpacked them. Its
   position goes through the console's viewport, recast as Vulkan's, and its parameters become
   the pixel shader's attributes, as `SPI_PS_INPUT_CNTL` pairs them. Vulkan has no rectangles,
   so for a rectangle list a geometry shader adds each one's fourth corner. `vkdraw.cpp` draws
-  with them, a draw at a time, into the render target kept on the GPU (below), or into a copy
-  (`--gpu-check`). Kept on the GPU between draws: the compiled shaders and pipelines, the
+  with them, a draw at a time, into the render targets kept on the GPU (below), up to 8 at
+  once, in 8-bit RGBA (linear or sRGB), 16-bit floats (two or four) or 11- and 10-bit floats;
+  or into copies (`--gpu-check`, which compares every target, a channel's values as whole
+  steps of its own encoding). A draw tries the GPU first, the vertex shader included; only if
+  that can't be translated does the CPU run it, for the GPU to be given its vertices. Kept on the GPU between draws: the compiled shaders and pipelines, the
   samplers, the render targets, and the textures, by their descriptor and a hash of the
-  memory they read, so a texture that hasn't changed isn't made again. One in 8-bit RGBA in
-  rows goes up as it is in memory, or, if it is a render target kept there (the frame's
-  picture, read by the next pass), is copied on the GPU; any other is decoded by the CPU, as
-  the CPU's interpreter reads it (so the shaders, the triangles, the filtering and the
-  blending are the GPU's). A compute shader runs a thread to an invocation, in groups as the
+  memory they read, so a texture that hasn't changed isn't made again. One in 8-bit RGBA or
+  in one of those float formats, in rows, goes up as it is in memory, or, if it is a render
+  target kept there (the frame's picture, read by the next pass; a G-buffer, read by the
+  lighting), is copied on the GPU; any other is decoded by the CPU, as the CPU's interpreter
+  reads it (so the shaders, the triangles, the filtering and the blending are the GPU's), an
+  integer one as 32-bit integers, read without filtering; one whose format the CPU can't read
+  (an unused descriptor's) reads the same everywhere, and is a single texel. A cube is read as
+  the CPU reads it: six slices of a 2D array, its faces' coordinates coming as 1 to 2. A compute shader runs a thread to an invocation, in groups as the
   dispatch's, its group number and thread number where the console puts them; its stores so
   far are buffer stores by index, of 8-bit RGBA, into a render target kept on the GPU, which
   it writes as an image of 32-bit values, each packed exactly as the CPU's interpreter packs
-  it. Not yet translated: branches, buffer loads other than by index, other stores, LDS
-  instructions, depth export, gathers, depth-compare sampling; a shader with any of them says
-  so, and is left to the CPU (for a vertex shader, the GPU is given the CPU's vertices
-  instead).
+  it. A pixel shader's buffer loads read the buffer's elements as the CPU unpacked them, as a
+  vertex shader's do. Not yet translated: loops (branches backwards), branches on `vcc` or on
+  `scc1` from a lane mask, buffer loads other than by index, other stores, LDS instructions,
+  depth export, gathers, depth-compare sampling; a shader with any of them says so, and is
+  left to the CPU (for a vertex shader, the GPU is given the CPU's vertices instead). A draw
+  that writes no colour (every channel of every target masked: a pass for depth alone) is
+  left out, as there is no depth yet.
 * **Render targets kept on the GPU.** A render target stays on the GPU from draw to draw, and
   its memory is guarded by the pages' protection: while the GPU's picture is the newer,
   nothing may touch the memory, and once the two are the same, it may be read. Whatever
@@ -603,6 +620,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     CPU: 3,353 draws to more than one render target at once, 380 to targets of 16-bit floats,
     429 million pixels in all. And the panel of starting stats is a heap of icons where its
     numbers should be.
+36. **The 3D passes on the GPU.** The character's passes write a G-buffer, 896x832, up to
+    seven targets at once, in 8-bit RGBA (some sRGB), 16-bit floats and 11/10-bit floats; its
+    lighting reads them back as textures. A draw now writes up to 8 targets on the GPU, in
+    those formats, each kept there, and the textures in them are copied there. Then, one at a
+    time, what the run showed it needed: the forward branches above, the clamped and legacy
+    reciprocals (`v_rcp_*`, `v_rsq_*`), the cube map instructions (`v_cubeid`, `v_cubesc`,
+    `v_cubetc`, `v_cubema`) and cube textures, integer textures, pixel shaders' buffer loads,
+    up to 31 textures (one binding for each, not for each instruction), passes for depth alone
+    left out, and the vertex shader no longer run on the CPU for a draw the GPU does whole.
+    One cost was hidden: unused texture descriptors claim 8193x512 texels of a format that
+    doesn't exist, and each was decoded, all four million of them, on every draw; it is one
+    texel now. With all of it, every draw of character creation is drawn on the GPU (the
+    CPU's pixels: none), and it runs at 2.5 frames a second rather than well under one; what
+    remains is mostly each draw waiting for the GPU before the next (some 430 a frame). The
+    check (`--gpu-check`, through character creation) compares the G-buffer's every target:
+    of 56 draws, 32 the same as the CPU's in every pixel, most of the rest in a few pixels
+    out of thousands (a triangle's edge falling the other way). Three shaders differ in more:
+    they kill pixels whose texture alpha is under a threshold (hair), and the GPU's texture
+    coordinates, a little different from the CPU's, tip many such pixels the other way.
 
 ## Files
 

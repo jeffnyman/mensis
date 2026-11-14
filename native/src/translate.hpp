@@ -56,9 +56,16 @@ struct PsState {
     u32 ena = 0, addr = 0;  // SPI_PS_INPUT_ENA, SPI_PS_INPUT_ADDR
     u32 input_cntl[32] = {};  // SPI_PS_INPUT_CNTL_n
     u32 col_format = 0;  // SPI_SHADER_COL_FORMAT
-    std::vector<u32> image_types;  // each image instruction's T# type (8 1D ... 13 2D array)
+    std::vector<u32> image_types;  // each image instruction's T# type (8 1D ... 13 2D array); bindings 1-15, then 40 on
     std::vector<bool> unnormalized;  // and whether its sampler's coordinates are in texels
+    std::vector<u32> image_slot;  // and which texture it reads (one for each descriptor); empty: one each
+    std::vector<bool> integer;  // and whether its texels are integers (read as they are: usampler); empty: none
+    std::vector<u32> buffer_slot;  // each buffer load's buffer (one for each descriptor, offset and format); empty: one each
     u32 add_tid = 0;  // which buffer loads' descriptors add the lane to the index (not done)
+    // The GPU gives a pixel shader its corners' attributes and barycentrics: v_interp is then
+    // done as the console does it, P0 + i (P1 - P0) + j (P2 - P0), so that an attribute the
+    // same at all three corners comes out exactly that (else as the GPU interpolates)
+    bool barycentric = false;
     std::string key() const;
 };
 
@@ -83,11 +90,13 @@ struct Glsl {
     std::string text, why;
     u32 attributes = 0;  // how many interpolated inputs (attributes 0 to n-1) it reads
     u32 buffers = 0;  // how many buffer loads (a vertex shader's)
+    u32 outputs = 0;  // a pixel shader's: the render targets it exports to, a bit each
 };
 Glsl pixel_shader(const Program& p, const PsState& s);
 
 // The vertex shader: its position through the console's viewport (push constants), and the
-// pixel shader's attributes from its parameters. Bindings: U at 16, the buffers from 17.
+// pixel shader's attributes from its parameters. Bindings: U at 16, the buffers from 17 (up to
+// 15, then from 72, up to 31 in all; a pixel shader's are from 56).
 Glsl vertex_shader(const Program& p, const VsState& s);
 // For a rectangle list: each three corners in, the fourth (b + c - a) added
 std::string rect_geometry_shader(u32 attributes);
