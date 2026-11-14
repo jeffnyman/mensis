@@ -159,6 +159,10 @@ u64 now_us() {
     return u64(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - M.t0).count());
 }
 
+}  // namespace
+void snapshot(u64 flip);
+namespace {
+
 // One flip at each vertical blank.
 void scan_out() {
     auto next = std::chrono::steady_clock::now();
@@ -183,6 +187,7 @@ void scan_out() {
             g_display.last_flip_time = now_us();
         }
         trigger_event(EVENT_VIDEO_OUT, VIDEO_OUT_FLIP, f.arg);
+        if (M.snapshots && count % M.snapshots == 0) snapshot(count);
         if (M.max_flips && count >= M.max_flips) finish(std::format("{} flips shown", count));
     }
 }
@@ -347,6 +352,48 @@ u64 save_frame(const std::string& path) {
         f.write(reinterpret_cast<const char*>(p), std::streamsize(row));
     }
     return lit;
+}
+
+// --snapshots: the buffer on screen, at half its size (every other pixel of every other row),
+// to <out>/frames/<flip>.bmp; the first one clears out an earlier run's
+void snapshot(u64 flip) {
+    std::vector<u32> px;
+    u32 w = 0, h = 0;
+    {
+        std::lock_guard lock(g_display.m);
+        const Display& d = g_display;
+        if (d.current < 0 || size_t(d.current) >= d.buffers.size() || !d.width || !d.height || d.pitch < d.width) return;
+        w = d.width / 2, h = d.height / 2;
+        px.resize(size_t(w) * h);
+        u64 at = d.buffers[size_t(d.current)];
+        for (u32 y = 0; y < h; y++) {
+            const u32* row = reinterpret_cast<const u32*>(at + u64(y) * 2 * d.pitch * 4);
+            for (u32 x = 0; x < w; x++) px[size_t(y) * w + x] = row[x * 2];
+        }
+    }
+    static bool cleared = false;
+    auto dir = std::filesystem::path(M.out_dir) / "frames";
+    std::error_code ec;
+    if (!cleared) {
+        cleared = true;
+        std::filesystem::remove_all(dir, ec);
+    }
+    std::filesystem::create_directories(dir, ec);
+    struct {
+        u32 file_size, reserved = 0, offset = 54;
+        u32 header = 40;
+        std::int32_t width, height;
+        std::uint16_t planes = 1, bits = 32;
+        u32 compression = 0, image_size, x_ppm = 2835, y_ppm = 2835, colours = 0, important = 0;
+    } hd;
+    hd.image_size = w * h * 4;
+    hd.file_size = 54 + hd.image_size;
+    hd.width = std::int32_t(w);
+    hd.height = -std::int32_t(h);  // the rows top down
+    std::ofstream f(dir / std::format("{:05}.bmp", flip), std::ios::binary);
+    f.write("BM", 2);
+    f.write(reinterpret_cast<const char*>(&hd), 52);
+    f.write(reinterpret_cast<const char*>(px.data()), std::streamsize(px.size() * 4));
 }
 
 // For the window: a copy of the buffer on screen (empty before the first flip) and its size;

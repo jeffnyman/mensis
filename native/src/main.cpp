@@ -5,8 +5,10 @@
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
 //                   [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...
-//                   [--press F:BUTTONS[,F:BUTTONS]...]
+//                   [--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N]
 //
+// --snapshots N saves the screen every N frames (flips), at half size, to <out>/frames/, so a
+// long run shows where the game was when.
 // Where the Vulkan SDK was there to build with (Windows), the draws are drawn on the PC's GPU;
 // --cpu draws them on the CPU instead, as the Linux build always does.
 //
@@ -564,6 +566,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
+        } else if (a == "--snapshots" && i + 1 < argc) {
+            M.snapshots = std::stoull(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
                    i + 1 < argc) {
             u64 v = std::stoull(argv[++i]);
@@ -578,7 +582,7 @@ int main(int argc, char** argv) {
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
                      "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]... "
-                     "[--press F:BUTTONS[,F:BUTTONS]...]\n";
+                     "[--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N]\n";
         return 2;
     }
     M.out_dir = pos[2];

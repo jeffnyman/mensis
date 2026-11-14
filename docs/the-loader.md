@@ -113,7 +113,7 @@ work/native/linux/mensis-loader work/ghidra/eboot-1.09.ghidra.elf work/ghidra/eb
 It writes the same `calls.log` and `summary.md` into `work/loader-native/`, plus `stdout.txt`,
 whatever the game printed, `files/`, the folders the game may write to, `gpu/`, what the
 game asked the GPU to do, `shaders/`, the GPU programs its draws and dispatches used,
-disassembled, `draws/`, what the first draws of each pixel shader drew, and `frame.bmp`, the
+disassembled, `draws/`, what the first draws of each pixel shader drew, `frames/` (with `--snapshots`), and `frame.bmp`, the
 frame on screen when it stopped. Add `--frames 60` to stop after 60 frames, or `--seconds 20`
 to run longer than the default 10. On Windows, `--window` opens a window on the display, whose
 title counts the frames as they are shown; the run then goes on until the window is closed.
@@ -147,7 +147,13 @@ time: `--press 1000:down,1060:circle` picks "Play Offline" from the title menu, 
 menu, the message about playing offline, and "New Game" again (the buttons
 by name: cross, circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3,
 options, touchpad; `down+circle` presses two at once). The summary lists the presses the
-game saw.
+game saw. `--snapshots 50` saves the screen every 50 frames, at half size, to `frames/`, which
+shows where a long run was when, and so when to press what. These presses, with `--seconds
+260`, go on through the brightness and control settings to character creation:
+
+```
+--press 1000:down,1060:circle,1400:circle,1500:circle,1650:circle,1750:down,1800:circle,1900:down,1915:down,1930:down,1945:down,1960:down,1975:down,2000:circle
+```
 
 The game's own files (`/app0/`) are read from `work/update`, then `work/base`: the 1.09
 update's files over the base game's, as [the package](the-package.md) extracts them. Run from
@@ -588,6 +594,15 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     offline mode; past that, "New Game" again leads to the first-time brightness screen.
     `calls.log` showed none of this at first, since it all happens after its first 5 million
     calls; it now keeps each function's first 100 calls as well.
+35. **Character creation.** With `--snapshots` to see where a run was when, the presses went
+    on: past the brightness screen and a screen of control settings (camera axes, its
+    sensitivity, auto target switching, vibration), each with its own "Next", to character
+    creation, "Contract": a name, gender, age, origin, appearance, and the character drawn
+    in 3D. It is the first of the game's 3D drawing, and it shows what is missing. The game
+    slows to a crawl, some 2,060 frames in 260 seconds, since its 3D passes are drawn on the
+    CPU: 3,353 draws to more than one render target at once, 380 to targets of 16-bit floats,
+    429 million pixels in all. And the panel of starting stats is a heap of icons where its
+    numbers should be.
 
 ## Files
 

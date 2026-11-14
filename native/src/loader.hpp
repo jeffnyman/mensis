@@ -160,6 +160,7 @@ struct Machine {
 
     u64 max_calls = 0;
     u64 max_flips = 0;  // --frames: stop after this many flips
+    u64 snapshots = 0;  // --snapshots N: the screen saved every N flips, to <out>/frames/
     unsigned seconds = 10;  // 0: no time limit
     bool draw = true;  // run the draws and dispatches (--no-draw: only follow the commands)
     bool gpu_check = false;  // draw the draws saved to draws/ on the PC's GPU too (--gpu-check)
