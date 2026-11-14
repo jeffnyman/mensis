@@ -5,8 +5,8 @@
 // The PS4 gives a game a few mount points. /app0/ is the game's own package, read-only: here,
 // the folders given with --app0 (by default work/update, then work/base: the 1.09 update's
 // files over the base game's), first match wins. /download0/, /temp0/ and /data/ are writable;
-// here each is a folder in the run's output folder (<out>/files/download0, ...). Any other path
-// doesn't exist.
+// here each is a folder in the run's output folder (<out>/files/download0, ...). /savedata0/
+// and the like are the saves mounted there (savedata.cpp). Any other path doesn't exist.
 //
 // Three families of calls reach them: the kernel's (sceKernelOpen, Read, Lseek, Stat, ...,
 // returning SCE_KERNEL_ERROR_* on failure), POSIX's (stat, mkdir, ..., returning -1 and setting
@@ -80,6 +80,9 @@ Resolved resolve(const std::string& game_path) {
         std::error_code ec;
         fs::create_directories(root, ec);
         r.candidates.push_back(root / rest);
+    } else if (std::string folder = savedata_folder(parts[0], r.writable); !folder.empty()) {
+        r.mount = parts[0];
+        r.candidates.push_back(fs::path(folder) / rest);
     }
     return r;
 }

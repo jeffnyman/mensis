@@ -188,6 +188,10 @@ void add_libc_standins(std::unordered_map<std::string, Standin>& t);  // libc.cp
 void add_audio_standins(std::unordered_map<std::string, Standin>& t);  // audio.cpp
 void add_video_standins(std::unordered_map<std::string, Standin>& t);  // video.cpp
 void add_pad_standins(std::unordered_map<std::string, Standin>& t);  // pad.cpp
+void add_savedata_standins(std::unordered_map<std::string, Standin>& t);  // savedata.cpp
+// The folder a save data mount point ("savedata0", ...) stands for, and whether it may be
+// written; empty if nothing is mounted there (savedata.cpp)
+std::string savedata_folder(const std::string& point, bool& writable);
 u32 pad_button(const std::string& name);  // a button's bit, by its name (cross, up, ...); 0 if none
 std::vector<std::string> pad_report();  // for the summary
 u64 video_flips();  // the flips shown so far

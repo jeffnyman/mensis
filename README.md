@@ -86,7 +86,8 @@ and character models rendered from the game's own meshes and textures (`flver.py
   up front, into 48 running threads and its own files, with sound up, and on past its
   splash screen to its title screen and menu, drawn by its own GPU programs, disassembled, run
   on the CPU, and translated for a PC's GPU, where the title screen runs at the game's own 30
-  frames a second; and, with a controller, past the title menu to its save data check.
+  frames a second; and, with a controller and save data, past the title menu and its
+  main menu to the first-time brightness screen of a new game.
 * [Combat](docs/the-combat.md): what a hit is made of, from the tables: damage, scaling and its
   letter, the stat curve, each move's motion value, stamina, poise and rally ("regain"), and
   which button plays it, from the animations: R1 chain, charged R2, transform attack. And the

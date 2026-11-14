@@ -102,7 +102,8 @@ std::string format_call(const Call& c) {
 void log_call(GameThread* t, const Frame* f, i64 ret, std::string&& note) {
     Call c{M.total_calls++, f->caller, {f->args[0], f->args[1], f->args[2], f->args[3]}, ret,
            u32(f->index), t ? t->id : 0, std::move(note)};
-    if (c.n < M.log_limit) M.calls.push_back(format_call(c));
+    // past the limit, each import's first 100 calls still go in: what the game starts doing late
+    if (c.n < M.log_limit || M.counts[c.import] <= 100) M.calls.push_back(format_call(c));
     if (t) {
         t->last = c;
         t->calls++;

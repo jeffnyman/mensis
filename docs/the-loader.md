@@ -142,7 +142,9 @@ Cross, so Enter is Circle:
 | W A S D, I J K L | the left stick, the right stick |
 
 `--press` presses buttons for a run, from a given frame, for 6 frames, the same way each
-time: `--press 1000:down,1060:circle` picks "Play Offline" from the title menu (the buttons
+time: `--press 1000:down,1060:circle` picks "Play Offline" from the title menu, and with
+`,1400:circle,1500:circle,1650:circle` added (and `--seconds 110`), "New Game" on the main
+menu, the message about playing offline, and "New Game" again (the buttons
 by name: cross, circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3,
 options, touchpad; `down+circle` presses two at once). The summary lists the presses the
 game saw.
@@ -189,7 +191,9 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   first.
 * **Files.** The PS4 gives a game a few places: `/app0/`, its own package, read-only, here
   the folders named above; and `/download0/`, `/temp0/` and `/data/`, which it may write, here
-  folders in the run's output (`files/download0/`, ...). Any other path doesn't exist. Three
+  folders in the run's output (`files/download0/`, ...); and its saves, mounted at
+  `/savedata0/` and so on, which are folders too, `files/savedata/<user>/<save's name>/`,
+  kept from run to run (delete one to start again without it). Any other path doesn't exist. Three
   families of calls reach them, sharing one table of open files: the kernel's (`sceKernelOpen`,
   `Read`, `Lseek`, `Stat`, `Getdirentries`, ...), POSIX's (`stat`, `mkdir`, with `errno`
   through `__error`), and the C library's streams (`fopen`, `fread`, `fgets`, ...). Each logged
@@ -303,7 +307,9 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   stop the run; so can the main thread's `_start` returning, a time limit (`--seconds`, 10 by
   default), a call limit (`--calls`) and a frame limit (`--frames`, flips shown).
 * **The log.** `calls.log` keeps the first 5 million calls whole (`--log` changes how
-  many), which covers the start-up and the first frames; after that, the last 10,000. The
+  many), which covers the start-up and the first frames; after that, each function's first
+  100 calls, so what the game starts doing late (its saves, say) is there too, and the last
+  10,000. The
   summary still counts every call, and shows each thread's last. Most of a call takes no
   lock: the stand-in runs, and only the log entry, made once it is done, is shared.
 * **Repeatable, as far as threads allow.** Anything the stand-ins hand the game lives at a
@@ -572,13 +578,23 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     1000:down,1060:circle` the game goes past its title screen for the first time: it checks
     for save data, and says "Failed to create save data. Press OK to try again.", since there
     are no stand-ins for `sceSaveData*` yet.
+34. **Save data.** The game's saves are now folders (`savedata.cpp`), which it mounts by name
+    and then reads and writes with its ordinary file calls, at `/savedata0/`. Its first look
+    finds no save "SPRJ0005", so it creates one, 1,136 blocks of 32 KiB, gives it a title
+    ("Bloodborne SaveData") and an icon, and writes it: `userdata0000` to `userdata0009`,
+    1.25 MiB each (a slot for each character, it seems), and `userdata0010`, 256 KiB, which
+    it then copies to `backup0010`. Then comes its main menu: New Game, System, Log In. The
+    next run finds the save and goes straight there. "New Game" says the game starts in
+    offline mode; past that, "New Game" again leads to the first-time brightness screen.
+    `calls.log` showed none of this at first, since it all happens after its first 5 million
+    calls; it now keeps each function's first 100 calls as well.
 
 ## Files
 
 | Path | |
 |---|---|
 | `tools/loader.py` | runs the start-up under Unicorn and logs every system call |
-| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues), `audio.cpp` and `pad.cpp` (the user and the controller); `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders (pixel, vertex, compute) translated into GLSL, and `vkdraw.cpp`, the draws and dispatches on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
+| `native/` | the native loader: `main.cpp` (loading, dispatch, output); the stand-ins, in `standins.cpp`, `threads.cpp`, `files.cpp`, `libc.cpp`, `gnm.cpp` (the graphics driver), `video.cpp` (the display and event queues), `audio.cpp`, `pad.cpp` (the user and the controller) and `savedata.cpp`; `gpu.cpp`, the command processor; `gcn.cpp`, the shader disassembler; `shade.cpp`, `draw.cpp` and `bc7.cpp`, drawing on the CPU; `vulkan.cpp`, the window through Vulkan (Windows); `translate.cpp`, the shaders (pixel, vertex, compute) translated into GLSL, and `vkdraw.cpp`, the draws and dispatches on the GPU through Vulkan (Windows; `--gpu-check`); and for each platform `platform_*.cpp` (memory and its guarding, the thread pointer, stopping) and `enter_*.S` (the crossings between the game and the loader); `build.ps1` builds it on Windows |
 | `work/loader/calls.log` | every call, in order, with its caller and arguments |
 | `work/loader/summary.md` | where the run stopped, and every import it reached |
 | `work/loader-native/` | the native run's `calls.log`, `summary.md`, `stdout.txt`, `files/`, `gpu/` (the first submissions of each queue, decoded), `shaders/` (the GPU programs used, disassembled, and with `--gpu-check` translated into GLSL), `draws/` (the first draws of each pixel shader, as drawn, and with `--gpu-check` as the GPU drew them, `NNN-gpu.bmp`) and `frame.bmp` (the screen when it stopped) |

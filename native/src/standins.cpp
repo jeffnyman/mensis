@@ -865,6 +865,7 @@ const std::unordered_map<std::string, Standin>& standins() {
         add_audio_standins(t);
         add_video_standins(t);
         add_pad_standins(t);
+        add_savedata_standins(t);
         return t;
     }();
     return table;
