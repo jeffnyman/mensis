@@ -380,7 +380,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
 }
 
 std::string PsState::key() const {
-    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}:{:x}", user_count, ena, addr, col_format, barycentric, add_tid);
+    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}:{:x}:{:x}", user_count, ena, addr, col_format, barycentric, add_tid, targets);
     for (u32 c : input_cntl) k += std::format(":{:x}", c);
     for (size_t i = 0; i < image_types.size(); i++) k += std::format(":t{}{}", image_types[i], unnormalized[i] ? "u" : "");
     for (u32 s : image_slot) k += std::format(":s{}", s);
@@ -1376,7 +1376,9 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
         s += st.barycentric ? std::format("layout(location = {}) pervertexEXT in vec4 a{}[3];\n", a, a)
                             : std::format("layout(location = {}) {} in vec4 a{};\n", a, w.interp[a].empty() ? "smooth" : w.interp[a], a);
     for (u32 k = 0; k < 8; k++)
-        if (w.outputs[k]) s += std::format("layout(location = {}) out vec4 o{};\n", k, k);
+        if (w.outputs[k])
+            s += (st.targets >> k) & 1 ? std::format("layout(location = {}) out vec4 o{};\n", k, k)
+                                       : std::format("vec4 o{};  // (no target there)\n", k);
     s += HELPERS;
     s += "\nvoid main() {\n";
     // the input VGPRs, as SPI_PS_INPUT_ADDR lays them out and SPI_PS_INPUT_ENA fills them
@@ -1410,7 +1412,7 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     g.text = s;
     g.attributes = w.attrs;
     g.buffers = w.buffers;
-    for (u32 k = 0; k < 8; k++) g.outputs |= u32(w.outputs[k]) << k;
+    for (u32 k = 0; k < 8; k++) g.outputs |= u32(w.outputs[k] && ((st.targets >> k) & 1)) << k;
     return g;
 }
 

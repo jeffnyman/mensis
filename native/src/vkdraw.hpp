@@ -69,8 +69,16 @@ struct Draw {
         u32 format = 0, bpp = 4, width = 0, height = 0;
         u64 address = 0;
         const unsigned char* target = nullptr;
-        bool write = false;
+        bool test = true, write = false;
         u32 func = 7;
+        // with stencil (format D32_SFLOAT_S8_UINT): its 8 bits a pixel at saddress (or, for
+        // --gpu-check, read from starget), and each face's test and operations, as Vulkan's
+        bool stencil = false, stencil_test = false;
+        u64 saddress = 0;
+        const unsigned char* starget = nullptr;
+        struct Face {
+            u32 fail = 0, pass = 0, zfail = 0, func = 7, cmask = 255, wmask = 255, ref = 0;  // VkStencilOp, VkCompareOp
+        } front, back;
     } depth;
     u32 width = 0, height = 0;
     u32 rows = 0;  // the kept targets' rows in memory: past their height, to a multiple of 8 (0: their height)
@@ -99,6 +107,12 @@ struct Dispatch {
 bool dispatch(Dispatch& d, std::string& why);
 // Whether that memory is kept on the GPU, an element of bpp bytes a texel
 bool kept(u64 address, u64 bytes, u32 bpp);
+// A depth buffer kept on the GPU, cleared there to that value (its stencil, if any, left as it
+// is); false if it isn't kept there as that size
+bool clear_depth(u64 address, u32 width, u32 height, float value);
+// If that memory is kept on the GPU, a number that changes whenever anything writes it (a draw,
+// a dispatch, the CPU); else 0
+u64 version(u64 address);
 
 bool has_texture(const std::string& key);
 // Whether a pixel shader can have its triangle's corners' attributes and its barycentrics

@@ -66,6 +66,7 @@ struct PsState {
     // done as the console does it, P0 + i (P1 - P0) + j (P2 - P0), so that an attribute the
     // same at all three corners comes out exactly that (else as the GPU interpolates)
     bool barycentric = false;
+    u32 targets = 0xff;  // the render targets drawn into: an export to another goes nowhere
     std::string key() const;  // all of it, for a translation kept to be used again
 };
 

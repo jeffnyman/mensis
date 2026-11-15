@@ -396,8 +396,10 @@ bool make_image(GpuImage& im, VkImageType type, VkImageViewType view_type, VkFor
     vi.viewType = view_type;
     vi.format = format;
     vi.components = swizzle;
-    bool depth_format = format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT;
-    vi.subresourceRange = {VkImageAspectFlags(depth_format ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, layers};
+    VkImageAspectFlags view_aspect = format == VK_FORMAT_D32_SFLOAT_S8_UINT ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
+                                     : format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                                                                                       : VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange = {view_aspect, 0, 1, 0, layers};
     vkCreateImageView(g.device, &vi, nullptr, &im.view);
     im.layers = layers;
     im.bytes = mr.size;
@@ -425,6 +427,7 @@ struct Kept {
     u64 batches = 0;  // command buffers submitted (each waited for)
     u64 regions = 0;  // memory kept on the GPU because a compute shader stored into it
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
+    u64 depth_clears = 0;  // depth buffers cleared there
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
 };
 Kept k;
@@ -435,25 +438,40 @@ struct Resident {
     enum State { gpu, same, memory };
     u64 base = 0, bytes = 0, lo = 0, hi = 0;
     u32 format = 0, width = 0, height = 0, bpp = 4;
-    bool depth = false;  // a depth buffer (D16_UNORM, D32_SFLOAT): no other views of it, no uints
+    bool depth = false;  // a depth buffer (D16_UNORM, D32_SFLOAT, D32_SFLOAT_S8_UINT): no other views of it, no uints
+    u64 sbase = 0, slo = 0, shi = 0;  // and its stencil's memory (8 bits a pixel), if it has one
+    u64 version = 0;  // new each time anything writes it (from a count of all such writes)
     GpuImage image;
     VkImageView uints = VK_NULL_HANDLE;  // the same, each texel uints (bpp of them): for a compute shader's loads and stores
     State state = memory;
-    // copies of it, for draws that read it as a texture: by format, width, height and swizzle
-    std::map<std::array<u32, 4>, GpuImage> copies;
+    // copies of it, for draws that read it as a texture: by format, width, height, swizzle, and
+    // where in it the texture starts
+    std::map<std::array<u64, 5>, GpuImage> copies;
     // views of it in other formats of the same size of texel, for a draw into it as one (the
     // memory a compute shader made kept, then drawn into as a render target, say)
     std::map<u32, VkImageView> views;
 };
 std::map<u64, Resident> g_resident;  // by address
+u64 g_writes = 0;  // writes into kept memory, counted: each one's version
+void written(Resident& r) { r.version = ++g_writes; }
 
-bool is_depth(u32 format) { return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT; }
+bool is_depth(u32 format) {
+    return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+// Kept memory's pages guarded (0: from any touch; 1: from writes; 2: not), the stencil's too
+void guard(const Resident& r, int access) {
+    platform::protect(r.lo, r.hi - r.lo, access);
+    if (r.sbase) platform::protect(r.slo, r.shi - r.slo, access);
+}
+bool in_pages(const Resident& r, u64 lo, u64 hi) { return (r.lo < hi && lo < r.hi) || (r.sbase && r.slo < hi && lo < r.shi); }
 // Where kept memory's image rests between uses, which part of it holds the memory, and what may
 // have used it there last
 VkImageLayout rest(const Resident& r) {
     return r.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
-VkImageAspectFlags aspect(const Resident& r) { return r.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT; }
+VkImageAspectFlags aspect(const Resident& r) {
+    return r.sbase ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : r.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+}
 VkPipelineStageFlags rest_stage(const Resident& r) {
     return r.depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
                    : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -537,7 +555,10 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
     std::hash<std::string> h;
     std::string key = std::format("{:x}:{:x}:{:x}:{:x}:{}:{}", h(d.vs), h(d.gs), h(d.ps), d.cull, d.attributes, gpu_vertices);
     for (const auto& t : d.targets) key += std::format(":{}.{:x}.{:x}", t.format, t.blend, t.mask);
-    key += std::format(":z{}.{}.{}", d.depth.format, d.depth.write, d.depth.func);
+    key += std::format(":z{}.{}.{}.{}", d.depth.format, d.depth.test, d.depth.write, d.depth.func);
+    if (d.depth.stencil_test)
+        for (const auto* f : {&d.depth.front, &d.depth.back})
+            key += std::format(":s{}.{}.{}.{}.{}.{}.{}", f->fail, f->pass, f->zfail, f->func, f->cmask, f->wmask, f->ref);
     auto it = k.pipelines.find(key);
     if (it != k.pipelines.end()) return it->second;
     VkShaderModule vsm = module(d.vs, shaderc_vertex_shader, why), psm = module(d.ps, shaderc_fragment_shader, why);
@@ -617,9 +638,16 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
     ri.pColorAttachmentFormats = formats.data();
     ri.depthAttachmentFormat = VkFormat(d.depth.format);
     VkPipelineDepthStencilStateCreateInfo dsi{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    dsi.depthTestEnable = d.depth.format != 0;
+    dsi.depthTestEnable = d.depth.format && d.depth.test;
     dsi.depthWriteEnable = d.depth.format && d.depth.write;
     dsi.depthCompareOp = VkCompareOp(d.depth.func);  // the console's order is Vulkan's
+    dsi.stencilTestEnable = d.depth.stencil_test;
+    auto face = [](const Draw::Depth::Face& f) {
+        return VkStencilOpState{VkStencilOp(f.fail), VkStencilOp(f.pass), VkStencilOp(f.zfail), VkCompareOp(f.func), f.cmask, f.wmask, f.ref};
+    };
+    dsi.front = face(d.depth.front);
+    dsi.back = face(d.depth.back);
+    if (d.depth.stencil) ri.stencilAttachmentFormat = VkFormat(d.depth.format);
     VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gi.pNext = &ri;
     gi.stageCount = gsm ? 3 : 2;
@@ -756,15 +784,21 @@ bool reserve_batch(VkDeviceSize bytes, VkDeviceSize& base, VkDescriptorSet& set,
 // The GPU's picture back into the memory, which may then be read
 bool read_back(Resident& r) {
     if (r.state != Resident::gpu) return true;
-    if (!flush_batch() || !k.readback.reserve(r.bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
+    VkDeviceSize sbytes = r.sbase ? VkDeviceSize(r.width) * r.height : 0, sat = (r.bytes + 255) & ~VkDeviceSize(255);
+    if (!flush_batch() || !k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
     barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT, rest_stage(r), T,
             aspect(r));
     VkBufferImageCopy copy{};
-    copy.imageSubresource = {aspect(r), 0, 0, 1};
+    copy.imageSubresource = {r.sbase ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT) : aspect(r), 0, 0, 1};
     copy.imageExtent = {r.width, r.height, 1};
     vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
+    if (r.sbase) {
+        copy.bufferOffset = sat;
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+        vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
+    }
     barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(r), T, rest_stage(r),
             aspect(r));
     VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -775,9 +809,10 @@ bool read_back(Resident& r) {
     hb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
     if (!flush_batch()) return false;
-    platform::protect(r.lo, r.hi - r.lo, 2);
+    guard(r, 2);
     std::memcpy(reinterpret_cast<void*>(r.base), k.readback.p, r.bytes);
-    platform::protect(r.lo, r.hi - r.lo, 1);
+    if (r.sbase) std::memcpy(reinterpret_cast<void*>(r.sbase), k.readback.p + sat, sbytes);
+    guard(r, 1);
     r.state = Resident::same;
     k.readbacks++;
     return true;
@@ -788,7 +823,7 @@ void let_go(u64 base) {
     flush_batch();  // nothing waiting may still use it
     Resident& r = g_resident[base];
     read_back(r);
-    platform::protect(r.lo, r.hi - r.lo, 2);
+    guard(r, 2);
     if (r.uints) vkDestroyImageView(g.device, r.uints, nullptr);
     for (auto& [f, v] : r.views) vkDestroyImageView(g.device, v, nullptr);
     r.image.destroy();
@@ -800,7 +835,7 @@ void let_go(u64 base) {
 // Every kept target in the pages from lo to hi back into the memory
 void read_back_pages(u64 lo, u64 hi) {
     for (auto& [base, r] : g_resident)
-        if (r.lo < hi && lo < r.hi) read_back(r);
+        if (in_pages(r, lo, hi)) read_back(r);
 }
 
 // Memory kept: the image at its address if it is the same format and size, else a new one, once
@@ -808,18 +843,20 @@ void read_back_pages(u64 lo, u64 hi) {
 bool make_kept_image(Resident& r, std::string& why);
 bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why);
 
-Resident* keep(u64 address, u32 format, u32 width, u32 rows, u32 bpp, std::string& why) {
+Resident* keep(u64 address, u32 format, u32 width, u32 rows, u32 bpp, std::string& why, u64 sbase = 0) {
     u64 bytes = u64(width) * rows * bpp;
     u64 lo = address & ~u64(0xfff), hi = (address + bytes + 0xfff) & ~u64(0xfff);
+    u64 slo = sbase & ~u64(0xfff), shi = (sbase + u64(width) * rows + 0xfff) & ~u64(0xfff);
     // the same memory kept in another shape (a clear of it as a buffer, then a draw into it):
     // made over on the GPU, rather than through memory
     if (auto it = g_resident.find(address);
-        it != g_resident.end() && it->second.bpp == bpp && it->second.bytes == bytes &&
+        it != g_resident.end() && it->second.bpp == bpp && it->second.bytes == bytes && !it->second.sbase && !sbase &&
         (it->second.width != width || it->second.height != rows || it->second.depth != is_depth(format)))
         if (!reshape(it->second, format, width, rows, why)) return nullptr;
     std::vector<u64> in_way;
     for (auto& [base, r] : g_resident)
-        if (r.lo < hi && lo < r.hi && !(base == address && r.bpp == bpp && r.width == width && r.height == rows))
+        if ((in_pages(r, lo, hi) || (sbase && in_pages(r, slo, shi))) &&
+            !(base == address && r.bpp == bpp && r.width == width && r.height == rows && r.sbase == sbase))
             in_way.push_back(base);
     for (u64 base : in_way) let_go(base);
     auto it = g_resident.find(address);
@@ -827,6 +864,7 @@ Resident* keep(u64 address, u32 format, u32 width, u32 rows, u32 bpp, std::strin
     Resident r;
     r.base = address, r.bytes = bytes, r.lo = lo, r.hi = hi;
     r.format = format, r.width = width, r.height = rows, r.bpp = bpp, r.depth = is_depth(format);
+    if (sbase) r.sbase = sbase, r.slo = slo, r.shi = shi;
     if (!make_kept_image(r, why)) return nullptr;
     return &(g_resident[address] = std::move(r));
 }
@@ -961,26 +999,41 @@ bool draw(Draw& d, std::string& why) {
     // the depth buffer, then the targets: kept, or --gpu-check's copies, by their format, size
     // and place
     Resident* zres = nullptr;
-    if (kept && d.depth.format && !(zres = keep(d.depth.address, d.depth.format, d.depth.width, d.depth.height, d.depth.bpp, why)))
+    if (kept && d.depth.format &&
+        !(zres = keep(d.depth.address, d.depth.format, d.depth.width, d.depth.height, d.depth.bpp, why, d.depth.stencil ? d.depth.saddress : 0)))
         return false;
     std::vector<Resident*> res(nt, nullptr);
     if (kept)
         for (size_t i = 0; i < nt; i++)
             if (d.targets[i].format && !(res[i] = resident(d, d.targets[i], why))) return false;
-    // a texture read as it is in memory: copied on the GPU from a kept target there, if it is
-    // that target laid out the same way; else any kept target there goes back into memory first
+    // a texture read as it is in memory: copied on the GPU from kept memory there (of the same
+    // size of texel): straight from its image if it is that image laid out the same way, else
+    // through a buffer, the image's texels in order, the texture's rows picked out of them (a
+    // depth buffer's depth, read as a texture, or a texture in memory a compute shader wrote);
+    // else whatever is kept there goes back into memory first
     std::vector<Resident*> from_target(d.textures.size(), nullptr);
+    std::vector<bool> direct(d.textures.size(), false);
+    std::vector<VkDeviceSize> offset(d.textures.size(), 0);
+    VkDeviceSize scratch_needed = 0;
     for (size_t i = 0; i < d.textures.size(); i++) {
         const Texture& t = d.textures[i];
         if (!t.raw) continue;
-        auto it = g_resident.find(u64(t.raw));
-        if (it != g_resident.end() && it->second.state != Resident::memory && !it->second.depth && t.type == 9 && t.layers == 1 &&
-            t.bpp == it->second.bpp && t.pitch == it->second.width && t.width <= it->second.width && t.height <= it->second.height) {
-            from_target[i] = &it->second;
+        u64 at = u64(t.raw), end = at + u64(t.pitch) * t.height * t.layers * t.bpp;
+        Resident* r = nullptr;
+        for (auto& [base, kr] : g_resident)
+            if (at >= base && end <= base + kr.bytes && kr.bpp == t.bpp && (at - base) % t.bpp == 0) r = &kr;
+        if (r && r->state != Resident::memory && t.type == 9 && t.layers == 1) {
+            from_target[i] = r;
+            offset[i] = at - r->base;
+            direct[i] = !r->depth && at == r->base && t.pitch == r->width && t.width <= r->width && t.height <= r->height;
+            if (!direct[i]) scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
             continue;
         }
-        u64 at = u64(t.raw), end = at + u64(t.pitch) * t.height * t.layers * t.bpp;
         read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff));
+    }
+    if (scratch_needed > k.scratch.size && (!flush_batch() || !k.scratch.reserve(scratch_needed))) {  // (not in use, to be made bigger)
+        why = "out of GPU memory";
+        return false;
     }
     k.draws++;
 
@@ -1006,6 +1059,7 @@ bool draw(Draw& d, std::string& why) {
     VkDeviceSize zbytes = VkDeviceSize(d.depth.width) * d.depth.height * d.depth.bpp;
     bool zupload = d.depth.format && (!kept || (zres && zres->state == Resident::memory));
     VkDeviceSize at_depth = place(zupload ? zbytes : 0);
+    VkDeviceSize sbytes = d.depth.stencil ? VkDeviceSize(d.depth.width) * d.depth.height : 0, at_stencil = place(zupload ? sbytes : 0);
     VkDeviceSize at_values = place(d.values.size() * 4);
     VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
     VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
@@ -1019,9 +1073,9 @@ bool draw(Draw& d, std::string& why) {
     std::vector<GpuImage> unkept(d.textures.size());
     for (size_t i = 0; i < d.textures.size(); i++) {
         Texture& t = d.textures[i];
-        if (Resident* r = from_target[i]) {  // an image kept for it, by its format, size and swizzle
+        if (Resident* r = from_target[i]) {  // an image kept for it, by its format, size, swizzle and place
             u32 sw = t.swizzle[0] | t.swizzle[1] << 3 | t.swizzle[2] << 6 | t.swizzle[3] << 9;
-            GpuImage& im = r->copies[{t.format, t.width, t.height, sw}];
+            GpuImage& im = r->copies[{t.format, t.width, t.height, sw, offset[i] | (u64(t.pitch) << 40) | (u64(direct[i]) << 63)}];
             VkComponentMapping map{swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
             if (!im.image && !make_image(im, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(t.format), t.width, t.height, 1, 1,
                                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
@@ -1076,6 +1130,7 @@ bool draw(Draw& d, std::string& why) {
     }
     for (auto& a : at_target) a += base;
     at_depth += base;
+    at_stencil += base;
     for (auto& a : at_buffers) a += base;
     for (auto& a : at_ps_buffers) a += base;
     for (auto& a : at_texels)
@@ -1087,6 +1142,8 @@ bool draw(Draw& d, std::string& why) {
             std::memcpy(up + at_target[i], kept ? reinterpret_cast<const unsigned char*>(d.targets[i].address) : d.targets[i].target,
                         target_bytes[i]);
     if (zupload) std::memcpy(up + at_depth, kept ? reinterpret_cast<const unsigned char*>(d.depth.address) : d.depth.target, zbytes);
+    if (zupload && sbytes)
+        std::memcpy(up + at_stencil, kept ? reinterpret_cast<const unsigned char*>(d.depth.saddress) : d.depth.starget, sbytes);
     std::memcpy(up + at_values, d.values.data(), d.values.size() * 4);
     std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
     std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
@@ -1161,16 +1218,40 @@ bool draw(Draw& d, std::string& why) {
         Resident* r = from_target[i];
         if (!r) continue;
         GpuImage& im = *images[i];
+        const Texture& t = d.textures[i];
         barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
-        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
-        VkImageCopy ic{};
-        ic.srcSubresource = ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        ic.extent = {d.textures[i].width, d.textures[i].height, 1};
-        vkCmdCopyImage(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
-        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                VK_ACCESS_TRANSFER_READ_BIT, RW, T, C);
+        barrier(cmd, r->image.image, 1, rest(*r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(*r), VK_ACCESS_TRANSFER_READ_BIT,
+                rest_stage(*r), T, aspect(*r));
+        if (direct[i]) {
+            VkImageCopy ic{};
+            ic.srcSubresource = ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            ic.extent = {t.width, t.height, 1};
+            vkCmdCopyImage(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
+        } else {  // through the scratch buffer: the image's texels in order, then the texture's rows from them
+            VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bb.buffer = k.scratch.buffer;
+            bb.size = VK_WHOLE_SIZE;
+            bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+            VkBufferImageCopy c{};
+            c.imageSubresource = {r->depth ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT) : VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT), 0, 0, 1};
+            c.imageExtent = {r->width, r->height, 1};
+            vkCmdCopyImageToBuffer(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &c);
+            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+            VkBufferImageCopy c2{};
+            c2.bufferOffset = offset[i];
+            c2.bufferRowLength = t.pitch;
+            c2.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c2.imageExtent = {t.width, t.height, 1};
+            vkCmdCopyBufferToImage(cmd, k.scratch.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c2);
+        }
+        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(*r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(*r), T,
+                rest_stage(*r), aspect(*r));
         barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT, T, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         k.target_textures++;
@@ -1231,18 +1312,23 @@ bool draw(Draw& d, std::string& why) {
         const VkPipelineStageFlags Z = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
         const VkAccessFlags ZRW = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         const VkImageLayout ZL = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        const VkImageAspectFlags ZA = d.depth.stencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
         if (zupload) {
             barrier(cmd, zi->image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T, VK_IMAGE_ASPECT_DEPTH_BIT);
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T, ZA);
             VkBufferImageCopy c{};
             c.bufferOffset = at_depth;
             c.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
             c.imageExtent = {d.depth.width, d.depth.height, 1};
             vkCmdCopyBufferToImage(cmd, k.upload.buffer, zi->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-            barrier(cmd, zi->image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ZL, VK_ACCESS_TRANSFER_WRITE_BIT, ZRW, T, Z, VK_IMAGE_ASPECT_DEPTH_BIT);
+            if (sbytes) {
+                c.bufferOffset = at_stencil;
+                c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+                vkCmdCopyBufferToImage(cmd, k.upload.buffer, zi->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+            }
+            barrier(cmd, zi->image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ZL, VK_ACCESS_TRANSFER_WRITE_BIT, ZRW, T, Z, ZA);
         } else {  // as the last draw or readback left it
-            barrier(cmd, zi->image, 1, ZL, ZL, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, ZRW, Z | T, Z,
-                    VK_IMAGE_ASPECT_DEPTH_BIT);
+            barrier(cmd, zi->image, 1, ZL, ZL, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, ZRW, Z | T, Z, ZA);
         }
         zatt.imageView = zi->view;
         zatt.imageLayout = ZL;
@@ -1257,6 +1343,7 @@ bool draw(Draw& d, std::string& why) {
     rinfo.colorAttachmentCount = u32(nt);
     rinfo.pColorAttachments = atts.data();
     if (d.depth.format) rinfo.pDepthAttachment = &zatt;
+    if (d.depth.stencil) rinfo.pStencilAttachment = &zatt;
     vkCmdBeginRendering(cmd, &rinfo);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, k.layout, 0, 1, &set, 0, nullptr);
@@ -1301,12 +1388,14 @@ bool draw(Draw& d, std::string& why) {
         return false;
     }
     if (zres) {
-        Resident::State s = d.depth.write ? Resident::gpu : zupload ? Resident::same : zres->state;
+        bool swrites = d.depth.stencil_test && (d.depth.front.wmask || d.depth.back.wmask);
+        Resident::State s = d.depth.write || swrites ? Resident::gpu : zupload ? Resident::same : zres->state;
         if (s != zres->state) {
-            platform::protect(zres->lo, zres->hi - zres->lo, s == Resident::gpu ? 0 : 1);
+            guard(*zres, s == Resident::gpu ? 0 : 1);
             zres->state = s;
         }
         if (zupload) k.target_uploads++;
+        if (d.depth.write || swrites) written(*zres);
     }
     for (size_t i = 0; i < nt; i++) {
         if (!target[i]) continue;
@@ -1315,8 +1404,9 @@ bool draw(Draw& d, std::string& why) {
             continue;
         }
         if (upload[i]) k.target_uploads++;
+        written(*res[i]);
         if (res[i]->state != Resident::gpu) {  // the memory is now the older: guarded from any touch
-            platform::protect(res[i]->lo, res[i]->hi - res[i]->lo, 0);
+            guard(*res[i], 0);
             res[i]->state = Resident::gpu;
         }
     }
@@ -1514,16 +1604,52 @@ bool dispatch(Dispatch& d, std::string& why) {
     for (Resident* r : used)
         barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, RW, X, C);
     // the memory: older than what was written; the same as what was only taken up and read
-    std::set<Resident*> written(into.begin(), into.end());
+    std::set<Resident*> stored(into.begin(), into.end());
+    for (Resident* r : stored) written(*r);
     for (Resident* r : used) {
-        Resident::State s = written.count(r) ? Resident::gpu : Resident::same;
+        Resident::State s = stored.count(r) ? Resident::gpu : Resident::same;
         if (r->state == s || (r->state == Resident::gpu && s == Resident::same)) continue;
-        platform::protect(r->lo, r->hi - r->lo, s == Resident::gpu ? 0 : 1);
+        guard(*r, s == Resident::gpu ? 0 : 1);
         r->state = s;
     }
     k.dispatches++;
     k.dispatch_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     return true;
+}
+
+bool clear_depth(u64 address, u32 width, u32 height, float value) {
+    std::lock_guard lock(g_lock);
+    struct Inside {
+        Inside() { t_inside = true; }
+        ~Inside() { t_inside = false; }
+    } inside;
+    auto it = g_resident.find(address);
+    if (it == g_resident.end() || !it->second.depth || it->second.width != width || it->second.height != height) return false;
+    Resident& r = it->second;
+    if (r.state == Resident::memory) return false;  // (the memory may be the newer, the stencil's too: cleared there instead)
+    VkCommandBuffer cmd = batch();
+    const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest_access(r) | VK_ACCESS_TRANSFER_READ_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT, rest_stage(r) | T, T, aspect(r));
+    VkClearDepthStencilValue v{value, 0};
+    VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};  // the depth alone (not a stencil beside it)
+    vkCmdClearDepthStencilImage(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_WRITE_BIT, rest_access(r), T, rest_stage(r),
+            aspect(r));
+    if (r.state != Resident::gpu) {  // the image is now the newer
+        guard(r, 0);
+        r.state = Resident::gpu;
+    }
+    k.depth_clears++;
+    written(r);
+    return true;
+}
+
+u64 version(u64 address) {
+    std::lock_guard lock(g_lock);
+    for (auto& [base, r] : g_resident)
+        if (address >= base && address < base + r.bytes) return r.version ? r.version : (r.version = ++g_writes);
+    return 0;
 }
 
 bool kept(u64 address, u64 bytes, u32 bpp) {
@@ -1549,13 +1675,14 @@ bool touched(u64 addr, bool write) {
     t_inside = true;
     bool ours = false;
     for (auto& [base, r] : g_resident) {
-        if (addr < r.lo || addr >= r.hi) continue;
+        if ((addr < r.lo || addr >= r.hi) && (!r.sbase || addr < r.slo || addr >= r.shi)) continue;
         ours = true;
         if (r.state == Resident::gpu && !read_back(r)) {
             ours = false;  // the GPU failed: the fault stands
         } else if (r.state == Resident::same && write) {  // the memory is now the newer
-            platform::protect(r.lo, r.hi - r.lo, 2);
+            guard(r, 2);
             r.state = Resident::memory;
+            written(r);
             k.writes++;
         }
         break;  // (if another thread has dealt with it already, the access is simply tried again)
@@ -1615,6 +1742,8 @@ bool has_texture(const std::string&) { return false; }
 bool barycentric() { return false; }
 bool flush() { return true; }
 bool kept(u64, u64, u32) { return false; }
+bool clear_depth(u64, u32, u32, float) { return false; }
+u64 version(u64) { return 0; }
 bool touched(u64, bool) { return false; }
 bool dispatch(Dispatch&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";

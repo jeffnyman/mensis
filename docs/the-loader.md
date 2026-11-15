@@ -249,15 +249,19 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   game's files hold, are read in the PS4's arrangement, as [the textures](the-textures.md) are
   extracted; surfaces in the macro-tiled modes (render targets, the display) are only ever
   written and read by the GPU, and the loader keeps those in rows instead, the console's
-  arrangement of them not being reproduced; depth buffers too (32-bit floats, or 16-bit). A
-  pixel's depth, its triangle's z interpolated and clamped to the viewport's range, is tested
-  before its pixel shader runs, and written, if the draw writes depth, for the pixels the
-  shader exported (not those it killed). A depth buffer is cleared the console's fast way: each
-  8x8 tile marked cleared in its HTILE buffer, the console reading a cleared tile as the clear
-  value; when every tile is marked so, the loader fills the depth buffer with that value and
-  marks the tiles written. Not done yet: stencil, a depth buffer cleared in part, mip levels
-  past the first, a triangle with a vertex behind the eye, multisampling; the summary counts
-  whatever a run met that wasn't done.
+  arrangement of them not being reproduced; depth buffers too (32-bit floats, or 16-bit), and
+  stencil buffers (8 bits a pixel, beside them). A pixel's depth, its triangle's z
+  interpolated and clamped to the viewport's range, is tested against the depth buffer, and
+  its stencil value against the draw's reference (front and back faces each their own), as
+  Vulkan does it: the pixel shader runs for every pixel covered, colour is written where both
+  tests pass, and for the pixels the shader didn't kill the depth is written (where they
+  passed) and the stencil operation for how they fared is done. A depth buffer is cleared the
+  console's fast way: each 8x8 tile marked cleared in its HTILE buffer, the console reading a
+  cleared tile as the clear value; when every tile is marked so, the loader fills the depth
+  buffer with that value (on the GPU, if it is kept there), once for each time the HTILE
+  buffer is written. Not done yet: a depth buffer cleared in part, mip levels past the first,
+  a triangle with a vertex behind the eye, multisampling; the summary counts whatever a run
+  met that wasn't done.
 * **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel, vertex or compute shader
   becomes GLSL (`shaders/`, beside its disassembly), which the Vulkan SDK's compiler (shaderc) turns into SPIR-V, the form a GPU takes
   through Vulkan. On the console a wave runs 64 pixels in step; on the PC each pixel runs on
@@ -314,8 +318,12 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   depth export, gathers, depth-compare sampling; a shader with any of them says so, and is
   left to the CPU (for a vertex shader, the GPU is given the CPU's vertices instead). A draw
   with depth has its depth buffer kept on the GPU too, as a depth image (its memory brought
-  back and taken up as a render target's is), tested and written as the CPU does it; a pass
-  for depth alone is drawn with no colour target at all.
+  back and taken up as a render target's is), with its stencil buffer if it has one (one
+  image of both, two pieces of memory), tested and written as the CPU does it (a stencil
+  operation Vulkan has no match for leaves the draw to the CPU); a pass for depth or stencil
+  alone is drawn with no colour target at all, an export to a target that isn't there going
+  nowhere. A texture read from kept memory of the same size of texel but laid out another way
+  (the depth buffer's depth, read by the lighting, say) is copied on the GPU through a buffer.
 * **Render targets kept on the GPU.** A render target stays on the GPU from draw to draw, and
   its memory is guarded by the pages' protection: while the GPU's picture is the newer,
   nothing may touch the memory, and once the two are the same, it may be read. Whatever
@@ -696,6 +704,22 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     face came right, eyes and hair and all. The check (`--gpu-check`, through character
     creation) has 33 draws of 56 the same as the CPU's in every pixel, as before. Stencil is
     next: the game's lighting passes test it, and draw everywhere without it.
+40. **Stencil.** Each depth buffer has an 8-bit stencil buffer beside it, which the game
+    marks as it draws the character and tests in later passes. It is now tested and its
+    operations done (keep, zero, replace, increment and decrement, invert, and the others),
+    on the CPU and on the GPU, where the depth and stencil buffers are one image of both,
+    kept as two pieces of memory. With it the panel of starting stats came right: the heap of
+    icons where its numbers should be was the panel's art drawn everywhere a stencil test
+    would have kept it out of; now it reads Level 10, Blood Echoes 300, Vitality 11, and so
+    on. Then the cost: the fast clear filled each depth buffer from the CPU, each frame,
+    bringing it back from the GPU and taking it up again; it is cleared on the GPU now, and
+    the HTILE buffer is no longer written, only looked at when it changes. A texture reading
+    the depth buffer (the lighting does) or other memory kept in another layout is copied on
+    the GPU through a buffer rather than brought back. Character creation runs at about 6.2
+    frames a second. The check (`--gpu-check`, through character creation) has 37 draws
+    of 60 the same as the CPU's in every pixel (more draws compared than before: passes for
+    stencil alone are drawn now), the lighting's stencil-tested passes among them, drawn
+    into some 8,000 pixels each rather than all 614,656.
 
 ## Files
 

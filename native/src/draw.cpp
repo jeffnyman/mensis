@@ -15,13 +15,15 @@
 // wave; a group's waves share 64 KiB of local memory (LDS) and wait for each other at
 // s_barrier.
 //
-// Depth: a pixel's depth (its triangle's z, interpolated, clamped to the viewport's range) is
-// tested against the depth buffer before its pixel shader runs, and written, if the draw
-// writes depth, for the pixels the shader exported (not those it killed). The depth buffer is
-// 32-bit floats or 16-bit unorm, in rows, as the loader keeps targets.
+// Depth and stencil: a pixel's depth (its triangle's z, interpolated, clamped to the viewport's
+// range) is tested against the depth buffer, and its stencil value (8 bits, in a buffer of its
+// own) against the draw's reference, as Vulkan does it: the pixel shader runs for every pixel
+// covered, colour is written for those that passed both, and for those the shader didn't kill
+// depth is written (if they passed) and the stencil operation for how they fared is done. The
+// depth buffer is 32-bit floats or 16-bit unorm, in rows, as the loader keeps targets.
 //
-// Not done yet: stencil, depth exported by a shader, clipping to the near plane (a triangle
-// with a vertex behind the eye is skipped), multisampling, mip levels past the first.
+// Not done yet: depth exported by a shader, clipping to the near plane (a triangle with a vertex
+// behind the eye is skipped), multisampling, mip levels past the first.
 //
 // Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
 // translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp), into its render
@@ -186,6 +188,65 @@ struct DepthBuffer {
     u32 func = 7, format = 0, bpp = 4, pitch = 0, height = 0;
     u64 base = 0;
     float zmin = 0, zmax = 1;
+    // The stencil buffer (8 bits a pixel, the depth buffer's size, at sbase), and each face's
+    // test and operations: DB_DEPTH_CONTROL (0x200: on, back faces their own, the compares),
+    // DB_STENCIL_CONTROL (0x10b: on failing the stencil test, passing both, failing the depth
+    // test; front, then back), DB_STENCILREFMASK and _BF (0x10c, 0x10d: the reference, the
+    // compare mask, the write mask, the operations' value)
+    bool stencil = false;  // the test on
+    bool has_stencil = false;  // a stencil buffer there (tested or not)
+    u64 sbase = 0;
+    struct Face {
+        u32 func = 7, fail = 0, zpass = 0, zfail = 0, ref = 0, mask = 255, wmask = 255, opval = 0;
+    } front, back;
+    bool any() const { return test || stencil; }
+    // whether any stencil operation writes anything
+    bool stencil_writes() const {
+        auto w = [](const Face& f) { return f.wmask && (f.fail || f.zpass || f.zfail); };
+        return stencil && (w(front) || w(back));
+    }
+    bool stencil_pass(int x, int y, bool is_front) const {
+        const Face& f = is_front ? front : back;
+        u32 v = *reinterpret_cast<const unsigned char*>(sbase + u64(y) * pitch + u64(x));
+        return compare_with(f.func, float(f.ref & f.mask), float(v & f.mask));
+    }
+    // outcome: 0 passed both, 1 failed the depth test, 2 failed the stencil test
+    void stencil_op(int x, int y, bool is_front, int outcome) const {
+        const Face& f = is_front ? front : back;
+        auto* p = reinterpret_cast<unsigned char*>(sbase + u64(y) * pitch + u64(x));
+        u32 v = *p, op = outcome == 2 ? f.fail : outcome == 1 ? f.zfail : f.zpass, n = v;
+        switch (op) {
+            case 0: n = v; break;
+            case 1: n = 0; break;
+            case 2: n = 255; break;
+            case 3: n = f.ref; break;
+            case 4: n = f.opval; break;
+            case 5: n = std::min(v + f.opval, 255u); break;
+            case 6: n = v > f.opval ? v - f.opval : 0; break;
+            case 7: n = ~v; break;
+            case 8: n = v + f.opval; break;
+            case 9: n = v - f.opval; break;
+            case 10: n = v & f.opval; break;
+            case 11: n = v | f.opval; break;
+            case 12: n = v ^ f.opval; break;
+            case 13: n = ~(v & f.opval); break;
+            case 14: n = ~(v | f.opval); break;
+            default: n = ~(v ^ f.opval); break;
+        }
+        *p = static_cast<unsigned char>(((v & ~f.wmask) | (n & f.wmask)) & 255);
+    }
+    static bool compare_with(u32 fn, float a, float b) {
+        switch (fn) {
+            case 0: return false;
+            case 1: return a < b;
+            case 2: return a == b;
+            case 3: return a <= b;
+            case 4: return a > b;
+            case 5: return a != b;
+            case 6: return a >= b;
+            default: return true;
+        }
+    }
     u64 at(int x, int y) const { return base + (u64(y) * pitch + u64(x)) * bpp; }
     // Whether a pixel's depth passes, and its value as stored
     bool pass(float z, int x, int y, u32& stored) const {
@@ -201,26 +262,15 @@ struct DepthBuffer {
         stored = u32(std::nearbyint(std::clamp(z, 0.0f, 1.0f) * 65535.0f));
         return compare(float(stored), float(old));
     }
-    bool compare(float a, float b) const {
-        switch (func) {
-            case 0: return false;
-            case 1: return a < b;
-            case 2: return a == b;
-            case 3: return a <= b;
-            case 4: return a > b;
-            case 5: return a != b;
-            case 6: return a >= b;
-            default: return true;
-        }
-    }
+    bool compare(float a, float b) const { return compare_with(func, a, b); }
     void store(int x, int y, u32 v) const { std::memcpy(reinterpret_cast<void*>(at(x, y)), &v, bpp); }
 };
 
 DepthBuffer depth_buffer(const GpuRegs& r, const Memory& mem) {
     DepthBuffer d;
     u32 ctl = reg(r, 0x200, 0), info = reg(r, 0x010, 0), format = info & 3;
-    if (ctl & 1) note("draws with a stencil test (drawn without it)");
-    if (!((ctl >> 1) & 1) || (format != 1 && format != 3)) return d;
+    bool z = (ctl >> 1) & 1, s = ctl & 1;
+    if ((!z && !s) || (format != 1 && format != 3)) return d;
     u64 read = u64(reg(r, 0x012, 0)) << 8, write = u64(reg(r, 0x014, 0)) << 8;
     if (read != write) {
         note("depth buffers read from one place and written to another (drawn without depth)");
@@ -236,26 +286,55 @@ DepthBuffer depth_buffer(const GpuRegs& r, const Memory& mem) {
         note("depth buffers outside the GPU's memory (drawn without depth)");
         return d;
     }
-    d.test = true;
-    d.write = (ctl >> 2) & 1;
+    d.test = z;
+    d.write = z && ((ctl >> 2) & 1);
     d.func = (ctl >> 4) & 7;
     d.zmin = regf(r, 0x0b4, 0);
     d.zmax = regf(r, 0x0b5, 1);
+    u64 sread = u64(reg(r, 0x013, 0)) << 8, swrite = u64(reg(r, 0x015, 0)) << 8;
+    d.sbase = sread + u64(reg(r, 0x002, 0) & 0x7ff) * d.pitch * d.height;
+    d.has_stencil = (reg(r, 0x011, 0) & 1) && sread && sread == swrite && mem.ok(d.sbase, u64(d.pitch) * d.height);
+    if (s) {
+        if (!d.has_stencil) {
+            note("stencil buffers not 8 bits, not read and written at one place, or outside the GPU's memory (drawn without stencil)");
+        } else {
+            d.stencil = true;
+            u32 sc = reg(r, 0x10b, 0), rm = reg(r, 0x10c, 0), rmb = reg(r, 0x10d, 0);
+            auto face = [&](u32 func, u32 ops, u32 refmask) {
+                return DepthBuffer::Face{func, ops & 15, (ops >> 4) & 15, (ops >> 8) & 15, refmask & 255, (refmask >> 8) & 255, (refmask >> 16) & 255,
+                            (refmask >> 24) & 255};
+            };
+            d.front = face((ctl >> 8) & 7, sc, rm);
+            d.back = (ctl >> 7) & 1 ? face((ctl >> 20) & 7, sc >> 12, rmb) : d.front;
+        }
+    }
+    if (!d.test && !d.stencil) return DepthBuffer{};
     return d;
 }
+
+u64 hash_memory(const unsigned char* p, u64 n);
 
 // A depth buffer's fast clear. With HTILE on (DB_Z_INFO bit 29), a clear only marks each 8x8
 // tile cleared in the HTILE buffer (DB_HTILE_DATA_BASE, 0x005: a 32-bit word a tile, its low 4
 // bits, the z mask, 0), and the console reads a cleared tile as DB_DEPTH_CLEAR (0x00b). Here,
-// when every tile is marked cleared, the depth buffer's memory is filled with that value and
-// the tiles marked written (z mask 15), as the console's would be once drawn into. Some tiles
-// cleared and some not would need the HTILE buffer's own layout: not done yet.
+// when every tile is marked cleared, the depth buffer is filled with that value (on the GPU,
+// if it is kept there), once for each time the HTILE buffer is written: what it held then is
+// remembered (its version on the GPU, or a hash of its memory), and until it changes, it has
+// been seen to. Some tiles cleared and some not would need the HTILE buffer's own layout: not
+// done yet.
+std::map<u64, u64> g_htile_seen;  // an HTILE buffer's address: what it held when last seen to
+
 void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
-    if (!db.test || !((reg(r, 0x010, 0) >> 29) & 1)) return;
+    if (!db.any() || !((reg(r, 0x010, 0) >> 29) & 1)) return;
     u64 h = u64(reg(r, 0x005, 0)) << 8;
     u64 tiles = u64(db.pitch / 8) * (db.height / 8);
     if (!h || !mem.ok(h, tiles * 4)) return;
-    auto* w = reinterpret_cast<u32*>(h);
+    u64 v = M.gpu ? vkdraw::version(h) : 0;
+    u64 stamp = v ? v << 1 : hash_memory(reinterpret_cast<const unsigned char*>(h), tiles * 4) | 1;
+    u64& seen = g_htile_seen[h ^ db.base];
+    if (seen == stamp) return;
+    seen = stamp;
+    const auto* w = reinterpret_cast<const u32*>(h);
     u64 cleared = 0;
     for (u64 i = 0; i < tiles; i++) cleared += (w[i] & 15) == 0;
     if (!cleared) return;
@@ -265,14 +344,14 @@ void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
     }
     float clear = regf(r, 0x00b, 1);
     u64 n = u64(db.pitch) * db.height;
-    if (db.format == 3) {
+    if (M.gpu && vkdraw::clear_depth(db.base, db.pitch, db.height, clear)) {  // kept on the GPU: cleared there
+    } else if (db.format == 3) {
         std::vector<float> v(n, clear);
         std::memcpy(reinterpret_cast<void*>(db.base), v.data(), n * 4);
     } else {
         std::vector<std::uint16_t> v(n, std::uint16_t(std::nearbyint(std::clamp(clear, 0.0f, 1.0f) * 65535.0f)));
         std::memcpy(reinterpret_cast<void*>(db.base), v.data(), n * 2);
     }
-    for (u64 i = 0; i < tiles; i++) w[i] |= 15;
     g_depth_clears++;
 }
 
@@ -356,7 +435,7 @@ struct PsIo : Io {
     }
 
     void exp(u32 target, const Vec* const regs[4], bool compr, u64 lanes) override {
-        exported |= lanes & cover;
+        exported |= lanes;
         if (target > 7) return;  // mrtz (depth), null
         const Target& t = targets[target];
         if (!t.count) return;
@@ -659,11 +738,13 @@ u32 vk_format(u32 format, u32 nfmt, u32 swap, u32& bpp) {
     bpp = 4;
     if (format == 10 && (nfmt == 0 || nfmt == 9) && swap <= 1) return swap == 0 ? (nfmt == 9 ? 43 : 37) : (nfmt == 9 ? 50 : 44);
     if (swap != 0 || nfmt != 7) return 0;
+    if (format == 4) return 100;  // R32_SFLOAT
     if (format == 5) return 83;  // R16G16_SFLOAT
     if (format == 6) return 122;  // B10G11R11_UFLOAT_PACK32
     if (format == 12) return bpp = 8, 97;  // R16G16B16A16_SFLOAT
     return 0;
 }
+// (a texture of 32-bit floats too: a depth buffer, read as one)
 
 bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const GpuRegs& r, u64 vs, u64 ps,
                const Vertices& out, const std::vector<Tri>& tris, const std::vector<u32>& index,
@@ -695,7 +776,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     }
     DepthBuffer db = depth_buffer(r, mem);
     Target depth_only;  // a draw of depth alone: its size is the depth buffer's
-    if (!first && db.write) {
+    if (!first && (db.write || db.stencil_writes())) {
         depth_only.pitch = db.pitch;
         depth_only.height = db.height;
         first = &depth_only;
@@ -727,6 +808,11 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
     st.col_format = reg(r, 0x1c5, 0);
     st.barycentric = vkdraw::barycentric();
+    st.targets = 0;
+    for (u32 k = 0; k < 8; k++) {
+        u32 bpp;
+        if (targets[k].count && targets[k].mask && vk_format(targets[k].format, targets[k].nfmt, targets[k].swap, bpp)) st.targets |= 1u << k;
+    }
     // the buffer loads': those of the same descriptor, offset and format share a buffer
     std::vector<translate::Values::Buffer> ps_buffers;
     for (const auto& b : vals.buffers) {
@@ -777,13 +863,57 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         }
         d.targets.push_back(dt);
     }
-    while (!d.targets.empty() && !d.targets.back().format) d.targets.pop_back();
-    if (d.targets.empty() && !db.write) {
+    // (a place for every output the shader writes, empty where nothing is written there)
+    while (!d.targets.empty() && !d.targets.back().format && !((gl.outputs >> (d.targets.size() - 1)) & 1)) d.targets.pop_back();
+    bool none = true;
+    for (auto& dt : d.targets) none = none && !dt.format;
+    if (none && !db.write && !db.stencil_writes()) {
         why = "no render target exported to";
         return false;
     }
-    if (db.test) {
+    if (db.any()) {
         d.depth.format = db.format == 3 ? 126 : 124;  // D32_SFLOAT, D16_UNORM
+        d.depth.test = db.test;
+        if (db.has_stencil) {  // (the stencil buffer is kept with the depth buffer, tested or not)
+            if (db.format != 3) {
+                why = "stencil with 16-bit depth";
+                return false;
+            }
+            d.depth.format = 130;  // D32_SFLOAT_S8_UINT
+            d.depth.stencil = true;
+            d.depth.stencil_test = db.stencil;
+            d.depth.saddress = db.sbase;
+        }
+        if (db.stencil) {
+            auto face = [&](const DepthBuffer::Face& f, vkdraw::Draw::Depth::Face& v) {
+                // the console's operations as Vulkan's: those Vulkan has (with the one value it
+                // has for the test and the operations, the reference); else not on the GPU
+                auto op = [&](u32 o, u32& out) {
+                    u32 w = f.wmask;
+                    switch (o) {
+                        case 0: out = 0; return true;  // KEEP
+                        case 1: out = 1; return true;  // ZERO
+                        case 3: out = 2; return true;  // REPLACE
+                        case 7: out = 5; return true;  // INVERT
+                        case 2: if (((f.ref ^ 255) & w) == 0) return out = 2, true; break;
+                        case 4:
+                            if ((f.opval & w) == 0) return out = 1, true;
+                            if (((f.opval ^ f.ref) & w) == 0) return out = 2, true;
+                            break;
+                        case 5: if (f.opval == 1) return out = 3, true; break;  // INCREMENT_AND_CLAMP
+                        case 6: if (f.opval == 1) return out = 4, true; break;  // DECREMENT_AND_CLAMP
+                        case 8: if (f.opval == 1) return out = 6, true; break;  // INCREMENT_AND_WRAP
+                        case 9: if (f.opval == 1) return out = 7, true; break;  // DECREMENT_AND_WRAP
+                        default: break;
+                    }
+                    why = std::format("stencil operation {} (value {:#x})", o, f.opval);
+                    return false;
+                };
+                v.func = f.func, v.cmask = f.mask, v.wmask = f.wmask, v.ref = f.ref;
+                return op(f.fail, v.fail) && op(f.zpass, v.pass) && op(f.zfail, v.zfail);
+            };
+            if (!face(db.front, d.depth.front) || !face(db.back, d.depth.back)) return false;
+        }
         d.depth.bpp = db.bpp;
         d.depth.width = db.pitch;
         d.depth.height = db.height;
@@ -898,6 +1028,12 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
 // are, so that two values a step apart in it differ by 1: 8-bit RGBA, 16-bit floats (two or
 // four; their sign bit folded in), 11- and 10-bit floats
 int channels(u32 format, const unsigned char* p, int out[4]) {
+    if (format == 100) {  // a 32-bit float: steps of it (a whole number's range, as far as it goes)
+        std::int32_t v;
+        std::memcpy(&v, p, 4);
+        out[0] = v < 0 ? -(v & 0x7fffffff) : v;
+        return 1;
+    }
     if (format == 83 || format == 97) {
         int n = format == 83 ? 2 : 4;
         for (int c = 0; c < n; c++) {
@@ -943,7 +1079,7 @@ std::string compare(u64 number, const vkdraw::Draw& d, const std::vector<std::ve
                 changed += std::memcmp(&before[k][at], &result[k][at], bpp) != 0;
                 most = std::max(most, m);
             }
-        if (saved || bpp != 4 || dt.format == 83 || dt.format == 122) continue;
+        if (saved || bpp != 4 || dt.format == 83 || dt.format == 122 || dt.format == 100) continue;
         saved = true;
         u32 w = std::min({d.width, u32(clip[2]), 4096u}), h = std::min({d.height, u32(clip[3]), 4096u});
         std::vector<unsigned char> px(size_t(w) * h * 4);
@@ -1031,7 +1167,8 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     bool masked = true;  // every channel of every target masked off (a pass for depth alone)
     for (auto& t : targets) masked = masked && (!t.count || !t.mask);
     DepthBuffer db = depth_buffer(r, mem);
-    if ((!any || mode == 0 || masked) && !db.write) return std::format("{} vertices (no colour or depth written)", count);
+    if ((!any || mode == 0 || masked) && !db.write && !db.stencil_writes())
+        return std::format("{} vertices (no colour, depth or stencil written)", count);
     expand_htile(r, mem, db);
     if (mode == 0)  // colour off: depth alone
         for (auto& t : targets) t.count = 0;
@@ -1054,7 +1191,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     if (reg(r, 0x292, 0) & 2) clip(reg(r, 0x94, 0), reg(r, 0x95, 0x40004000));  // viewport 0's
     for (auto& t : targets)
         if (t.count && t.mask && mode == 1) x1 = std::min(x1, int(t.pitch)), y1 = std::min(y1, int(t.height));
-    if (db.test) x1 = std::min(x1, int(db.pitch)), y1 = std::min(y1, int(db.height));
+    if (db.any()) x1 = std::min(x1, int(db.pitch)), y1 = std::min(y1, int(db.height));
     u32 ps_user = (r.sh[0x0b] >> 1) & 0x1f;
     u32 ena = reg(r, 0x1b3, 0), addr = reg(r, 0x1b4, 0);
     if (!addr) addr = ena;
@@ -1063,7 +1200,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     vkdraw::Draw check;
     std::string check_why, vertex_why;
     std::vector<std::vector<unsigned char>> before, result;  // each target's
-    std::vector<unsigned char> zbefore;  // the depth buffer's
+    std::vector<unsigned char> zbefore, sbefore;  // the depth buffer's, the stencil buffer's
     bool checked = false;
     // the draws saved to draws/: their number and a line in the index, once drawn
     auto saved = [&](std::string what, const std::string& extra) {
@@ -1200,6 +1337,12 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 zbefore.assign(z, z + size_t(check.depth.width) * check.depth.height * check.depth.bpp);
                 check.depth.target = zbefore.data();
                 check.depth.address = 0;
+                if (check.depth.stencil) {
+                    const auto* s = reinterpret_cast<const unsigned char*>(check.depth.saddress);
+                    sbefore.assign(s, s + size_t(check.depth.width) * check.depth.height);
+                    check.depth.starget = sbefore.data();
+                    check.depth.saddress = 0;
+                }
             }
             checked = vkdraw::run(check, check_why);
         }
@@ -1266,31 +1409,44 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 }
                 vg += u32(sizes[bit]);
             }
-            // the depth test, before the shader (each pixel's depth kept to be written after)
+            // the depth and stencil tests, worked out first (each pixel's depth kept); colour only
+            // for those that pass both
             u32 zbits[LANES];
-            if (db.test) {
+            int outcome[LANES] = {};  // 0 passed, 1 failed the depth test, 2 the stencil test
+            u64 covered = io.cover;
+            if (db.any()) {
                 for (int l = 0; l < LANES; l++) {
-                    if (!((io.cover >> l) & 1)) continue;
-                    float cx = float(io.px[l]) + 0.5f, cy = float(io.py[l]) + 0.5f;
-                    float a = ((t.x[2] - t.x[1]) * (cy - t.y[1]) - (t.y[2] - t.y[1]) * (cx - t.x[1])) / t.area;
-                    float b = ((t.x[0] - t.x[2]) * (cy - t.y[2]) - (t.y[0] - t.y[2]) * (cx - t.x[2])) / t.area;
-                    float z = std::clamp(a * t.z[0] + b * t.z[1] + (1 - a - b) * t.z[2], db.zmin, db.zmax);
-                    if (!db.pass(z, io.px[l], io.py[l], zbits[l])) io.cover &= ~(1ull << l);
+                    if (!((covered >> l) & 1)) continue;
+                    bool zpass = true;
+                    if (db.test) {
+                        float cx = float(io.px[l]) + 0.5f, cy = float(io.py[l]) + 0.5f;
+                        float a = ((t.x[2] - t.x[1]) * (cy - t.y[1]) - (t.y[2] - t.y[1]) * (cx - t.x[1])) / t.area;
+                        float b = ((t.x[0] - t.x[2]) * (cy - t.y[2]) - (t.y[0] - t.y[2]) * (cx - t.x[2])) / t.area;
+                        float z = std::clamp(a * t.z[0] + b * t.z[1] + (1 - a - b) * t.z[2], db.zmin, db.zmax);
+                        zpass = db.pass(z, io.px[l], io.py[l], zbits[l]);
+                    }
+                    bool spass = !db.stencil || db.stencil_pass(io.px[l], io.py[l], t.front);
+                    outcome[l] = !spass ? 2 : !zpass ? 1 : 0;
+                    if (outcome[l]) io.cover &= ~(1ull << l);
                 }
-                if (!io.cover) {
+                if (!io.cover && !db.stencil) {  // nothing to write, nor a stencil operation to do
                     lanes = 0;
+                    io.cover = 0;
                     return;
                 }
             }
             for (u32 k = 0; k < ps_user && k < 16; k++) w.s[k] = r.sh[0x0c + k];
             w.s[ps_user] = 0;  // the primitive mask
-            w.set_exec(io.cover);
+            w.set_exec(covered);  // every pixel covered runs (whether it is killed decides the stencil's operation)
             io.tri = &t;
             io.exported = 0;
             run(w, ps, io, mem);
-            if (db.write)
-                for (int l = 0; l < LANES; l++)
-                    if ((io.exported >> l) & 1) db.store(io.px[l], io.py[l], zbits[l]);
+            if (db.any())
+                for (int l = 0; l < LANES; l++) {
+                    if (!((io.exported & covered) >> l & 1)) continue;
+                    if (db.stencil) db.stencil_op(io.px[l], io.py[l], t.front, outcome[l]);
+                    if (db.write && outcome[l] == 0) db.store(io.px[l], io.py[l], zbits[l]);
+                }
             pixels += u64(std::popcount(io.cover));
             waves++;
             lanes = 0;
