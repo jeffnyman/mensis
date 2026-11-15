@@ -5,7 +5,10 @@
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
 //                   [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...
-//                   [--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N]
+//                   [--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N] [--name TEXT]
+//
+// --name is what the player types when the game opens the system's keyboard (a name for the
+// character): "Hunter" if not given.
 //
 // --snapshots N saves the screen every N frames (flips), at half size, to <out>/frames/, so a
 // long run shows where the game was when.
@@ -183,9 +186,8 @@ void load_elf(const std::string& path) {
 }
 
 // mov r11d, index; movabs rax, mensis_import_common; jmp rax
-void write_thunk(u64 at, u32 index) {
+void write_thunk(u64 at, u32 index, u64 target = reinterpret_cast<u64>(&mensis_import_common)) {
     auto* p = reinterpret_cast<unsigned char*>(at);
-    u64 target = reinterpret_cast<u64>(&mensis_import_common);
     p[0] = 0x41, p[1] = 0xBB;
     std::memcpy(p + 2, &index, 4);
     p[6] = 0x48, p[7] = 0xB8;
@@ -202,7 +204,12 @@ void patch_imports() {
     platform::commit(M.thunks, size);
     for (u64 i = 0; i < n; i++) {
         u64 thunk = M.thunks + i * THUNK_SIZE, stub = M.imports[i].stub;
-        write_thunk(thunk, u32(i));
+        // setjmp and longjmp work on the caller's registers: straight to their own code
+        const std::string& name = M.imports[i].name;
+        u64 target = name == "setjmp" || name == "_setjmp"     ? reinterpret_cast<u64>(&mensis_setjmp)
+                     : name == "longjmp" || name == "_longjmp" ? reinterpret_cast<u64>(&mensis_longjmp)
+                                                               : reinterpret_cast<u64>(&mensis_import_common);
+        write_thunk(thunk, u32(i), target);
         auto* s = reinterpret_cast<unsigned char*>(stub);
         auto rel = std::int32_t(i64(thunk) - i64(stub + 5));
         s[0] = 0xE9;
@@ -566,6 +573,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--app0" && i + 1 < argc) {
             M.app0.push_back(argv[++i]);
+        } else if (a == "--name" && i + 1 < argc) {
+            M.name = argv[++i];
         } else if (a == "--snapshots" && i + 1 < argc) {
             M.snapshots = std::stoull(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
@@ -582,7 +591,7 @@ int main(int argc, char** argv) {
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
                      "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]... "
-                     "[--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N]\n";
+                     "[--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N] [--name TEXT]\n";
         return 2;
     }
     M.out_dir = pos[2];

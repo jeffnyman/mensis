@@ -1133,6 +1133,14 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     g_draws++;
     u64 vs = program(r, 0x48), ps = program(r, 0x08);
     if (!vs) return "(no vertex shader)";
+    // tessellation (a hull shader) or a geometry shader on: the program in the vertex shader's
+    // place is then the domain shader, or the geometry shader's copy shader. Not done yet.
+    u32 stages = reg(r, 0x2d5, 0);  // VGT_SHADER_STAGES_EN
+    if (stages & 0x24) {
+        const char* what = stages & 4 ? (stages & 0x20 ? "tessellation and a geometry shader" : "tessellation") : "a geometry shader";
+        note(std::format("draws with {}", what));
+        return std::format("({}: not drawn)", what);
+    }
     Memory mem;
     mem.snapshot();
     u32 type = r.uc[0x242];

@@ -144,3 +144,43 @@ mensis_game_returned:
     pop rbp
     pop rbx
     ret
+
+# setjmp and longjmp, which the game calls itself (System V), straight from their stubs, not
+# through mensis_dispatch: they work on the caller's own registers and stack. The jmp_buf
+# (FreeBSD's, twelve eight-byte slots): 0 the return address, 1 rbx, 2 rsp (after the return),
+# 3 rbp, 4 r12, 5 r13, 6 r14, 7 r15, 8 the x87 control word and MXCSR.
+    .globl mensis_setjmp
+mensis_setjmp:
+    mov rax, [rsp]
+    mov [rdi], rax
+    mov [rdi + 8], rbx
+    lea rax, [rsp + 8]
+    mov [rdi + 16], rax
+    mov [rdi + 24], rbp
+    mov [rdi + 32], r12
+    mov [rdi + 40], r13
+    mov [rdi + 48], r14
+    mov [rdi + 56], r15
+    fnstcw [rdi + 64]
+    stmxcsr [rdi + 68]
+    xor eax, eax
+    ret
+
+# longjmp(buf, value): back to where setjmp was called, which returns value (1 if it is 0)
+    .globl mensis_longjmp
+mensis_longjmp:
+    mov eax, esi
+    test eax, eax
+    jnz 2f
+    mov eax, 1
+2:
+    mov rbx, [rdi + 8]
+    mov rsp, [rdi + 16]
+    mov rbp, [rdi + 24]
+    mov r12, [rdi + 32]
+    mov r13, [rdi + 40]
+    mov r14, [rdi + 48]
+    mov r15, [rdi + 56]
+    fldcw [rdi + 64]
+    ldmxcsr [rdi + 68]
+    jmp qword ptr [rdi]

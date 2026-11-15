@@ -168,6 +168,7 @@ struct Machine {
     std::string out_dir;
     std::vector<std::string> app0;  // the folders /app0/ is read from, first match wins
     std::vector<std::pair<u64, u32>> presses;  // --press: from which flip, which buttons (pad.cpp)
+    std::string name = "Hunter";  // --name: what the player types when the game asks (dialogs.cpp)
     std::chrono::steady_clock::time_point t0;
     Fault fault;  // the first fault, if a fault stopped the run
 };
@@ -190,6 +191,7 @@ void add_audio_standins(std::unordered_map<std::string, Standin>& t);  // audio.
 void add_video_standins(std::unordered_map<std::string, Standin>& t);  // video.cpp
 void add_pad_standins(std::unordered_map<std::string, Standin>& t);  // pad.cpp
 void add_savedata_standins(std::unordered_map<std::string, Standin>& t);  // savedata.cpp
+void add_dialog_standins(std::unordered_map<std::string, Standin>& t);  // dialogs.cpp
 // The folder a save data mount point ("savedata0", ...) stands for, and whether it may be
 // written; empty if nothing is mounted there (savedata.cpp)
 std::string savedata_folder(const std::string& point, bool& writable);
@@ -283,4 +285,7 @@ void mensis_import_common();
 mensis::u64 mensis_enter_game(mensis::EnterArgs* a);
 [[noreturn]] void mensis_restore(mensis::u64 saved_rsp);
 void mensis_game_returned();
+// setjmp and longjmp, as the game calls them (System V): its stubs jump straight here
+int mensis_setjmp(void* buf);
+[[noreturn]] void mensis_longjmp(void* buf, int value);
 }

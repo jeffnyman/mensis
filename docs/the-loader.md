@@ -155,6 +155,13 @@ shows where a long run was when, and so when to press what. These presses, with 
 --press 1000:down,1060:circle,1400:circle,1500:circle,1650:circle,1750:down,1800:circle,1900:down,1915:down,1930:down,1945:down,1960:down,1975:down,2000:circle
 ```
 
+and `,2100:circle,2150:up,2190:circle,2240:left,2270:circle` added (`--seconds 500`) name
+the character (the system's keyboard isn't shown: what the player types is `--name`,
+"Hunter" if not given), choose Finish, and answer YES to "Finalize contract?". The game
+then saves the character; from then on the main menu starts at "Continue", and
+`--press 1000:down,1060:circle,1400:circle,1500:circle,1650:circle,1800:circle` goes
+straight to loading the game where it was left. (Delete `files/savedata` to start over.)
+
 The game's own files (`/app0/`) are read from `work/update`, then `work/base`: the 1.09
 update's files over the base game's, as [the package](the-package.md) extracts them. Run from
 the repository's root, or name the folders with `--app0` (more than once, first match wins).
@@ -720,6 +727,23 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     of 60 the same as the CPU's in every pixel (more draws compared than before: passes for
     stencil alone are drawn now), the lighting's stencil-tested passes among them, drawn
     into some 8,000 pixels each rather than all 614,656.
+41. **Into the game.** Naming the character opens the system's on-screen keyboard
+    (libSceImeDialog, titled "Please Enter Name", 16 characters at most); the loader has no
+    keyboard to show, so the dialog finishes at once, the name (`--name`) written into the
+    game's buffer. Choosing YES to "Finalize contract?" then crashed: the game calls
+    `setjmp` and `longjmp` (the error handling of its scripts, likely), which work on the
+    caller's own registers and stack, so they can't go through the loader's usual way into
+    a stand-in; their stubs now jump straight to small pieces of assembly that save and
+    restore those registers. The character is saved, and the game goes on to load its first
+    real scene, showing an item's description while it loads. That scene is the first to
+    use tessellation and geometry shaders: the driver calls that set those stages
+    (`sceGnmSetLsShader`, `HsShader`, `EsShader`, `GsShader`) had no stand-ins, so the space
+    the game kept for them in its command buffers held leftovers, which the GPU read as
+    commands until it waited forever on one. They now write the stages' programs and fill
+    the rest; draws that use those stages aren't drawn yet. The scene loads, slowly (the
+    draws took 436 s of a 500-second run), and the summary lists what it needs: triangles
+    with a vertex behind the eye (35 million skipped), LDS in vertex and pixel shaders,
+    depth-compare sampling, BC6 textures, mip levels, and tessellation.
 
 ## Files
 

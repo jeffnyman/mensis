@@ -132,6 +132,35 @@ i64 set_vs_shader(const u64* a, std::string& note) {
     return 0;
 }
 
+// The stages before the vertex shader's place, for tessellation (LS, the vertex shader then;
+// HS, the hull shader) and geometry shaders (ES, the vertex shader then; GS): (cmd, dwords,
+// the stage's registers, ...). Each stage's structure starts as the others do (the program's
+// address, its two resource words); what follows (tessellation's levels, the geometry
+// shader's rings) isn't written yet: the draws that use these stages aren't drawn.
+i64 set_stage(const u64* a, std::string& note, u32 base, bool modifier) {
+    const u32* r = reinterpret_cast<const u32*>(a[2]);
+    if (!a[0] || u32(a[1]) < 8) return -1;
+    Writer w(a[0], u32(a[1]));
+    if (r) {
+        u32 m = modifier ? u32(a[3]) : 0;
+        u32 rsrc1 = m ? (r[2] & 0xfcfffc3fu) | m : r[2];
+        w.regs(SET_SH_REG, base, {r[0], r[1]});  // SPI_SHADER_PGM_LO, HI
+        w.regs(SET_SH_REG, base + 2, {rsrc1, r[3]});  // SPI_SHADER_PGM_RSRC1, RSRC2
+        note = std::format("program at {:#x}", u64(r[0]) << 8 | u64(r[1]) << 40);
+    }
+    w.fill();
+    return 0;
+}
+
+// sceGnmSetLsShader(cmd, dwords, LsStageRegisters*, modifier)
+i64 set_ls_shader(const u64* a, std::string& note) { return set_stage(a, note, 0x148, true); }
+// sceGnmSetHsShader(cmd, dwords, HsStageRegisters*, ...)
+i64 set_hs_shader(const u64* a, std::string& note) { return set_stage(a, note, 0x108, false); }
+// sceGnmSetEsShader(cmd, dwords, EsStageRegisters*, modifier)
+i64 set_es_shader(const u64* a, std::string& note) { return set_stage(a, note, 0xc8, true); }
+// sceGnmSetGsShader(cmd, dwords, GsStageRegisters*)
+i64 set_gs_shader(const u64* a, std::string& note) { return set_stage(a, note, 0x88, false); }
+
 // sceGnmSetPsShader(cmd, dwords, PsStageRegisters*): null means no pixel shader
 i64 set_ps_shader(const u64* a, std::string& note) {
     const u32* r = reinterpret_cast<const u32*>(a[2]);
@@ -223,6 +252,10 @@ void add_gnm_standins(std::unordered_map<std::string, Standin>& t) {
         {"sceGnmSetVsShader", set_vs_shader},
         {"sceGnmSetPsShader", set_ps_shader},
         {"sceGnmSetCsShader", set_cs_shader},
+        {"sceGnmSetLsShader", set_ls_shader},
+        {"sceGnmSetHsShader", set_hs_shader},
+        {"sceGnmSetEsShader", set_es_shader},
+        {"sceGnmSetGsShader", set_gs_shader},
         {"sceGnmInsertPushMarker", push_marker},
         {"sceGnmInsertPopMarker", pop_marker},
         {"sceGnmSubmitCommandBuffers", submit},
