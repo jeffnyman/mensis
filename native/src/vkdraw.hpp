@@ -61,6 +61,17 @@ struct Draw {
         u32 blend = 0, mask = 15;  // CB_BLENDn_CONTROL, and which of R, G, B, A are written
     };
     std::vector<Target> targets;
+    // The depth buffer, if there is one (format 0: none): D16_UNORM or D32_SFLOAT, its size, in
+    // rows in the game's memory (kept on the GPU), or for --gpu-check read from `target`
+    // (not written back); tested with `func` (a VkCompareOp: the console's numbering), and
+    // written if `write`
+    struct Depth {
+        u32 format = 0, bpp = 4, width = 0, height = 0;
+        u64 address = 0;
+        const unsigned char* target = nullptr;
+        bool write = false;
+        u32 func = 7;
+    } depth;
     u32 width = 0, height = 0;
     u32 rows = 0;  // the kept targets' rows in memory: past their height, to a multiple of 8 (0: their height)
     float blend_color[4] = {};

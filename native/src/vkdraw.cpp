@@ -223,7 +223,7 @@ u32 memory_type(u32 bits, VkMemoryPropertyFlags want) {
 }
 
 void barrier(VkCommandBuffer cmd, VkImage image, u32 layers, VkImageLayout from, VkImageLayout to, VkAccessFlags sa,
-             VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
+             VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds, VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT) {
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.srcAccessMask = sa;
     b.dstAccessMask = da;
@@ -231,7 +231,7 @@ void barrier(VkCommandBuffer cmd, VkImage image, u32 layers, VkImageLayout from,
     b.newLayout = to;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+    b.subresourceRange = {aspect, 0, 1, 0, layers};
     vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
@@ -396,7 +396,8 @@ bool make_image(GpuImage& im, VkImageType type, VkImageViewType view_type, VkFor
     vi.viewType = view_type;
     vi.format = format;
     vi.components = swizzle;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+    bool depth_format = format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT;
+    vi.subresourceRange = {VkImageAspectFlags(depth_format ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 1, 0, layers};
     vkCreateImageView(g.device, &vi, nullptr, &im.view);
     im.layers = layers;
     im.bytes = mr.size;
@@ -434,6 +435,7 @@ struct Resident {
     enum State { gpu, same, memory };
     u64 base = 0, bytes = 0, lo = 0, hi = 0;
     u32 format = 0, width = 0, height = 0, bpp = 4;
+    bool depth = false;  // a depth buffer (D16_UNORM, D32_SFLOAT): no other views of it, no uints
     GpuImage image;
     VkImageView uints = VK_NULL_HANDLE;  // the same, each texel uints (bpp of them): for a compute shader's loads and stores
     State state = memory;
@@ -444,6 +446,22 @@ struct Resident {
     std::map<u32, VkImageView> views;
 };
 std::map<u64, Resident> g_resident;  // by address
+
+bool is_depth(u32 format) { return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT; }
+// Where kept memory's image rests between uses, which part of it holds the memory, and what may
+// have used it there last
+VkImageLayout rest(const Resident& r) {
+    return r.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
+VkImageAspectFlags aspect(const Resident& r) { return r.depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT; }
+VkPipelineStageFlags rest_stage(const Resident& r) {
+    return r.depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+                   : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+}
+VkAccessFlags rest_access(const Resident& r) {
+    return r.depth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+                   : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+}
 thread_local bool t_inside = false;  // this thread holds g_lock
 
 constexpr u32 IMAGES = 31, BUFFERS = 31, PS_BUFFERS = 16;  // a pixel shader's textures (1-15, 40-55), buffers (56-71); a vertex shader's buffers (17-31, 72-87)
@@ -519,6 +537,7 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
     std::hash<std::string> h;
     std::string key = std::format("{:x}:{:x}:{:x}:{:x}:{}:{}", h(d.vs), h(d.gs), h(d.ps), d.cull, d.attributes, gpu_vertices);
     for (const auto& t : d.targets) key += std::format(":{}.{:x}.{:x}", t.format, t.blend, t.mask);
+    key += std::format(":z{}.{}.{}", d.depth.format, d.depth.write, d.depth.func);
     auto it = k.pipelines.find(key);
     if (it != k.pipelines.end()) return it->second;
     VkShaderModule vsm = module(d.vs, shaderc_vertex_shader, why), psm = module(d.ps, shaderc_fragment_shader, why);
@@ -596,6 +615,11 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
     VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     ri.colorAttachmentCount = u32(formats.size());
     ri.pColorAttachmentFormats = formats.data();
+    ri.depthAttachmentFormat = VkFormat(d.depth.format);
+    VkPipelineDepthStencilStateCreateInfo dsi{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    dsi.depthTestEnable = d.depth.format != 0;
+    dsi.depthWriteEnable = d.depth.format && d.depth.write;
+    dsi.depthCompareOp = VkCompareOp(d.depth.func);  // the console's order is Vulkan's
     VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gi.pNext = &ri;
     gi.stageCount = gsm ? 3 : 2;
@@ -606,6 +630,7 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
     gi.pRasterizationState = &rs;
     gi.pMultisampleState = &ms;
     gi.pColorBlendState = &bs;
+    gi.pDepthStencilState = &dsi;
     gi.pDynamicState = &ds;
     gi.layout = k.layout;
     VkPipeline p = VK_NULL_HANDLE;
@@ -733,15 +758,15 @@ bool read_back(Resident& r) {
     if (r.state != Resident::gpu) return true;
     if (!flush_batch() || !k.readback.reserve(r.bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
     VkCommandBuffer cmd = batch();
-    const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
+    const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT, rest_stage(r), T,
+            aspect(r));
     VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageSubresource = {aspect(r), 0, 0, 1};
     copy.imageExtent = {r.width, r.height, 1};
     vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
-    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, T, C);
+    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(r), T, rest_stage(r),
+            aspect(r));
     VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -789,7 +814,8 @@ Resident* keep(u64 address, u32 format, u32 width, u32 rows, u32 bpp, std::strin
     // the same memory kept in another shape (a clear of it as a buffer, then a draw into it):
     // made over on the GPU, rather than through memory
     if (auto it = g_resident.find(address);
-        it != g_resident.end() && it->second.bpp == bpp && it->second.bytes == bytes && (it->second.width != width || it->second.height != rows))
+        it != g_resident.end() && it->second.bpp == bpp && it->second.bytes == bytes &&
+        (it->second.width != width || it->second.height != rows || it->second.depth != is_depth(format)))
         if (!reshape(it->second, format, width, rows, why)) return nullptr;
     std::vector<u64> in_way;
     for (auto& [base, r] : g_resident)
@@ -800,13 +826,21 @@ Resident* keep(u64 address, u32 format, u32 width, u32 rows, u32 bpp, std::strin
     if (it != g_resident.end()) return &it->second;
     Resident r;
     r.base = address, r.bytes = bytes, r.lo = lo, r.hi = hi;
-    r.format = format, r.width = width, r.height = rows, r.bpp = bpp;
+    r.format = format, r.width = width, r.height = rows, r.bpp = bpp, r.depth = is_depth(format);
     if (!make_kept_image(r, why)) return nullptr;
     return &(g_resident[address] = std::move(r));
 }
 
-// Kept memory's image, as its format and shape say, and its view as uints
+// Kept memory's image, as its format and shape say, and its view as uints (not a depth buffer's)
 bool make_kept_image(Resident& r, std::string& why) {
+    if (r.depth) {
+        if (!make_image(r.image, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(r.format), r.width, r.height, 1, 1,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+            why = "out of GPU memory";
+            return false;
+        }
+        return true;
+    }
     if (!make_image(r.image, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(r.format), r.width, r.height, 1, 1,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                         VK_IMAGE_USAGE_STORAGE_BIT,
@@ -827,7 +861,7 @@ bool make_kept_image(Resident& r, std::string& why) {
 // (if what it holds is still wanted: else it is simply made again, to be taken up)
 bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why) {
     Resident n;
-    n.format = format, n.width = width, n.height = rows, n.bpp = r.bpp;
+    n.format = format, n.width = width, n.height = rows, n.bpp = r.bpp, n.depth = is_depth(format);
     if (r.state != Resident::memory && r.bytes > k.scratch.size && !flush_batch()) return false;  // (the scratch buffer in use)
     if (!make_kept_image(n, why)) return false;
     if (r.state != Resident::memory) {
@@ -837,7 +871,7 @@ bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why) {
             return false;
         }
         VkCommandBuffer cmd = batch();
-        const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         bb.buffer = k.scratch.buffer;
@@ -845,21 +879,22 @@ bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why) {
         bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;  // (an earlier reshape done reading it)
         bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
-        barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
+        barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT, rest_stage(r),
+                T, aspect(r));
         VkBufferImageCopy c{};
-        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageSubresource = {aspect(r), 0, 0, 1};
         c.imageExtent = {r.width, r.height, 1};
         vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &c);
         bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
         barrier(cmd, n.image.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T, aspect(n));
+        c.imageSubresource = {aspect(n), 0, 0, 1};
         c.imageExtent = {width, rows, 1};
         vkCmdCopyBufferToImage(cmd, k.scratch.buffer, n.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-        barrier(cmd, n.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, T, C);
+        barrier(cmd, n.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest(n), VK_ACCESS_TRANSFER_WRITE_BIT, rest_access(n), T, rest_stage(n),
+                aspect(n));
     }
     // the old image goes once the batch is done
     g_doomed.push_back(r.image);
@@ -867,14 +902,14 @@ bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why) {
     for (auto& [f, v] : r.views) g_doomed_views.push_back(v);
     r.views.clear();
     r.image = n.image, r.uints = n.uints;
-    r.format = format, r.width = width, r.height = rows;
+    r.format = format, r.width = width, r.height = rows, r.depth = n.depth;
     k.reshapes++;
     return true;
 }
 
 // The kept memory's image as that format (the same size of texel), for a draw into it
 VkImageView view_as(Resident& r, u32 format) {
-    if (format == r.format) return r.image.view;
+    if (format == r.format || r.depth) return r.image.view;
     VkImageView& v = r.views[format];
     if (!v) {
         VkImageViewUsageCreateInfo vu{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
@@ -918,12 +953,16 @@ bool draw(Draw& d, std::string& why) {
         return false;
     }
     size_t nt = d.targets.size();
-    bool kept = false;
+    bool kept = d.depth.format && d.depth.address;
     for (const auto& t : d.targets)
         if (t.format) kept = t.address != 0;
     VkPipeline pipe = pipeline(d, why);
     if (!pipe) return false;
-    // the targets: kept, or --gpu-check's copies, by their format, size and place
+    // the depth buffer, then the targets: kept, or --gpu-check's copies, by their format, size
+    // and place
+    Resident* zres = nullptr;
+    if (kept && d.depth.format && !(zres = keep(d.depth.address, d.depth.format, d.depth.width, d.depth.height, d.depth.bpp, why)))
+        return false;
     std::vector<Resident*> res(nt, nullptr);
     if (kept)
         for (size_t i = 0; i < nt; i++)
@@ -935,7 +974,7 @@ bool draw(Draw& d, std::string& why) {
         const Texture& t = d.textures[i];
         if (!t.raw) continue;
         auto it = g_resident.find(u64(t.raw));
-        if (it != g_resident.end() && it->second.state != Resident::memory && t.type == 9 && t.layers == 1 &&
+        if (it != g_resident.end() && it->second.state != Resident::memory && !it->second.depth && t.type == 9 && t.layers == 1 &&
             t.bpp == it->second.bpp && t.pitch == it->second.width && t.width <= it->second.width && t.height <= it->second.height) {
             from_target[i] = &it->second;
             continue;
@@ -963,6 +1002,10 @@ bool draw(Draw& d, std::string& why) {
         at_back[i] = back_bytes;
         back_bytes = (back_bytes + target_bytes[i] + 255) & ~VkDeviceSize(255);
     }
+    // the depth buffer, if it goes up: always a copy's; kept memory's if the memory is the newer
+    VkDeviceSize zbytes = VkDeviceSize(d.depth.width) * d.depth.height * d.depth.bpp;
+    bool zupload = d.depth.format && (!kept || (zres && zres->state == Resident::memory));
+    VkDeviceSize at_depth = place(zupload ? zbytes : 0);
     VkDeviceSize at_values = place(d.values.size() * 4);
     VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
     VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
@@ -1032,6 +1075,7 @@ bool draw(Draw& d, std::string& why) {
         return false;
     }
     for (auto& a : at_target) a += base;
+    at_depth += base;
     for (auto& a : at_buffers) a += base;
     for (auto& a : at_ps_buffers) a += base;
     for (auto& a : at_texels)
@@ -1042,6 +1086,7 @@ bool draw(Draw& d, std::string& why) {
         if (d.targets[i].format && upload[i])
             std::memcpy(up + at_target[i], kept ? reinterpret_cast<const unsigned char*>(d.targets[i].address) : d.targets[i].target,
                         target_bytes[i]);
+    if (zupload) std::memcpy(up + at_depth, kept ? reinterpret_cast<const unsigned char*>(d.depth.address) : d.depth.target, zbytes);
     std::memcpy(up + at_values, d.values.data(), d.values.size() * 4);
     std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
     std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
@@ -1169,16 +1214,55 @@ bool draw(Draw& d, std::string& why) {
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, T,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
     }
+    VkRenderingAttachmentInfo zatt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    u32 area_w = d.width, area_h = d.height;
+    if (d.depth.format) {
+        GpuImage* zi = nullptr;
+        if (kept) {
+            zi = &zres->image;
+        } else {  // --gpu-check's copy
+            zi = &k.targets[{d.depth.format, d.depth.width, d.depth.height, 100}];
+            if (!zi->image && !make_image(*zi, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.depth.format), d.depth.width, d.depth.height,
+                                          1, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+                why = "out of GPU memory";
+                return false;
+            }
+        }
+        const VkPipelineStageFlags Z = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        const VkAccessFlags ZRW = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        const VkImageLayout ZL = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        if (zupload) {
+            barrier(cmd, zi->image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T, VK_IMAGE_ASPECT_DEPTH_BIT);
+            VkBufferImageCopy c{};
+            c.bufferOffset = at_depth;
+            c.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            c.imageExtent = {d.depth.width, d.depth.height, 1};
+            vkCmdCopyBufferToImage(cmd, k.upload.buffer, zi->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+            barrier(cmd, zi->image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ZL, VK_ACCESS_TRANSFER_WRITE_BIT, ZRW, T, Z, VK_IMAGE_ASPECT_DEPTH_BIT);
+        } else {  // as the last draw or readback left it
+            barrier(cmd, zi->image, 1, ZL, ZL, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, ZRW, Z | T, Z,
+                    VK_IMAGE_ASPECT_DEPTH_BIT);
+        }
+        zatt.imageView = zi->view;
+        zatt.imageLayout = ZL;
+        zatt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        zatt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        area_w = nt ? std::min(area_w, d.depth.width) : d.depth.width;
+        area_h = nt ? std::min(area_h, d.depth.height) : d.depth.height;
+    }
     VkRenderingInfo rinfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    rinfo.renderArea = {{0, 0}, {d.width, d.height}};
+    rinfo.renderArea = {{0, 0}, {area_w, area_h}};
     rinfo.layerCount = 1;
     rinfo.colorAttachmentCount = u32(nt);
     rinfo.pColorAttachments = atts.data();
+    if (d.depth.format) rinfo.pDepthAttachment = &zatt;
     vkCmdBeginRendering(cmd, &rinfo);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, k.layout, 0, 1, &set, 0, nullptr);
     VkViewport viewport{0, 0, float(d.width), float(d.height), 0, 1};
-    VkRect2D scissor{{d.scissor[0], d.scissor[1]}, {u32(d.scissor[2] - d.scissor[0]), u32(d.scissor[3] - d.scissor[1])}};
+    int sx1 = std::min(d.scissor[2], int(area_w)), sy1 = std::min(d.scissor[3], int(area_h));  // (inside the attachments)
+    VkRect2D scissor{{d.scissor[0], d.scissor[1]}, {u32(std::max(sx1 - d.scissor[0], 0)), u32(std::max(sy1 - d.scissor[1], 0))}};
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdSetBlendConstants(cmd, d.blend_color);
@@ -1215,6 +1299,14 @@ bool draw(Draw& d, std::string& why) {
     if (!kept && !flush_batch()) {
         why = "the GPU didn't finish the draw";
         return false;
+    }
+    if (zres) {
+        Resident::State s = d.depth.write ? Resident::gpu : zupload ? Resident::same : zres->state;
+        if (s != zres->state) {
+            platform::protect(zres->lo, zres->hi - zres->lo, s == Resident::gpu ? 0 : 1);
+            zres->state = s;
+        }
+        if (zupload) k.target_uploads++;
     }
     for (size_t i = 0; i < nt; i++) {
         if (!target[i]) continue;

@@ -15,8 +15,13 @@
 // wave; a group's waves share 64 KiB of local memory (LDS) and wait for each other at
 // s_barrier.
 //
-// Not done yet: depth and stencil, clipping to the near plane (a triangle with a vertex
-// behind the eye is skipped), multisampling, mip levels past the first.
+// Depth: a pixel's depth (its triangle's z, interpolated, clamped to the viewport's range) is
+// tested against the depth buffer before its pixel shader runs, and written, if the draw
+// writes depth, for the pixels the shader exported (not those it killed). The depth buffer is
+// 32-bit floats or 16-bit unorm, in rows, as the loader keeps targets.
+//
+// Not done yet: stencil, depth exported by a shader, clipping to the near plane (a triangle
+// with a vertex behind the eye is skipped), multisampling, mip levels past the first.
 //
 // Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
 // translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp), into its render
@@ -170,6 +175,107 @@ struct Target {  // a render target, from its CB_COLORn registers
     }
 };
 
+u64 g_depth_clears = 0;  // depth buffers cleared (HTILE: expand_htile())
+
+// The depth buffer, from DB_DEPTH_CONTROL (0x200: the test on, writes on, the compare), DB_Z_INFO
+// (0x010: the format, 1 16-bit unorm or 3 32-bit float), DB_Z_READ_BASE / DB_Z_WRITE_BASE
+// (0x012, 0x014), DB_DEPTH_SIZE (0x016: the pitch and height, in 8s), DB_DEPTH_VIEW (0x002:
+// the first slice, of an array), and the viewport's depth range (0x0b4, 0x0b5)
+struct DepthBuffer {
+    bool test = false, write = false;  // (the console writes depth only with the test on)
+    u32 func = 7, format = 0, bpp = 4, pitch = 0, height = 0;
+    u64 base = 0;
+    float zmin = 0, zmax = 1;
+    u64 at(int x, int y) const { return base + (u64(y) * pitch + u64(x)) * bpp; }
+    // Whether a pixel's depth passes, and its value as stored
+    bool pass(float z, int x, int y, u32& stored) const {
+        u64 a = at(x, y);
+        if (format == 3) {
+            float old;
+            std::memcpy(&old, reinterpret_cast<const void*>(a), 4);
+            stored = u(z);
+            return compare(z, old);
+        }
+        std::uint16_t old;
+        std::memcpy(&old, reinterpret_cast<const void*>(a), 2);
+        stored = u32(std::nearbyint(std::clamp(z, 0.0f, 1.0f) * 65535.0f));
+        return compare(float(stored), float(old));
+    }
+    bool compare(float a, float b) const {
+        switch (func) {
+            case 0: return false;
+            case 1: return a < b;
+            case 2: return a == b;
+            case 3: return a <= b;
+            case 4: return a > b;
+            case 5: return a != b;
+            case 6: return a >= b;
+            default: return true;
+        }
+    }
+    void store(int x, int y, u32 v) const { std::memcpy(reinterpret_cast<void*>(at(x, y)), &v, bpp); }
+};
+
+DepthBuffer depth_buffer(const GpuRegs& r, const Memory& mem) {
+    DepthBuffer d;
+    u32 ctl = reg(r, 0x200, 0), info = reg(r, 0x010, 0), format = info & 3;
+    if (ctl & 1) note("draws with a stencil test (drawn without it)");
+    if (!((ctl >> 1) & 1) || (format != 1 && format != 3)) return d;
+    u64 read = u64(reg(r, 0x012, 0)) << 8, write = u64(reg(r, 0x014, 0)) << 8;
+    if (read != write) {
+        note("depth buffers read from one place and written to another (drawn without depth)");
+        return d;
+    }
+    u32 size = reg(r, 0x016, 0);
+    d.format = format;
+    d.bpp = format == 1 ? 2 : 4;
+    d.pitch = ((size & 0x7ff) + 1) * 8;
+    d.height = (((size >> 11) & 0x7ff) + 1) * 8;
+    d.base = read + u64(reg(r, 0x002, 0) & 0x7ff) * d.pitch * d.height * d.bpp;
+    if (!mem.ok(d.base, u64(d.pitch) * d.height * d.bpp)) {
+        note("depth buffers outside the GPU's memory (drawn without depth)");
+        return d;
+    }
+    d.test = true;
+    d.write = (ctl >> 2) & 1;
+    d.func = (ctl >> 4) & 7;
+    d.zmin = regf(r, 0x0b4, 0);
+    d.zmax = regf(r, 0x0b5, 1);
+    return d;
+}
+
+// A depth buffer's fast clear. With HTILE on (DB_Z_INFO bit 29), a clear only marks each 8x8
+// tile cleared in the HTILE buffer (DB_HTILE_DATA_BASE, 0x005: a 32-bit word a tile, its low 4
+// bits, the z mask, 0), and the console reads a cleared tile as DB_DEPTH_CLEAR (0x00b). Here,
+// when every tile is marked cleared, the depth buffer's memory is filled with that value and
+// the tiles marked written (z mask 15), as the console's would be once drawn into. Some tiles
+// cleared and some not would need the HTILE buffer's own layout: not done yet.
+void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
+    if (!db.test || !((reg(r, 0x010, 0) >> 29) & 1)) return;
+    u64 h = u64(reg(r, 0x005, 0)) << 8;
+    u64 tiles = u64(db.pitch / 8) * (db.height / 8);
+    if (!h || !mem.ok(h, tiles * 4)) return;
+    auto* w = reinterpret_cast<u32*>(h);
+    u64 cleared = 0;
+    for (u64 i = 0; i < tiles; i++) cleared += (w[i] & 15) == 0;
+    if (!cleared) return;
+    if (cleared != tiles) {
+        note("depth buffers partly cleared (HTILE): not cleared");
+        return;
+    }
+    float clear = regf(r, 0x00b, 1);
+    u64 n = u64(db.pitch) * db.height;
+    if (db.format == 3) {
+        std::vector<float> v(n, clear);
+        std::memcpy(reinterpret_cast<void*>(db.base), v.data(), n * 4);
+    } else {
+        std::vector<std::uint16_t> v(n, std::uint16_t(std::nearbyint(std::clamp(clear, 0.0f, 1.0f) * 65535.0f)));
+        std::memcpy(reinterpret_cast<void*>(db.base), v.data(), n * 2);
+    }
+    for (u64 i = 0; i < tiles; i++) w[i] |= 15;
+    g_depth_clears++;
+}
+
 struct Tri {
     float x[3], y[3], z[3], invw[3];
     float area;
@@ -188,6 +294,7 @@ struct PsIo : Io {
     int px[LANES], py[LANES];
     u64 cover = 0;
     u64 written = 0;
+    u64 exported = 0;  // lanes that exported anything (to any target, null included): not killed
     PsIo(const GpuRegs& r_, const Memory& m, const Vertices& v, const Target* t)
         : r(r_), mem(m), vs(v), targets(t) {
         col_format = reg(r, 0x1c5, 0);
@@ -249,6 +356,7 @@ struct PsIo : Io {
     }
 
     void exp(u32 target, const Vec* const regs[4], bool compr, u64 lanes) override {
+        exported |= lanes & cover;
         if (target > 7) return;  // mrtz (depth), null
         const Target& t = targets[target];
         if (!t.count) return;
@@ -585,6 +693,13 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         }
         if (!first) first = &t;
     }
+    DepthBuffer db = depth_buffer(r, mem);
+    Target depth_only;  // a draw of depth alone: its size is the depth buffer's
+    if (!first && db.write) {
+        depth_only.pitch = db.pitch;
+        depth_only.height = db.height;
+        first = &depth_only;
+    }
     if (!first) {
         why = "no render target written";
         return false;
@@ -663,9 +778,22 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         d.targets.push_back(dt);
     }
     while (!d.targets.empty() && !d.targets.back().format) d.targets.pop_back();
-    if (d.targets.empty()) {
+    if (d.targets.empty() && !db.write) {
         why = "no render target exported to";
         return false;
+    }
+    if (db.test) {
+        d.depth.format = db.format == 3 ? 126 : 124;  // D32_SFLOAT, D16_UNORM
+        d.depth.bpp = db.bpp;
+        d.depth.width = db.pitch;
+        d.depth.height = db.height;
+        d.depth.address = db.base;
+        d.depth.write = db.write;
+        d.depth.func = db.func;
+        if (db.zmin != 0 || db.zmax != 1) {
+            why = "a viewport's depth range other than 0 to 1";
+            return false;
+        }
     }
     d.values = vals.u;
     bool on_gpu = gpu_vertices(d, vertex_why, r, vs, gl.attributes, t, index, tris_in, rects, mem);
@@ -890,7 +1018,6 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         note(std::format("primitive type {:#x}", type));
         return std::format("(primitive type {:#x}: not drawn)", type);
     }
-    if (reg(r, 0x200, 0) & 2) note("draws with a depth test (drawn without it)");
     if (!ps) return std::format("{} vertices (no pixel shader: nothing drawn)", count);
     // the targets, and the viewport and scissor
     Target targets[8];
@@ -903,8 +1030,12 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     u32 mode = (reg(r, 0x202, 0xcc0010) >> 4) & 7;
     bool masked = true;  // every channel of every target masked off (a pass for depth alone)
     for (auto& t : targets) masked = masked && (!t.count || !t.mask);
-    if (!any || mode == 0 || masked) return std::format("{} vertices (no colour written)", count);
-    if (mode != 1) {
+    DepthBuffer db = depth_buffer(r, mem);
+    if ((!any || mode == 0 || masked) && !db.write) return std::format("{} vertices (no colour or depth written)", count);
+    expand_htile(r, mem, db);
+    if (mode == 0)  // colour off: depth alone
+        for (auto& t : targets) t.count = 0;
+    if (mode != 1 && mode != 0) {
         note(std::format("colour modes other than normal ({})", mode));
         return std::format("(colour mode {}: not drawn)", mode);
     }
@@ -922,7 +1053,8 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     clip(reg(r, 0x90, 0), reg(r, 0x91, 0x40004000));  // generic scissor
     if (reg(r, 0x292, 0) & 2) clip(reg(r, 0x94, 0), reg(r, 0x95, 0x40004000));  // viewport 0's
     for (auto& t : targets)
-        if (t.count) x1 = std::min(x1, int(t.pitch)), y1 = std::min(y1, int(t.height));
+        if (t.count && t.mask && mode == 1) x1 = std::min(x1, int(t.pitch)), y1 = std::min(y1, int(t.height));
+    if (db.test) x1 = std::min(x1, int(db.pitch)), y1 = std::min(y1, int(db.height));
     u32 ps_user = (r.sh[0x0b] >> 1) & 0x1f;
     u32 ena = reg(r, 0x1b3, 0), addr = reg(r, 0x1b4, 0);
     if (!addr) addr = ena;
@@ -931,6 +1063,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     vkdraw::Draw check;
     std::string check_why, vertex_why;
     std::vector<std::vector<unsigned char>> before, result;  // each target's
+    std::vector<unsigned char> zbefore;  // the depth buffer's
     bool checked = false;
     // the draws saved to draws/: their number and a line in the index, once drawn
     auto saved = [&](std::string what, const std::string& extra) {
@@ -1062,6 +1195,12 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 ct.target = before[k].data();
                 ct.result = result[k].data();
             }
+            if (check.depth.format) {
+                const auto* z = reinterpret_cast<const unsigned char*>(check.depth.address);
+                zbefore.assign(z, z + size_t(check.depth.width) * check.depth.height * check.depth.bpp);
+                check.depth.target = zbefore.data();
+                check.depth.address = 0;
+            }
             checked = vkdraw::run(check, check_why);
         }
         if (!checked) g_check_skipped[check_why]++;
@@ -1127,11 +1266,31 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 }
                 vg += u32(sizes[bit]);
             }
+            // the depth test, before the shader (each pixel's depth kept to be written after)
+            u32 zbits[LANES];
+            if (db.test) {
+                for (int l = 0; l < LANES; l++) {
+                    if (!((io.cover >> l) & 1)) continue;
+                    float cx = float(io.px[l]) + 0.5f, cy = float(io.py[l]) + 0.5f;
+                    float a = ((t.x[2] - t.x[1]) * (cy - t.y[1]) - (t.y[2] - t.y[1]) * (cx - t.x[1])) / t.area;
+                    float b = ((t.x[0] - t.x[2]) * (cy - t.y[2]) - (t.y[0] - t.y[2]) * (cx - t.x[2])) / t.area;
+                    float z = std::clamp(a * t.z[0] + b * t.z[1] + (1 - a - b) * t.z[2], db.zmin, db.zmax);
+                    if (!db.pass(z, io.px[l], io.py[l], zbits[l])) io.cover &= ~(1ull << l);
+                }
+                if (!io.cover) {
+                    lanes = 0;
+                    return;
+                }
+            }
             for (u32 k = 0; k < ps_user && k < 16; k++) w.s[k] = r.sh[0x0c + k];
             w.s[ps_user] = 0;  // the primitive mask
             w.set_exec(io.cover);
             io.tri = &t;
+            io.exported = 0;
             run(w, ps, io, mem);
+            if (db.write)
+                for (int l = 0; l < LANES; l++)
+                    if ((io.exported >> l) & 1) db.store(io.px[l], io.py[l], zbits[l]);
             pixels += u64(std::popcount(io.cover));
             waves++;
             lanes = 0;

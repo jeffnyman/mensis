@@ -1130,6 +1130,10 @@ void Writer::export_op(const Inst& in) {
         line("if (exec_lo != 0u) exported = true;");
         return;
     }
+    if (target == 9) {  // null: the pixel done, nothing written (a pass for depth alone)
+        line("if (exec_lo != 0u) exported = true;");
+        return;
+    }
     if (target > 7) {
         fail(target == 8 ? "depth export" : std::format("export to {}", target));
         return;
