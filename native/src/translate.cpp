@@ -379,9 +379,18 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
 }
 
 std::string PsState::key() const {
-    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}", user_count, ena, addr, col_format, barycentric);
+    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}:{:x}", user_count, ena, addr, col_format, barycentric, add_tid);
     for (u32 c : input_cntl) k += std::format(":{:x}", c);
     for (size_t i = 0; i < image_types.size(); i++) k += std::format(":t{}{}", image_types[i], unnormalized[i] ? "u" : "");
+    for (u32 s : image_slot) k += std::format(":s{}", s);
+    for (bool b : integer) k += b ? ":i" : ":f";
+    for (u32 s : buffer_slot) k += std::format(":b{}", s);
+    return k;
+}
+
+std::string VsState::key() const {
+    std::string k = std::format("{}:{}:{:x}", user_count, attributes, add_tid);
+    for (u32 c : input_cntl) k += std::format(":{:x}", c);
     return k;
 }
 

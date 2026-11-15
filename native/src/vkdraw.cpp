@@ -388,6 +388,7 @@ struct Kept {
     std::map<std::string, VkPipeline> compute;  // by source
     u64 draws = 0, texture_uploads = 0, evicted = 0, dispatches = 0;
     u64 target_uploads = 0, readbacks = 0, writes = 0, let_go = 0, target_textures = 0;
+    u64 batches = 0;  // command buffers submitted (each waited for)
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
 };
 Kept k;
@@ -409,6 +410,8 @@ thread_local bool t_inside = false;  // this thread holds g_lock
 
 constexpr u32 IMAGES = 31, BUFFERS = 31, PS_BUFFERS = 16;  // a pixel shader's textures (1-15, 40-55), buffers (56-71); a vertex shader's buffers (17-31, 72-87)
 constexpr u32 STORES = 4;  // a compute shader's storage images (32-35)
+constexpr u32 SETS = 2048;  // descriptor sets in a batch (one a draw or dispatch)
+constexpr VkDeviceSize ARENA = VkDeviceSize(256) << 20;  // the upload buffer's least size
 constexpr VkDeviceSize TEXTURE_BUDGET = VkDeviceSize(2) << 30;
 
 u32 image_binding(u32 i) { return i < 15 ? 1 + i : 40 + (i - 15); }
@@ -440,11 +443,11 @@ bool prepare_kept() {
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &push;
     if (vkCreatePipelineLayout(g.device, &pli, nullptr, &k.layout) != VK_SUCCESS) return fail("vkCreatePipelineLayout failed");
-    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 + BUFFERS + PS_BUFFERS},
-                                     {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMAGES},
-                                     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, STORES}};
+    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (2 + BUFFERS + PS_BUFFERS) * SETS},
+                                     {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMAGES * SETS},
+                                     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, STORES * SETS}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 1;
+    dpi.maxSets = SETS;
     dpi.poolSizeCount = 3;
     dpi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(g.device, &dpi, nullptr, &k.dpool) != VK_SUCCESS) return fail("vkCreateDescriptorPool failed");
@@ -605,6 +608,7 @@ void evict() {
     std::sort(by_age.begin(), by_age.end());
     for (auto& [used, key] : by_age) {
         if (k.texture_bytes <= TEXTURE_BUDGET / 2) break;
+        if (used >= k.draws) continue;  // the draw being recorded uses it
         GpuImage& im = k.textures[key];
         k.texture_bytes -= im.bytes;
         im.destroy();
@@ -613,15 +617,81 @@ void evict() {
     }
 }
 
+// ---- the batch ----
+//
+// Draws and dispatches are recorded into one command buffer, which goes to the GPU, to be
+// waited for, only when something needs what it did: a target read back into memory (or let
+// go), --gpu-check's copies, the end of a command buffer of the game's (flush(), from the
+// command processor), or a full batch. Until then, what each draw uploads stays in the upload
+// buffer (a draw's place in it is its own), each has a descriptor set of its own, and images
+// that go (a texture used once, textures let go to stay in the budget) go once it is done.
+
+bool g_recording = false;
+VkDeviceSize g_arena = 0;  // the upload buffer's bytes the batch has used
+u32 g_sets = 0;  // its descriptor sets
+std::vector<GpuImage> g_doomed;  // images to go once the batch is done
+
+VkCommandBuffer batch() {
+    if (!g_recording) {
+        vkResetCommandBuffer(k.cmd, 0);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(k.cmd, &begin);
+        g_recording = true;
+    }
+    return k.cmd;
+}
+
+// The batch to the GPU, and waited for; then what it used is free again
+bool flush_batch() {
+    if (!g_recording) return true;
+    vkEndCommandBuffer(k.cmd);
+    g_recording = false;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &k.cmd;
+    vkResetFences(g.device, 1, &k.fence);
+    bool ok = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS &&
+              vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS;
+    g_arena = 0;
+    g_sets = 0;
+    vkResetDescriptorPool(g.device, k.dpool, 0);
+    for (auto& im : g_doomed) im.destroy();
+    g_doomed.clear();
+    evict();
+    k.batches++;
+    return ok;
+}
+
+// For the next draw or dispatch: `bytes` of the upload buffer (from `base`) and a descriptor
+// set, both its own until the batch is done (which may first be flushed, to make room)
+bool reserve_batch(VkDeviceSize bytes, VkDeviceSize& base, VkDescriptorSet& set, std::string& why) {
+    if (g_sets == SETS || g_arena + bytes > k.upload.size) flush_batch();
+    if (!g_recording && bytes > k.upload.size &&
+        !k.upload.reserve(std::max(ARENA, bytes * 2), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        why = "out of memory for the upload";
+        return false;
+    }
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = k.dpool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &k.set_layout;
+    if (vkAllocateDescriptorSets(g.device, &dai, &set) != VK_SUCCESS) {
+        why = "vkAllocateDescriptorSets failed";
+        return false;
+    }
+    g_sets++;
+    base = g_arena;
+    g_arena = (g_arena + bytes + 255) & ~VkDeviceSize(255);
+    return true;
+}
+
 // The GPU's picture back into the memory, which may then be read
 bool read_back(Resident& r) {
     if (r.state != Resident::gpu) return true;
-    if (!k.readback.reserve(r.bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
-    VkCommandBuffer cmd = k.cmd;
-    vkResetCommandBuffer(cmd, 0);
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &begin);
+    if (!flush_batch() || !k.readback.reserve(r.bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
+    VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
@@ -638,14 +708,7 @@ bool read_back(Resident& r) {
     hb.buffer = k.readback.buffer;
     hb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
-    vkEndCommandBuffer(cmd);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    vkResetFences(g.device, 1, &k.fence);
-    if (vkQueueSubmit(g.queue, 1, &si, k.fence) != VK_SUCCESS ||
-        vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 10'000'000'000ull) != VK_SUCCESS)
-        return false;
+    if (!flush_batch()) return false;
     platform::protect(r.lo, r.hi - r.lo, 2);
     std::memcpy(reinterpret_cast<void*>(r.base), k.readback.p, r.bytes);
     platform::protect(r.lo, r.hi - r.lo, 1);
@@ -656,6 +719,7 @@ bool read_back(Resident& r) {
 
 // The target let go: back into the memory, which is left unguarded
 void let_go(u64 base) {
+    flush_batch();  // nothing waiting may still use it
     Resident& r = g_resident[base];
     read_back(r);
     platform::protect(r.lo, r.hi - r.lo, 2);
@@ -753,7 +817,6 @@ bool draw(Draw& d, std::string& why) {
         read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff));
     }
     k.draws++;
-    evict();
 
     // everything going up, in one buffer: each piece's place in it
     VkDeviceSize at = 0;
@@ -805,6 +868,10 @@ bool draw(Draw& d, std::string& why) {
                 images[i]->used = k.draws;
                 continue;
             }
+            if (!t.format && t.rgba.empty()) {  // let go since has_texture() said it was kept
+                why = "a texture let go meanwhile";
+                return false;
+            }
         }
         bool three = t.type == 10;
         u32 layers = three ? 1 : t.layers;
@@ -825,12 +892,24 @@ bool draw(Draw& d, std::string& why) {
         at_texels[i] = place(t.format ? VkDeviceSize(t.pitch) * t.height * t.layers * t.bpp : t.rgba.size() * 4);
         k.texture_uploads++;
     }
-    if (!k.upload.reserve(at, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
-        (!kept && !k.readback.reserve(back_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true))) {
-        why = "out of memory for the upload";
+    // its place in the batch: the offsets above are from its start
+    VkDeviceSize base;
+    VkDescriptorSet set;
+    if (!kept && !flush_batch()) {  // --gpu-check's copies come back at once: nothing else waiting
+        why = "the GPU didn't finish the draws before";
         return false;
     }
+    if (!reserve_batch(at, base, set, why)) return false;
+    if (!kept && !k.readback.reserve(back_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+        why = "out of memory for the readback";
+        return false;
+    }
+    for (auto& a : at_target) a += base;
+    for (auto& a : at_buffers) a += base;
+    for (auto& a : at_ps_buffers) a += base;
+    for (auto& a : at_texels)
+        if (a != ~VkDeviceSize(0)) a += base;
+    at_values += base, at_vertices += base, at_indices += base, at_vs_values += base;
     unsigned char* up = k.upload.p;
     for (size_t i = 0; i < nt; i++)
         if (d.targets[i].format && upload[i])
@@ -867,16 +946,6 @@ bool draw(Draw& d, std::string& why) {
     }
 
     // the descriptors
-    vkResetDescriptorPool(g.device, k.dpool, 0);
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = k.dpool;
-    dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &k.set_layout;
-    VkDescriptorSet set;
-    if (vkAllocateDescriptorSets(g.device, &dai, &set) != VK_SUCCESS) {
-        why = "vkAllocateDescriptorSets failed";
-        return false;
-    }
     std::vector<VkDescriptorBufferInfo> binfo;
     std::vector<VkDescriptorImageInfo> iinfo;
     binfo.reserve(2 + d.vs_buffers.size() + d.ps_buffers.size());
@@ -910,12 +979,8 @@ bool draw(Draw& d, std::string& why) {
     for (u32 i = 0; i < d.ps_buffers.size(); i++) write_buffer(56 + i, at_ps_buffers[i], d.ps_buffers[i].size() * 4);
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
-    // the commands
-    VkCommandBuffer cmd = k.cmd;
-    vkResetCommandBuffer(cmd, 0);
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &begin);
+    // the commands, into the batch
+    VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
     const VkPipelineStageFlags C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -925,7 +990,7 @@ bool draw(Draw& d, std::string& why) {
         if (!r) continue;
         GpuImage& im = *images[i];
         barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
         barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, C, T);
         VkImageCopy ic{};
@@ -948,7 +1013,7 @@ bool draw(Draw& d, std::string& why) {
         VkImage image = target[i]->image;
         if (upload[i]) {
             barrier(cmd, image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
             vkCmdCopyBufferToImage(cmd, k.upload.buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             barrier(cmd, image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                     RW, T, C);
@@ -966,7 +1031,7 @@ bool draw(Draw& d, std::string& why) {
         const Texture& t = d.textures[i];
         GpuImage& im = *images[i];
         barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, T);
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
         VkBufferImageCopy c{};
         c.bufferOffset = at_texels[i];
         c.bufferRowLength = t.format ? t.pitch : 0;
@@ -1018,15 +1083,9 @@ bool draw(Draw& d, std::string& why) {
         hb.size = VK_WHOLE_SIZE;
         vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
     }
-    vkEndCommandBuffer(cmd);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    vkResetFences(g.device, 1, &k.fence);
-    bool done = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS &&
-                vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 10'000'000'000ull) == VK_SUCCESS;
-    for (auto& im : unkept) im.destroy();
-    if (!done) {
+    for (auto& im : unkept)
+        if (im.image) g_doomed.push_back(im);  // once the batch is done
+    if (!kept && !flush_batch()) {
         why = "the GPU didn't finish the draw";
         return false;
     }
@@ -1110,24 +1169,11 @@ bool dispatch(Dispatch& d, std::string& why) {
         }
         k.compute[d.cs] = pipe;
     }
-    if (!k.upload.reserve(std::max<VkDeviceSize>(d.values.size() * 4, 16),
-                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
-        why = "out of memory for the upload";
-        return false;
-    }
-    std::memcpy(k.upload.p, d.values.data(), d.values.size() * 4);
-    vkResetDescriptorPool(g.device, k.dpool, 0);
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = k.dpool;
-    dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &k.set_layout;
+    VkDeviceSize base;
     VkDescriptorSet set;
-    if (vkAllocateDescriptorSets(g.device, &dai, &set) != VK_SUCCESS) {
-        why = "vkAllocateDescriptorSets failed";
-        return false;
-    }
-    VkDescriptorBufferInfo bi{k.upload.buffer, 0, std::max<VkDeviceSize>(d.values.size() * 4, 16)};
+    if (!reserve_batch(std::max<VkDeviceSize>(d.values.size() * 4, 16), base, set, why)) return false;
+    std::memcpy(k.upload.p + base, d.values.data(), d.values.size() * 4);
+    VkDescriptorBufferInfo bi{k.upload.buffer, base, std::max<VkDeviceSize>(d.values.size() * 4, 16)};
     std::vector<VkDescriptorImageInfo> ii(d.stores.size());
     std::vector<VkWriteDescriptorSet> writes;
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1148,11 +1194,7 @@ bool dispatch(Dispatch& d, std::string& why) {
     }
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
-    VkCommandBuffer cmd = k.cmd;
-    vkResetCommandBuffer(cmd, 0);
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &begin);
+    VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                X = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -1166,16 +1208,6 @@ bool dispatch(Dispatch& d, std::string& why) {
     for (Resident* r : targets)
         barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, RW,
                 X, C);
-    vkEndCommandBuffer(cmd);
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    vkResetFences(g.device, 1, &k.fence);
-    if (vkQueueSubmit(g.queue, 1, &si, k.fence) != VK_SUCCESS ||
-        vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 10'000'000'000ull) != VK_SUCCESS) {
-        why = "the GPU didn't finish the dispatch";
-        return false;
-    }
     for (Resident* r : targets)
         if (r->state != Resident::gpu) {  // the memory is now the older
             platform::protect(r->lo, r->hi - r->lo, 0);
@@ -1184,6 +1216,16 @@ bool dispatch(Dispatch& d, std::string& why) {
     k.dispatches++;
     k.dispatch_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     return true;
+}
+
+bool flush() {
+    std::lock_guard lock(g_lock);
+    if (!g.ok) return true;
+    struct Inside {
+        Inside() { t_inside = true; }
+        ~Inside() { t_inside = false; }
+    } inside;
+    return flush_batch();
 }
 
 bool touched(u64 addr, bool write) {
@@ -1244,7 +1286,8 @@ std::string report() {
                        "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times",
                        k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
                        k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures) +
-           (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s", k.dispatches, double(k.dispatch_ns) / 1e9) : "");
+           (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s", k.dispatches, double(k.dispatch_ns) / 1e9) : "") +
+           std::format(". Sent to the GPU in {} batches, each waited for", k.batches);
 }
 
 }  // namespace mensis::vkdraw
@@ -1254,6 +1297,7 @@ std::string report() {
 namespace mensis::vkdraw {
 bool has_texture(const std::string&) { return false; }
 bool barycentric() { return false; }
+bool flush() { return true; }
 bool touched(u64, bool) { return false; }
 bool dispatch(Dispatch&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";

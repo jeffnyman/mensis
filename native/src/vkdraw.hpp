@@ -90,8 +90,12 @@ bool barycentric();
 // picture goes back into the memory, or the memory is let be written, and true: the access
 // can be tried again
 bool touched(u64 addr, bool write);
-// Draws it; false, with the reason, if it couldn't
+// Draws it (into the batch, kept on the GPU; --gpu-check's copies at once); false, with the
+// reason, if it couldn't
 bool run(Draw& d, std::string& why);
+// The draws and dispatches so far to the GPU, waited for (the end of a command buffer of the
+// game's)
+bool flush();
 std::string device();  // the GPU it runs on, and what the validation layer reported
 std::string report();  // what is kept on the GPU, and how long the draws took there
 

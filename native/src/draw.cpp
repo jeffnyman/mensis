@@ -450,6 +450,11 @@ void save_glsl(const char* kind, u64 at, const std::string& text) {
 // viewport. False (and why) if it can't be.
 // Each buffer load's elements, as the CPU's interpreter unpacks them, and then what an index
 // past the end reads; false (and why) if there are too many
+// Kept, unpacked, to be used again: by the descriptor, the offset and format, and a hash of the
+// memory read (up to 512 MiB of them; then they all go)
+std::unordered_map<std::string, std::vector<u32>> g_unpacked;
+u64 g_unpacked_bytes = 0, g_unpack_hits = 0, g_unpacks = 0;
+
 bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const Memory& mem, std::vector<std::vector<u32>>& out,
                     std::string& why) {
     for (const auto& b : buffers) {
@@ -459,14 +464,34 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
             why = "buffers of over 4 million elements";
             return false;
         }
+        u64 base = b.v[0] | (u64(b.v[1] & 0xfff) << 32), span = (stride ? u64(stride) * records : records) + b.offset + 16;
+        std::string key;
+        if (mem.ok(base, span)) {
+            key = std::format("{:x}.{:x}.{:x}.{:x}:{}:{}:{}:{:x}", b.v[0], b.v[1], b.v[2], b.v[3], b.offset, b.dfmt, b.nfmt,
+                              hash_memory(reinterpret_cast<const unsigned char*>(base), span));
+            if (auto it = g_unpacked.find(key); it != g_unpacked.end()) {
+                out.push_back(it->second);
+                g_unpack_hits++;
+                continue;
+            }
+        }
+        g_unpacks++;
         std::vector<u32> data((n + 1) * 4);
         for (u32 i = 0; i < n; i++) buffer_element(b.v, b.dfmt, b.nfmt, b.offset, i, mem, &data[size_t(i) * 4]);
         if (stride == 0) std::copy_n(data.begin(), 4, data.begin() + 4);
         else buffer_element(b.v, b.dfmt, b.nfmt, b.offset, records, mem, &data[n * 4]);
+        if (!key.empty()) {
+            if (g_unpacked_bytes > (512u << 20)) g_unpacked.clear(), g_unpacked_bytes = 0;
+            g_unpacked_bytes += data.size() * 4;
+            g_unpacked[key] = data;
+        }
         out.push_back(std::move(data));
     }
     return true;
 }
+
+// The translations kept, by the program and what else they depend on
+std::unordered_map<std::string, translate::Glsl> g_glsl;
 
 bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u32 attributes, const Target& t,
                   const std::vector<u32>& index, const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Memory& mem) {
@@ -482,7 +507,13 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
     for (size_t k = 0; k < vals.buffers.size() && k < 32; k++)
         if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1u << k;
-    translate::Glsl g = translate::vertex_shader(prog, st);
+    // the program, as decoded (its fetch shader's code included), and the state: translated once
+    u64 code_hash = 0x9e3779b97f4a7c15ull;
+    for (const auto& in : prog.code) code_hash = (code_hash ^ in.w0 ^ (u64(in.w1) << 32) ^ (u64(in.lit) << 16)) * 0x100000001b3ull;
+    std::string gkey = std::format("vs:{:x}:{:x}:{}:{}", vs, code_hash, prog.why, st.key());
+    auto git = g_glsl.find(gkey);
+    if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::vertex_shader(prog, st)).first;
+    const translate::Glsl& g = git->second;
     if (!g.why.empty()) {
         why = "the vertex shader has " + g.why;
         return false;
@@ -607,7 +638,10 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         if (slot == unique.size()) unique.push_back(&im);
         st.image_slot.push_back(slot);
     }
-    translate::Glsl gl = translate::pixel_shader(prog, st);
+    std::string gkey = std::format("ps:{:x}:{}", ps, st.key());
+    auto git = g_glsl.find(gkey);
+    if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::pixel_shader(prog, st)).first;
+    const translate::Glsl& gl = git->second;
     if (gl.why.empty()) save_glsl("ps", ps, gl.text);
     if (!gl.why.empty()) {
         why = "the shader has " + gl.why;

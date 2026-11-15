@@ -66,7 +66,7 @@ struct PsState {
     // done as the console does it, P0 + i (P1 - P0) + j (P2 - P0), so that an attribute the
     // same at all three corners comes out exactly that (else as the GPU interpolates)
     bool barycentric = false;
-    std::string key() const;
+    std::string key() const;  // all of it, for a translation kept to be used again
 };
 
 struct VsState {
@@ -74,6 +74,7 @@ struct VsState {
     u32 attributes = 0;  // the pixel shader's
     u32 input_cntl[32] = {};  // SPI_PS_INPUT_CNTL_n: which parameter each of them is
     u32 add_tid = 0;
+    std::string key() const;  // all of it, for a translation kept to be used again
 };
 
 // A compute shader's: its user SGPRs, which others it is given (COMPUTE_PGM_RSRC2), the

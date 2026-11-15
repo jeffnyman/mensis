@@ -276,8 +276,12 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   each vertex's data by its index, read the buffer's elements as the CPU unpacked them. Its
   position goes through the console's viewport, recast as Vulkan's, and its parameters become
   the pixel shader's attributes, as `SPI_PS_INPUT_CNTL` pairs them. Vulkan has no rectangles,
-  so for a rectangle list a geometry shader adds each one's fourth corner. `vkdraw.cpp` draws
-  with them, a draw at a time, into the render targets kept on the GPU (below), up to 8 at
+  so for a rectangle list a geometry shader adds each one's fourth corner. A translation is
+  kept, by the program and what it depends on, and so are a buffer's elements once unpacked,
+  by its descriptor and a hash of its memory. `vkdraw.cpp` draws with them, recorded into one
+  batch of commands, which goes to the GPU, to be waited for, only when something needs what
+  it did (a target read back into memory, `--gpu-check`'s copies, the end of one of the game's
+  command buffers), into the render targets kept on the GPU (below), up to 8 at
   once, in 8-bit RGBA (linear or sRGB), 16-bit floats (two or four) or 11- and 10-bit floats;
   or into copies (`--gpu-check`, which compares every target, a channel's values as whole
   steps of its own encoding). A draw tries the GPU first, the vertex shader included; only if
@@ -639,6 +643,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     out of thousands (a triangle's edge falling the other way). Three shaders differ in more:
     they kill pixels whose texture alpha is under a threshold (hair), and the GPU's texture
     coordinates, a little different from the CPU's, tip many such pixels the other way.
+37. **Batches.** Each draw on the GPU was sent on its own and waited for, some 430 times a
+    frame in character creation. Now draws and dispatches are recorded into one command
+    buffer, which goes to the GPU only when something needs what it did: a render target read
+    back into memory (when something touches it), `--gpu-check`'s copies, the end of a
+    command buffer of the game's, or a batch that is full. Until then each draw's uploads
+    stay where they are, and each has a descriptor set of its own; images that go wait for
+    the batch to be done. The time the GPU's draws took halved, but character creation ran
+    no faster: most of the time went before the GPU. A profile showed where: each draw
+    unpacked its vertex buffers again (15 s in a run) and made its shaders' GLSL again (11 s).
+    Both are kept now, the GLSL by the program and everything it depends on, the buffers by
+    their descriptor and a hash of their memory. Character creation went from 2.5 frames a
+    second to 4.2. Most of what remains is the compute shaders the CPU still runs (64 million
+    groups in a run): they store into memory in ways the GPU doesn't yet. The character's face
+    is a speckle of noise, with or without batches; that is most likely the depth test still
+    missing, the hair's layers and the face drawn over each other in the order they come.
 
 ## Files
 

@@ -27,6 +27,7 @@
 #include <map>
 
 #include "loader.hpp"
+#include "vkdraw.hpp"
 
 namespace mensis {
 namespace {
@@ -488,6 +489,7 @@ void work(Queue* q) {
             w.line(0, std::format("{} {:#x}, {} dwords:", q->compute ? "ring" : "draw buffer", at, dw));
             w.run(at, dw, 1, false);
         }
+        vkdraw::flush();  // what the job drew on the PC's GPU, done (as the job is)
         if (q->compute && q->rptr_addr && in_heap(q->rptr_addr, 4))
             reinterpret_cast<std::atomic<u32>*>(q->rptr_addr)->store(job.ring_end, std::memory_order_release);
         if (job.then) job.then();
