@@ -1209,24 +1209,82 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
         return false;
     }
     vkdraw::Dispatch d;
-    for (auto& b : vals.stores) {
+    translate::CsState st;
+    // a buffer's element as an image's texel: its memory, if it is laid out so (each element
+    // where the last ends, as many bytes as its format's)
+    auto access = [&](const translate::Values::Buffer& b, vkdraw::Dispatch::Access& a) {
         u64 base = b.v[0] | (u64(b.v[1] & 0xfff) << 32);
-        u32 stride = (b.v[1] >> 16) & 0x3fff;
+        u32 stride = (b.v[1] >> 16) & 0x3fff, bpp = translate::element_bytes(b.dfmt, b.nfmt);
         bool swizzled = (b.v[1] >> 31) & 1, add_tid = (b.v[3] >> 23) & 1;
-        if (stride != 4 || b.dfmt != 10 || b.nfmt != 0 || swizzled || add_tid || b.offset % 4) {
-            why = std::format("buffer stores of format {}, number type {}, stride {}", b.dfmt, b.nfmt, stride);
+        if (!bpp || stride != bpp || swizzled || add_tid || b.offset % bpp || !b.v[2]) return false;
+        a = {base + b.offset, u64(b.v[2]) * bpp, b.v[2], bpp};
+        return mem.ok(a.address, a.bytes);
+    };
+    for (auto& b : vals.stores) {
+        vkdraw::Dispatch::Access a;
+        if (!access(b, a)) {
+            why = std::format("buffer stores of format {}, number type {}, stride {}", b.dfmt, b.nfmt, (b.v[1] >> 16) & 0x3fff);
             return false;
         }
-        d.stores.push_back({base + b.offset, u64(b.v[2]) * 4, b.v[2]});
+        // memory that will be kept on the GPU, or already is (else it's the CPU's, before any work here)
+        if (!vkdraw::kept(a.address, a.bytes, a.bpp) && ((a.address | a.bytes) & 0xfff)) {
+            why = "a store into memory not kept on the GPU, not whole pages";
+            return false;
+        }
+        d.stores.push_back(a);
+        st.stores.push_back({b.dfmt, b.nfmt, true, {}});
     }
-    translate::CsState st;
+    // the loads: of memory kept on the GPU, from its image; of 32-bit values (one to four an
+    // element), the memory as it is, the shader picking them out; else the elements unpacked
+    // (in that order, as the shader's arrays are)
+    std::vector<std::pair<u32, std::vector<u32>>> raw_slots;  // a load's place in U, and its three values
+    std::vector<std::vector<u32>> arrays;
+    for (u32 i = 0; i < vals.buffers.size(); i++) {
+        const auto& b = vals.buffers[i];
+        translate::CsState::Access ta{b.dfmt, b.nfmt, false, false, {b.v[3] & 7, (b.v[3] >> 3) & 7, (b.v[3] >> 6) & 7, (b.v[3] >> 9) & 7}};
+        vkdraw::Dispatch::Access a;
+        u64 base = b.v[0] | (u64(b.v[1] & 0xfff) << 32);
+        u32 stride = (b.v[1] >> 16) & 0x3fff, records = b.v[2];
+        bool raw_format = (b.dfmt == 4 || b.dfmt == 11 || b.dfmt == 13 || b.dfmt == 14) && (b.nfmt == 4 || b.nfmt == 5 || b.nfmt == 7);
+        u32 dwords = b.dfmt == 4 ? 1 : b.dfmt == 11 ? 2 : b.dfmt == 13 ? 3 : 4;
+        u64 span = stride ? u64(stride) * (records ? records - 1 : 0) + b.offset + dwords * 4 : 0;
+        bool swizzled = (b.v[1] >> 31) & 1, add_tid = (b.v[3] >> 23) & 1;
+        if (access(b, a) && vkdraw::kept(a.address, a.bytes, a.bpp)) {
+            ta.image = true;
+            d.loads.push_back(a);
+            d.load_index.push_back(i);
+        } else if (raw_format && stride && stride % 4 == 0 && b.offset % 4 == 0 && records && !swizzled && !add_tid && mem.ok(base, span) &&
+                   span <= (u64(256) << 20)) {
+            ta.raw = true;
+            std::vector<u32> data((span + 3) / 4);
+            std::memcpy(data.data(), reinterpret_cast<const void*>(base), span);
+            arrays.push_back(std::move(data));
+            raw_slots.push_back({i, {b.offset / 4, stride / 4, records}});
+        } else {
+            std::vector<std::vector<u32>> one;
+            if (!unpack_buffers({b}, mem, one, why)) return false;
+            arrays.push_back(std::move(one[0]));
+        }
+        st.loads.push_back(ta);
+    }
+    d.arrays = std::move(arrays);
     st.user_count = users;
     st.rsrc2 = rsrc2;
     st.threads[0] = std::max(r.sh[0x207] & 0xffff, 1u);
     st.threads[1] = std::max(r.sh[0x208] & 0xffff, 1u);
     st.threads[2] = std::max(r.sh[0x209] & 0xffff, 1u);
     st.store_slot = u32(vals.u.size());
-    translate::Glsl gl = translate::compute_shader(prog, st);
+    st.load_slot = st.store_slot + 3 * u32(st.stores.size());
+    vals.u.resize(st.load_slot + 3 * st.loads.size());
+    for (auto& [i, v] : raw_slots) std::copy(v.begin(), v.end(), vals.u.begin() + st.load_slot + 3 * i);
+    // translated once for the program and all of this
+    std::string gkey = std::format("cs:{:x}:{}:{:x}:{}.{}.{}:{}:{}", cs, users, rsrc2, st.threads[0], st.threads[1], st.threads[2],
+                                   st.store_slot, st.load_slot);
+    for (auto& a : st.stores) gkey += std::format(":s{}.{}", a.dfmt, a.nfmt);
+    for (auto& a : st.loads) gkey += std::format(":l{}.{}.{}{}.{}{}{}{}", a.dfmt, a.nfmt, a.image, a.raw, a.sel[0], a.sel[1], a.sel[2], a.sel[3]);
+    auto git = g_glsl.find(gkey);
+    if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::compute_shader(prog, st)).first;
+    const translate::Glsl& gl = git->second;
     if (!gl.why.empty()) {
         why = "the shader has " + gl.why;
         return false;
@@ -1235,6 +1293,7 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
     d.cs = gl.text;
     d.values = vals.u;
     d.store_slot = st.store_slot;
+    d.load_slot = st.load_slot;
     d.groups[0] = gx, d.groups[1] = gy, d.groups[2] = gz;
     return vkdraw::dispatch(d, why);
 }

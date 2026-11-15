@@ -77,14 +77,31 @@ struct VsState {
     std::string key() const;  // all of it, for a translation kept to be used again
 };
 
+// A buffer format a GPU image can hold as it is in memory, an element a texel: its bytes, or
+// 0 if not. 8-bit RGBA (unorm); 32-bit integers or floats, one, two or four; 16-bit floats,
+// two or four; 11- and 10-bit floats.
+u32 element_bytes(u32 dfmt, u32 nfmt);
+
 // A compute shader's: its user SGPRs, which others it is given (COMPUTE_PGM_RSRC2), the
-// threads in a group, and where in U each buffer store's place is (three values each: the
-// first pixel it writes, the image's width, and the elements in the buffer), filled in by
-// vkdraw once it knows which image it writes
+// threads in a group, and its buffer loads and stores by index. Each store, and each load of
+// memory kept on the GPU, goes to an image of the kept memory, viewed as uints (its element,
+// 4, 8 or 16 bytes, a texel), packed and unpacked exactly as the CPU's interpreter does it;
+// any other load reads the buffer's elements as the CPU unpacked them. Where in U each one's
+// place is: three values each (the first element of the image it reads or writes, the
+// image's width, the elements in the buffer), filled in by vkdraw once it knows the image.
 struct CsState {
     u32 user_count = 0, rsrc2 = 0;
     u32 threads[3] = {1, 1, 1};
-    u32 store_slot = 0;
+    struct Access {
+        u32 dfmt = 0, nfmt = 0;
+        bool image = true;  // a load: of kept memory (else of the CPU's unpacked elements)
+        // or of memory as it is, 32-bit values (one to four an element), U holding where an
+        // element starts and how far apart they are, in dwords, and how many there are
+        bool raw = false;
+        u32 sel[4] = {4, 5, 6, 7};  // a load's dst_sel
+    };
+    std::vector<Access> stores, loads;
+    u32 store_slot = 0, load_slot = 0;
 };
 
 struct Glsl {
@@ -102,8 +119,8 @@ Glsl vertex_shader(const Program& p, const VsState& s);
 // For a rectangle list: each three corners in, the fourth (b + c - a) added
 std::string rect_geometry_shader(u32 attributes);
 
-// The compute shader. Its buffer stores (by index, of 8-bit RGBA) go into storage images at
-// bindings 32 onwards, viewed as 32-bit uints, each element a texel, as in memory.
+// The compute shader. Bindings: the images it stores into from 32, those it loads from 36, the
+// unpacked buffers it loads from 56.
 Glsl compute_shader(const Program& p, const CsState& s);
 
 // A trivial vertex shader that passes on a position and n attributes, computed on the CPU

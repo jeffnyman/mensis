@@ -295,10 +295,14 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   integer one as 32-bit integers, read without filtering; one whose format the CPU can't read
   (an unused descriptor's) reads the same everywhere, and is a single texel. A cube is read as
   the CPU reads it: six slices of a 2D array, its faces' coordinates coming as 1 to 2. A compute shader runs a thread to an invocation, in groups as the
-  dispatch's, its group number and thread number where the console puts them; its stores so
-  far are buffer stores by index, of 8-bit RGBA, into a render target kept on the GPU, which
-  it writes as an image of 32-bit values, each packed exactly as the CPU's interpreter packs
-  it. A pixel shader's buffer loads read the buffer's elements as the CPU unpacked them, as a
+  dispatch's, its group number and thread number where the console puts them. Its buffer
+  loads and stores by index of memory kept on the GPU read and write that memory's image,
+  viewed as uints, an element a texel, unpacked and packed exactly as the CPU's interpreter
+  does it: 8-bit RGBA, 32-bit integers or floats (one, two or four), 16-bit floats (two or
+  four), 11- and 10-bit floats. A store into memory not kept yet keeps it from then on (whole
+  pages only: memory sharing a page with other memory would keep being let go), shaped as
+  the image it was copied from, if it was; a load of other memory reads it as it is, if its
+  elements are 32-bit values, else as the CPU unpacked it. A pixel shader's buffer loads read the buffer's elements as the CPU unpacked them, as a
   vertex shader's do. Not yet translated: loops (branches backwards), branches on `vcc` or on
   `scc1` from a lane mask, buffer loads other than by index, other stores, LDS instructions,
   depth export, gathers, depth-compare sampling; a shader with any of them says so, and is
@@ -658,6 +662,22 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     groups in a run): they store into memory in ways the GPU doesn't yet. The character's face
     is a speckle of noise, with or without batches; that is most likely the depth test still
     missing, the hair's layers and the face drawn over each other in the order they come.
+38. **Compute shaders on the GPU, reading and writing memory.** The compute shaders the CPU
+    still ran, 64 million groups in a run of character creation: the clear, writing the
+    G-buffer's float targets too; a copy of the G-buffer's first target to memory elsewhere,
+    25 million groups alone; a gather, a fill. Their stores now go on the GPU in all those
+    formats, and a store into memory that isn't kept keeps it (shaped as the copy's source,
+    so that a draw or a texture can use it as it is); their loads of kept memory read its
+    image. Kept memory is now matched by its address, size and bytes a texel, not its format
+    (an image is viewed in whatever format a draw wants), and memory kept in one shape (a
+    clear sees a buffer) and wanted in another (a draw sees 896x832) is reshaped on the GPU,
+    not let go: the first try let 694 go in a run, each read back and taken up again. A
+    profile then showed the time going to unpacking the loads' buffers, mostly for dispatches
+    that went to the CPU in the end: whether a dispatch can go to the GPU is now known before
+    any of that, and a load of plain 32-bit values takes the memory as it is, the shader
+    picking its elements out. The CPU's compute work fell from 64 million groups to 4 million,
+    and character creation went from 4.2 frames a second to 6.7. Still the CPU's: shaders that
+    store into images (`image_store`), and stores into memory sharing its pages.
 
 ## Files
 

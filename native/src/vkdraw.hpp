@@ -67,20 +67,27 @@ struct Draw {
     int scissor[4] = {};  // x0, y0, x1, y1
 };
 
-// A compute dispatch: its GLSL, its U (the store places in it filled in here), the groups,
-// and each buffer store's bytes in memory, which must be in a render target kept on the GPU
+// A compute dispatch: its GLSL, its U (the places of its loads and stores in it filled in
+// here), the groups; each buffer store's memory (kept on the GPU from now on, if it isn't),
+// each load's of memory kept on the GPU (and which load it is), and the other loads' elements,
+// unpacked
 struct Dispatch {
     std::string cs;
     std::vector<u32> values;
-    u32 store_slot = 0;
+    u32 store_slot = 0, load_slot = 0;
     u32 groups[3] = {1, 1, 1};
-    struct Store {
+    struct Access {
         u64 address = 0, bytes = 0;
         u32 records = 0;  // the buffer's elements
+        u32 bpp = 4;  // an element's bytes: 4, 8 or 16
     };
-    std::vector<Store> stores;
+    std::vector<Access> stores, loads;
+    std::vector<u32> load_index;
+    std::vector<std::vector<u32>> arrays;
 };
 bool dispatch(Dispatch& d, std::string& why);
+// Whether that memory is kept on the GPU, an element of bpp bytes a texel
+bool kept(u64 address, u64 bytes, u32 bpp);
 
 bool has_texture(const std::string& key);
 // Whether a pixel shader can have its triangle's corners' attributes and its barycentrics

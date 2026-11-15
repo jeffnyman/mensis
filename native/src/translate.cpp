@@ -25,9 +25,10 @@
 // them before the draw, one uvec4 each, with the value an index past the end reads after
 // them.
 //
-// A compute shader runs a thread an invocation, in groups as the dispatch's. Its buffer stores
-// so far: by index, of 8-bit RGBA, into a render target kept on the GPU, as a storage image
-// viewed as uints, each element packed exactly as the CPU's interpreter packs it.
+// A compute shader runs a thread an invocation, in groups as the dispatch's. Its buffer loads
+// and stores by index of memory kept on the GPU (a render target, or memory a store keeps
+// there) read and write an image of it viewed as uints, an element a texel, unpacked and
+// packed exactly as the CPU's interpreter does it.
 //
 // Branches, forward only so far. s_cbranch_execz skips code when no lane is on; the code then
 // does nothing a lane can see (its vector writes go where exec is set, and compilers put the
@@ -409,6 +410,48 @@ struct Writer {
     u32 image = 0;  // the next image instruction's binding
     u32 buffer = 0;  // the next buffer load's
     u32 buffers = 0;  // the buffers they read (fewer, if loads share them)
+    std::vector<u32> image_loads, array_loads;  // a compute shader's loads: of kept memory, and of unpacked elements
+    std::set<u32> raw_loads;  // which of the arrays are memory as it is
+
+    // A store's value as the uvec4 written to a uint image (its texel the element as in
+    // memory), from its components' registers, as the CPU's interpreter packs them
+    std::string pack(u32 dfmt, u32 nfmt, const std::string c[4]) {
+        auto F = [&](int k) { return "uintBitsToFloat(" + c[k] + ")"; };
+        bool any = nfmt == 4 || nfmt == 5 || nfmt == 7;
+        if (dfmt == 10 && nfmt == 0)
+            return std::format("uvec4(unorm8({}) | (unorm8({}) << 8) | (unorm8({}) << 16) | (unorm8({}) << 24), 0u, 0u, 0u)", c[0], c[1], c[2], c[3]);
+        if (dfmt == 4 && any) return std::format("uvec4({}, 0u, 0u, 0u)", c[0]);
+        if (dfmt == 11 && any) return std::format("uvec4({}, {}, 0u, 0u)", c[0], c[1]);
+        if (dfmt == 14 && any) return std::format("uvec4({}, {}, {}, {})", c[0], c[1], c[2], c[3]);
+        if (dfmt == 12 && nfmt == 7)
+            return std::format("uvec4(f2h({}) | (f2h({}) << 16), f2h({}) | (f2h({}) << 16), 0u, 0u)", F(0), F(1), F(2), F(3));
+        if (dfmt == 5 && nfmt == 7) return std::format("uvec4(f2h({}) | (f2h({}) << 16), 0u, 0u, 0u)", F(0), F(1));
+        if (dfmt == 6 && nfmt == 7)
+            return std::format("uvec4(sf_pack({}, 11) | (sf_pack({}, 11) << 11) | (sf_pack({}, 10) << 22), 0u, 0u, 0u)", F(0), F(1), F(2));
+        fail(std::format("buffer stores of format {}, number type {}", dfmt, nfmt));
+        return {};
+    }
+    // A texel read from a uint image, as the CPU's interpreter unpacks the element (before
+    // dst_sel): its components' bits
+    std::string unpack(u32 dfmt, u32 nfmt, const std::string& texel) {
+        bool integer = nfmt == 4 || nfmt == 5, any = integer || nfmt == 7;
+        std::string one = integer ? "1u" : "0x3f800000u", t = "(" + texel + ")";
+        if (dfmt == 10 && nfmt == 0)
+            return std::format("uvec4(floatBitsToUint(float({0}.x & 255u) / 255.0), floatBitsToUint(float(({0}.x >> 8) & 255u) / 255.0), "
+                               "floatBitsToUint(float(({0}.x >> 16) & 255u) / 255.0), floatBitsToUint(float({0}.x >> 24) / 255.0))", t);
+        if (dfmt == 4 && any) return std::format("uvec4({}.x, 0u, 0u, {})", t, one);
+        if (dfmt == 11 && any) return std::format("uvec4({0}.x, {0}.y, 0u, {1})", t, one);
+        if (dfmt == 14 && any) return t;
+        if (dfmt == 12 && nfmt == 7)
+            return std::format("uvec4(floatBitsToUint(h2f({0}.x & 0xffffu)), floatBitsToUint(h2f({0}.x >> 16)), floatBitsToUint(h2f({0}.y & 0xffffu)), "
+                               "floatBitsToUint(h2f({0}.y >> 16)))", t);
+        if (dfmt == 5 && nfmt == 7)
+            return std::format("uvec4(floatBitsToUint(h2f({0}.x & 0xffffu)), floatBitsToUint(h2f({0}.x >> 16)), 0u, 0x3f800000u)", t);
+        if (dfmt == 6 && nfmt == 7)
+            return std::format("uvec4(sf_unpack({0}.x & 0x7ffu, 11), sf_unpack(({0}.x >> 11) & 0x7ffu, 11), sf_unpack({0}.x >> 22, 10), 0x3f800000u)", t);
+        fail(std::format("buffer loads of format {}, number type {}", dfmt, nfmt));
+        return {};
+    }
     u32 attrs = 0;  // how many attributes are read
     std::string interp[32];  // each attribute's interpolation qualifier
     bool outputs[8] = {};
@@ -985,13 +1028,19 @@ void Writer::buffer_op(const Inst& in) {
             fail("buffer stores other than by index");
             return;
         }
+        if (store >= cs->stores.size()) {
+            fail("buffer stores not found before the dispatch");
+            return;
+        }
         vgprs.insert(vaddr);
+        const CsState::Access& a = cs->stores[store];
         u32 slot = cs->store_slot + 3 * store++;
         std::string c[4] = {"0u", "0u", "0u", "0u"};
-        for (u32 k = 0; k <= op - 4; k++) c[k] = "unorm8(" + src(256 + ((vdata + k) & 255), 0) + ")";
-        line(std::format("if (exec_lo != 0u && v{0} < U[{1}]) {{ uint p = v{0} + U[{2}]; imageStore(S{3}, ivec2(int(p % U[{4}]), int(p / U[{4}])), "
-                         "uvec4({5} | ({6} << 8) | ({7} << 16) | ({8} << 24))); }}",
-                         vaddr, slot + 2, slot, store - 1, slot + 1, c[0], c[1], c[2], c[3]));
+        for (u32 k = 0; k <= op - 4; k++) c[k] = src(256 + ((vdata + k) & 255), 0);
+        std::string v = pack(a.dfmt, a.nfmt, c);
+        if (v.empty()) return;
+        line(std::format("if (exec_lo != 0u && v{0} < U[{1}]) {{ uint p = v{0} + U[{2}]; imageStore(S{3}, ivec2(int(p % U[{4}]), int(p / U[{4}])), {5}); }}",
+                         vaddr, slot + 2, slot, store - 1, slot + 1, v));
         return;
     }
     if (op > 3) {
@@ -1007,7 +1056,42 @@ void Writer::buffer_op(const Inst& in) {
         return;
     }
     vgprs.insert(vaddr);
+    if (cs && buffer < cs->loads.size() && cs->loads[buffer].image) {
+        const CsState::Access& a = cs->loads[buffer];
+        u32 k = buffer++, slot = cs->load_slot + 3 * k;
+        bool integer = a.nfmt == 4 || a.nfmt == 5;
+        std::string one = integer ? "1u" : "0x3f800000u";
+        std::string raw = unpack(a.dfmt, a.nfmt, std::format("imageLoad(L{}, ivec2(int(p % U[{}]), int(p / U[{}])))", k, slot + 1, slot + 1));
+        if (raw.empty()) return;
+        // past the buffer's end: 0, 0, 0, 1, as the CPU's interpreter reads it; then dst_sel
+        line(std::format("uvec4 r{0} = uvec4(0u, 0u, 0u, {1}); if (v{2} < U[{3}]) {{ uint p = v{2} + U[{4}]; r{0} = {5}; }}", k, one, vaddr,
+                         slot + 2, slot, raw));
+        auto sel = [&](u32 s) { return s >= 4 ? std::format("r{}.{}", k, "xyzw"[s - 4]) : s == 1 ? one : std::string("0u"); };
+        line(std::format("uvec4 b{} = uvec4({}, {}, {}, {});", k, sel(a.sel[0]), sel(a.sel[1]), sel(a.sel[2]), sel(a.sel[3])));
+        image_loads.push_back(k);
+        static const char xyzw[] = "xyzw";
+        for (u32 c = 0; c <= op; c++) vwrite((vdata + c) & 255, std::format("b{}.{}", k, xyzw[c]));
+        return;
+    }
+    if (cs && buffer < cs->loads.size() && cs->loads[buffer].raw) {  // memory as it is: its dwords
+        const CsState::Access& a = cs->loads[buffer];
+        u32 k = buffer++, slot = cs->load_slot + 3 * k, j = u32(array_loads.size());
+        array_loads.push_back(k);
+        raw_loads.insert(j);
+        u32 n = a.dfmt == 4 ? 1 : a.dfmt == 11 ? 2 : a.dfmt == 13 ? 3 : 4;
+        std::string one = a.nfmt == 4 || a.nfmt == 5 ? "1u" : "0x3f800000u";
+        std::string c[4] = {"0u", "0u", "0u", one};
+        for (u32 i = 0; i < n; i++) c[i] = std::format("R{}[q + {}u]", j, i);
+        line(std::format("uvec4 r{0} = uvec4(0u, 0u, 0u, {1}); if (v{2} < U[{3}]) {{ uint q = v{2} * U[{4}] + U[{5}]; r{0} = uvec4({6}, {7}, {8}, {9}); }}",
+                         k, one, vaddr, slot + 2, slot + 1, slot, c[0], c[1], c[2], c[3]));
+        auto sel = [&](u32 s) { return s >= 4 ? std::format("r{}.{}", k, "xyzw"[s - 4]) : s == 1 ? one : std::string("0u"); };
+        line(std::format("uvec4 b{} = uvec4({}, {}, {}, {});", k, sel(a.sel[0]), sel(a.sel[1]), sel(a.sel[2]), sel(a.sel[3])));
+        static const char xyzw[] = "xyzw";
+        for (u32 cc = 0; cc <= op; cc++) vwrite((vdata + cc) & 255, std::format("b{}.{}", k, xyzw[cc]));
+        return;
+    }
     u32 k = buffer++, slot = k < st.buffer_slot.size() ? st.buffer_slot[k] : k;
+    if (cs) slot = u32(array_loads.size()), array_loads.push_back(k);
     buffers = std::max(buffers, slot + 1);
     line(std::format("uvec4 b{0} = B{2}[min(v{1}, uint(B{2}.length()) - 1u)];", k, vaddr, slot));
     static const char xyzw[] = "xyzw";
@@ -1326,6 +1410,16 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     return g;
 }
 
+u32 element_bytes(u32 dfmt, u32 nfmt) {
+    bool any = nfmt == 4 || nfmt == 5 || nfmt == 7;
+    if (dfmt == 10) return nfmt == 0 ? 4 : 0;
+    if (dfmt == 4) return any ? 4 : 0;
+    if (dfmt == 11) return any ? 8 : 0;
+    if (dfmt == 14) return any ? 16 : 0;
+    if (nfmt != 7) return 0;
+    return dfmt == 12 ? 8 : dfmt == 5 || dfmt == 6 ? 4 : 0;
+}
+
 Glsl compute_shader(const Program& p, const CsState& cs) {
     Glsl g;
     if (!p.why.empty()) {
@@ -1339,18 +1433,52 @@ Glsl compute_shader(const Program& p, const CsState& cs) {
         g.why = w.why;
         return g;
     }
-    if (w.image || w.buffer) {
-        g.why = "images or buffer loads in a compute shader";
+    if (w.image) {
+        g.why = "images in a compute shader";
         return g;
     }
     std::string s = "#version 450\n";
     s += std::format("layout(local_size_x = {}, local_size_y = {}, local_size_z = {}) in;\n", cs.threads[0], cs.threads[1],
                      cs.threads[2]);
     s += "layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };\n";
-    for (u32 k = 0; k < w.store; k++) s += std::format("layout(set = 0, binding = {}, r32ui) uniform writeonly uimage2D S{};\n", 32 + k, k);
+    // each image's view as the element's size: 4 bytes r32ui, 8 rg32ui, 16 rgba32ui
+    auto view = [](const CsState::Access& a) {
+        u32 b = element_bytes(a.dfmt, a.nfmt);
+        return b == 16 ? "rgba32ui" : b == 8 ? "rg32ui" : "r32ui";
+    };
+    for (u32 k = 0; k < w.store; k++)
+        s += std::format("layout(set = 0, binding = {}, {}) uniform writeonly uimage2D S{};\n", 32 + k, view(cs.stores[k]), k);
+    for (size_t i = 0; i < w.image_loads.size(); i++)
+        s += std::format("layout(set = 0, binding = {}, {}) uniform readonly uimage2D L{};\n", 36 + i, view(cs.loads[w.image_loads[i]]),
+                         w.image_loads[i]);
+    for (u32 i = 0; i < w.array_loads.size(); i++)
+        s += w.raw_loads.count(i) ? std::format("layout(set = 0, binding = {}, std430) readonly buffer Raw{} {{ uint R{}[]; }};\n", 56 + i, i, i)
+                                  : std::format("layout(set = 0, binding = {}, std430) readonly buffer Buffer{} {{ uvec4 B{}[]; }};\n", 56 + i, i, i);
     s += HELPERS;
-    // a float into 8 unsigned bits, as the CPU's interpreter packs it (shade.cpp)
+    // a float into 8 unsigned bits, and an unsigned 11- or 10-bit float to and from its bits, as
+    // the CPU's interpreter packs and unpacks them (shade.cpp)
     s += "uint unorm8(uint x) { float f = uintBitsToFloat(x); f = isnan(f) ? 0.0 : clamp(f, 0.0, 1.0); return uint(roundEven(f * 255.0)); }\n";
+    s += R"(uint sf_unpack(uint raw, int bits) {
+    int mbits = bits - 5;
+    uint e = raw >> uint(mbits), m = raw & ((1u << uint(mbits)) - 1u);
+    if (e == 0u) return floatBitsToUint(ldexp(float(m), -14 - mbits));
+    if (e == 31u) return m != 0u ? 0x7fc00000u : 0x7f800000u;
+    return floatBitsToUint(ldexp(float(m | (1u << uint(mbits))), int(e) - 15 - mbits));
+}
+uint sf_pack(float x, int bits) {
+    int mbits = bits - 5;
+    if (!(x > 0.0)) return 0u;
+    if (isinf(x)) return 31u << uint(mbits);
+    int e;
+    frexp(x, e);
+    int be = e - 1 + 15;
+    if (be <= 0) return uint(roundEven(ldexp(x, 14 + mbits)));
+    uint q = uint(roundEven(ldexp(x, mbits - (e - 1))));
+    if ((q >> uint(mbits + 1)) != 0u) { q >>= 1u; be++; }
+    if (be >= 31) return (30u << uint(mbits)) | ((1u << uint(mbits)) - 1u);
+    return (uint(be) << uint(mbits)) | (q & ((1u << uint(mbits)) - 1u));
+}
+)";
     s += "\nvoid main() {\n";
     // v0-v2: the thread in its group; after the user SGPRs, the group's number (x, y, z, as
     // enabled), then the wave's in the group
