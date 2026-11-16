@@ -436,6 +436,8 @@ struct Kept {
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
     u64 depth_clears = 0;  // depth buffers cleared there
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
+    u64 wait_ns = 0, readback_ns = 0, upload_ns = 0;  // waiting for batches; reading targets back; copying uploads
+    u64 upload_bytes = 0, texture_upload_bytes = 0;
 };
 Kept k;
 
@@ -750,8 +752,10 @@ bool flush_batch() {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &k.cmd;
     vkResetFences(g.device, 1, &k.fence);
+    auto t0 = std::chrono::steady_clock::now();
     bool ok = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS &&
               vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS;
+    k.wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     g_arena = 0;
     g_sets = 0;
     vkResetDescriptorPool(g.device, k.dpool, 0);
@@ -790,6 +794,11 @@ bool reserve_batch(VkDeviceSize bytes, VkDeviceSize& base, VkDescriptorSet& set,
 
 // The GPU's picture back into the memory, which may then be read
 bool read_back(Resident& r) {
+    auto t0 = std::chrono::steady_clock::now();
+    struct Done {
+        std::chrono::steady_clock::time_point t0;
+        ~Done() { k.readback_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); }
+    } done{t0};
     if (r.state != Resident::gpu) return true;
     VkDeviceSize sbytes = r.sbase ? VkDeviceSize(r.width) * r.height : 0, sat = (r.bytes + 255) & ~VkDeviceSize(255);
     if (!flush_batch() || !k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
@@ -1152,6 +1161,7 @@ bool draw(Draw& d, std::string& why) {
     if (zupload && sbytes)
         std::memcpy(up + at_stencil, kept ? reinterpret_cast<const unsigned char*>(d.depth.saddress) : d.depth.starget, sbytes);
     std::memcpy(up + at_values, d.values.data(), d.values.size() * 4);
+    auto copy0 = std::chrono::steady_clock::now();
     std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
     std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
     std::memcpy(up + at_vs_values, d.vs_values.data(), d.vs_values.size() * 4);
@@ -1161,9 +1171,12 @@ bool draw(Draw& d, std::string& why) {
     for (size_t i = 0; i < d.textures.size(); i++) {
         if (at_texels[i] == ~VkDeviceSize(0)) continue;
         const Texture& t = d.textures[i];
-        if (t.format) std::memcpy(up + at_texels[i], t.raw, size_t(t.pitch) * t.height * t.layers * t.bpp);
-        else std::memcpy(up + at_texels[i], t.rgba.data(), t.rgba.size() * 4);
+        size_t bytes = t.format ? size_t(t.pitch) * t.height * t.layers * t.bpp : t.rgba.size() * 4;
+        if (t.format) std::memcpy(up + at_texels[i], t.raw, bytes);
+        else std::memcpy(up + at_texels[i], t.rgba.data(), bytes);
+        k.texture_upload_bytes += bytes;
     }
+    k.upload_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy0).count());
 
     std::vector<GpuImage*> target(nt, nullptr);
     for (size_t i = 0; i < nt; i++) {
@@ -1779,7 +1792,10 @@ std::string report() {
                        k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures) +
            (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s", k.dispatches, double(k.dispatch_ns) / 1e9) : "") +
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
-                       "Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes, k.batches);
+                       "Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes, k.batches) +
+           std::format(". Of the time: {:.1f} s submitting batches and waiting for them, {:.1f} s reading targets back into "
+                       "memory (waits included), {:.1f} s copying draws' data to upload ({} MiB of textures)",
+                       double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20);
 }
 
 }  // namespace mensis::vkdraw

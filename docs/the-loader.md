@@ -853,6 +853,17 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     its target. The pixels the CPU fills, loading the first scene, went from about 450
     million to about 120 million; the draws still take about 430 s of a 500-second run,
     so the time is now going somewhere other than pixels.
+47. **Where the time goes.** The summary now says where the draws' time went, stage by
+    stage (a draw's time goes to one stage at a time), and some stages' parts: shaders
+    translated and evaluated, buffers unpacked, textures' memory hashed, textures decoded
+    texel by texel; and, on the GPU, the time spent waiting for batches, reading targets
+    back, and copying a draw's data to upload. Into the first scene (a 300-second run, the
+    draws 229 s of it), the pixels the CPU fills take 4 s, and the vertices it runs 1 s.
+    Getting draws ready for the GPU takes 127 s, 102 of them decoding 9,852 textures texel
+    by texel for the GPU (those it can't take as they are in memory) and 21 unpacking
+    buffers; the GPU's draws themselves take 91 s, 26 of them waiting for 13,642 batches,
+    7 reading targets back, 6 copying uploads: 271 GiB of textures, as the textures the
+    GPU takes as they are in memory aren't kept from draw to draw but uploaded each time.
 
 ## Files
 

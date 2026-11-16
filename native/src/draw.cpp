@@ -116,6 +116,34 @@ struct Timer {  // adds the time from here to the end of the scope
     explicit Timer(std::atomic<u64>& t) : to(t) {}
     ~Timer() { to += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); }
 };
+// Where the draws' time goes, stage by stage: a draw's time goes to one stage at a time (Lap),
+// and some stages' parts are timed as well (Timer), for the summary
+enum Stage : int { ST_SETUP, ST_PREPARE, ST_GPU, ST_SAVE, ST_CPU_VERTICES, ST_CPU_TRIANGLES, ST_CHECK, ST_CPU_PIXELS, ST_COUNT };
+const char* const stage_names[ST_COUNT] = {
+    "setting up (the memory's snapshot, targets, depth buffer, HTILE)",
+    "preparing for the GPU (translations, buffers, textures, vertices)",
+    "the GPU's draws (recording, uploads, waiting)",
+    "saving draws to draws/",
+    "vertex shaders on the CPU",
+    "triangles on the CPU (clipping, culling)",
+    "--gpu-check's draws",
+    "pixels on the CPU",
+};
+std::atomic<u64> g_stage_ns[ST_COUNT];
+std::atomic<u64> g_texture_hash_ns{0}, g_texture_decode_ns{0}, g_buffer_unpack_ns{0}, g_translate_ns{0};
+std::atomic<u64> g_texture_hash_bytes{0}, g_texture_decoded{0};
+struct Lap {
+    int stage;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    explicit Lap(int s) : stage(s) {}
+    void to(int s) {
+        auto now = std::chrono::steady_clock::now();
+        g_stage_ns[stage] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t0).count());
+        stage = s;
+        t0 = now;
+    }
+    ~Lap() { to(stage); }
+};
 std::atomic<u64> g_clipped{0};  // triangles clipped to the guard band (on the CPU)
 std::atomic<u64> g_draws{0}, g_triangles{0}, g_pixels{0}, g_ps_waves{0}, g_dispatches{0}, g_groups{0};
 
@@ -695,6 +723,7 @@ u64 g_unpacked_bytes = 0, g_unpack_hits = 0, g_unpacks = 0;
 
 bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const Memory& mem, std::vector<std::vector<u32>>& out,
                     std::string& why) {
+    Timer timer(g_buffer_unpack_ns);
     for (const auto& b : buffers) {
         u32 stride = (b.v[1] >> 16) & 0x3fff, records = b.v[2];
         u64 n = stride == 0 ? 1 : records;
@@ -737,7 +766,11 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     u32 user[16];
     for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x4c + k];
     translate::Program prog = translate::decode(vs, mem, user, users);
-    translate::Values vals = translate::evaluate(prog, user, users, mem);
+    translate::Values vals;
+    {
+        Timer timer(g_translate_ns);
+        vals = translate::evaluate(prog, user, users, mem);
+    }
     if (prog.why.empty() && !vals.why.empty()) prog.why = vals.why;
     translate::VsState st;
     st.user_count = users;
@@ -750,7 +783,10 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     for (const auto& in : prog.code) code_hash = (code_hash ^ in.w0 ^ (u64(in.w1) << 32) ^ (u64(in.lit) << 16)) * 0x100000001b3ull;
     std::string gkey = std::format("vs:{:x}:{:x}:{}:{}", vs, code_hash, prog.why, st.key());
     auto git = g_glsl.find(gkey);
-    if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::vertex_shader(prog, st)).first;
+    {
+        Timer timer(g_translate_ns);
+        if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::vertex_shader(prog, st)).first;
+    }
     const translate::Glsl& g = git->second;
     if (!g.why.empty()) {
         why = "the vertex shader has " + g.why;
@@ -850,7 +886,10 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x0c + k];
     u32 users = std::min(ps_user, 16u);
     translate::Values vals;
-    if (ps) vals = translate::evaluate(prog, user, users, mem);
+    if (ps) {
+        Timer timer(g_translate_ns);
+        vals = translate::evaluate(prog, user, users, mem);
+    }
     if (!vals.why.empty()) {
         why = "the shader has " + vals.why;
         return false;
@@ -898,7 +937,10 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     if (no_shader.text.empty()) no_shader.text = "#version 450\nvoid main() {}\n";
     std::string gkey = std::format("ps:{:x}:{}", ps, st.key());
     auto git = ps ? g_glsl.find(gkey) : g_glsl.end();
-    if (ps && git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::pixel_shader(prog, st)).first;
+    {
+        Timer timer(g_translate_ns);
+        if (ps && git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::pixel_shader(prog, st)).first;
+    }
     const translate::Glsl& gl = ps ? git->second : no_shader;
     if (ps && gl.why.empty()) save_glsl("ps", ps, gl.text);
     if (!gl.why.empty()) {
@@ -1050,13 +1092,21 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             continue;
         }
         if (ti.all_ok) {
+            u64 h = 0;
+            if (layout(ti.dfmt).count) {
+                Timer hashing(g_texture_hash_ns);
+                h = hash_memory(reinterpret_cast<const unsigned char*>(ti.base), ti.size);
+                g_texture_hash_bytes += ti.size;
+            }
             tx.key = std::format("{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4], im.t[5],
-                                 im.t[6], im.t[7], layout(ti.dfmt).count ? hash_memory(reinterpret_cast<const unsigned char*>(ti.base), ti.size) : 0);
+                                 im.t[6], im.t[7], h);
             if (vkdraw::has_texture(tx.key)) {
                 d.textures.push_back(std::move(tx));
                 continue;
             }
         }
+        Timer decoding(g_texture_decode_ns);
+        g_texture_decoded++;
         tx.rgba.resize(size_t(tx.width) * tx.height * tx.layers * 4);
         float* o = tx.rgba.data();
         for (u32 l = 0; l < tx.layers; l++) {
@@ -1187,6 +1237,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     if (!M.draw || !count) return {};
     std::lock_guard draw_lock(g_draw_lock);
     Timer timer(g_draw_ns);
+    Lap lap(ST_SETUP);
     g_draws++;
     u64 vs = program(r, 0x48), ps = program(r, 0x08);
     if (!vs) return "(no vertex shader)";
@@ -1272,6 +1323,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     // the draws saved to draws/: their number and a line in the index, once drawn
     auto saved = [&](std::string what, const std::string& extra) {
         if (!save) return what;
+        lap.to(ST_SAVE);
         g_saved_by_ps[ps]++;
         u64 number = g_saved++;
         auto dir = std::filesystem::path(M.out_dir) / "draws";
@@ -1300,8 +1352,10 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     if (M.gpu && !(save && M.gpu_check) && x0 < x1 && y0 < y1) {
         vkdraw::Draw gd;
         std::string why, vwhy;
+        lap.to(ST_PREPARE);
         if (prepare_gpu(gd, why, vwhy, r, vs, ps, Vertices{}, {}, index, tris_in, rects, targets, area, ps_user, ena, addr, mem, true)) {
             for (size_t k = 0; k < gd.targets.size(); k++) gd.targets[k].address = targets[k].base;
+            lap.to(ST_GPU);
             if (vkdraw::run(gd, why)) {
                 g_gpu_draws++;
                 g_gpu_vertices++;
@@ -1314,6 +1368,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         if (gpu_failed) g_gpu_skipped[why]++;
     }
     // the vertex shader, 64 vertices a wave; a rectangle's fourth corner is added after
+    lap.to(ST_CPU_VERTICES);
     Vertices out;
     out.params = ((reg(r, 0x1b1, 0) >> 1) & 0x1f) + 1;
     size_t n = count + (rects ? count / 3 : 0);
@@ -1347,6 +1402,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 out.param[extra * out.params * 4 + p] = at(k + 1) + at(k + 2) - at(k);
             }
         }
+    lap.to(ST_CPU_TRIANGLES);
     u32 cull = reg(r, 0x205, 0);
     std::vector<Tri> tris;
     tris.reserve(tris_in.size() * (rects ? 2 : 1));
@@ -1435,6 +1491,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     g_triangles += tris.size();
     if (tris.empty() || x0 >= x1 || y0 >= y1) return std::format("{} vertices, nothing on screen", count);
     if (save && M.gpu_check) {
+        lap.to(ST_CHECK);
         checked = prepare_gpu(check, check_why, vertex_why, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user,
                               ena, addr, mem);
         if (checked) {
@@ -1469,8 +1526,10 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         // drawn on the GPU, into the game's memory, with the CPU's vertices
         vkdraw::Draw gd;
         std::string why, vwhy;
+        lap.to(ST_PREPARE);
         if (prepare_gpu(gd, why, vwhy, r, vs, ps, out, tris, index, tris_in, rects, targets, area, ps_user, ena, addr, mem)) {
             for (size_t k = 0; k < gd.targets.size(); k++) gd.targets[k].address = targets[k].base;
+            lap.to(ST_GPU);
             if (vkdraw::run(gd, why)) {
                 g_gpu_draws++;
                 g_gpu_vertices += vwhy.empty();
@@ -1482,6 +1541,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         g_gpu_skipped[why]++;
     }
     // the pixels, in bands of rows, one band to a thread; within a band, triangle by triangle
+    lap.to(ST_CPU_PIXELS);
     Pool& p = pool();
     int bands = (y1 - y0) * (x1 - x0) > 64 * 64 ? p.n : 1;
     int qy0 = y0 & ~1, rows = ((y1 - qy0 + 1) / 2 + bands - 1) / bands * 2;
@@ -1821,6 +1881,16 @@ std::vector<std::string> draw_report() {
         std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
                     double(g_dispatch_ns) / 1e9,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};
+    {
+        std::string t = "Where the draws' time went:\n\n| Stage | Seconds |\n|---|---:|\n";
+        for (int k = 0; k < ST_COUNT; k++)
+            if (g_stage_ns[k]) t += std::format("| {} | {:.1f} |\n", stage_names[k], double(g_stage_ns[k]) / 1e9);
+        t += std::format("\nOf which: translating and evaluating shaders {:.1f} s; unpacking buffers {:.1f} s; hashing "
+                         "textures' memory {:.1f} s ({} MiB); decoding {} textures texel by texel {:.1f} s.\n",
+                         double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
+                         g_texture_hash_bytes >> 20, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
+        s.push_back(t);
+    }
     if (M.gpu) {
         std::lock_guard lock(g_draw_lock);
         std::string where = vkdraw::device();
