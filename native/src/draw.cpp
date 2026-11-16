@@ -717,9 +717,32 @@ void save_glsl(const char* kind, u64 at, const std::string& text) {
 // Each buffer load's elements, as the CPU's interpreter unpacks them, and then what an index
 // past the end reads; false (and why) if there are too many
 // Kept, unpacked, to be used again: by the descriptor, the offset and format, and a hash of the
-// memory read (up to 512 MiB of them; then they all go)
-std::unordered_map<std::string, std::vector<u32>> g_unpacked;
-u64 g_unpacked_bytes = 0, g_unpack_hits = 0, g_unpacks = 0;
+// memory read (up to 2 GiB of them; then the least lately used go, down to 1 GiB)
+u64 g_unpacked_bytes = 0, g_unpack_hits = 0, g_unpacks = 0, g_unpack_clears = 0;
+struct Unpacked {
+    std::vector<u32> data;
+    u64 used = 0;  // when last found (g_unpack_hits + g_unpacks then)
+};
+std::unordered_map<std::string, Unpacked> g_unpacked;
+constexpr u64 UNPACKED_BUDGET = u64(2) << 30;
+
+// Over the budget: the least lately used go, down to half of it
+void unpacked_let_go() {
+    std::vector<std::pair<u64, const std::string*>> by_age;
+    for (auto& [key, e] : g_unpacked) by_age.emplace_back(e.used, &key);
+    std::sort(by_age.begin(), by_age.end());
+    std::vector<std::string> doomed;
+    u64 bytes = g_unpacked_bytes;
+    for (auto& [used, key] : by_age) {
+        if (bytes <= UNPACKED_BUDGET / 2) break;
+        bytes -= g_unpacked[*key].data.size() * 4;
+        doomed.push_back(*key);
+    }
+    for (auto& key : doomed) g_unpacked.erase(key);
+    g_unpacked_bytes = bytes;
+    g_unpack_clears++;
+}
+std::atomic<u64> g_buffer_hash_ns{0}, g_buffer_miss_ns{0}, g_buffer_hash_bytes{0};
 
 bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const Memory& mem, std::vector<std::vector<u32>>& out,
                     std::string& why) {
@@ -734,23 +757,30 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
         u64 base = b.v[0] | (u64(b.v[1] & 0xfff) << 32), span = (stride ? u64(stride) * records : records) + b.offset + 16;
         std::string key;
         if (mem.ok(base, span)) {
-            key = std::format("{:x}.{:x}.{:x}.{:x}:{}:{}:{}:{:x}", b.v[0], b.v[1], b.v[2], b.v[3], b.offset, b.dfmt, b.nfmt,
-                              hash_memory(reinterpret_cast<const unsigned char*>(base), span));
+            u64 h;
+            {
+                Timer hashing(g_buffer_hash_ns);
+                h = hash_memory(reinterpret_cast<const unsigned char*>(base), span);
+                g_buffer_hash_bytes += span;
+            }
+            key = std::format("{:x}.{:x}.{:x}.{:x}:{}:{}:{}:{:x}", b.v[0], b.v[1], b.v[2], b.v[3], b.offset, b.dfmt, b.nfmt, h);
             if (auto it = g_unpacked.find(key); it != g_unpacked.end()) {
-                out.push_back(it->second);
+                it->second.used = g_unpack_hits + g_unpacks;
+                out.push_back(it->second.data);
                 g_unpack_hits++;
                 continue;
             }
         }
         g_unpacks++;
+        Timer missing(g_buffer_miss_ns);
         std::vector<u32> data((n + 1) * 4);
         for (u32 i = 0; i < n; i++) buffer_element(b.v, b.dfmt, b.nfmt, b.offset, i, mem, &data[size_t(i) * 4]);
         if (stride == 0) std::copy_n(data.begin(), 4, data.begin() + 4);
         else buffer_element(b.v, b.dfmt, b.nfmt, b.offset, records, mem, &data[n * 4]);
         if (!key.empty()) {
-            if (g_unpacked_bytes > (512u << 20)) g_unpacked.clear(), g_unpacked_bytes = 0;
             g_unpacked_bytes += data.size() * 4;
-            g_unpacked[key] = data;
+            g_unpacked[key] = {data, g_unpack_hits + g_unpacks};
+            if (g_unpacked_bytes > UNPACKED_BUDGET) unpacked_let_go();
         }
         out.push_back(std::move(data));
     }
@@ -1899,6 +1929,10 @@ std::vector<std::string> draw_report() {
                          "textures' memory {:.1f} s ({} MiB); decoding {} textures texel by texel {:.1f} s.\n",
                          double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
                          g_texture_hash_bytes >> 20, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
+        t += std::format("Buffers: {} unpacked, {} found kept ({} times the least lately used let go); hashing their memory {:.1f} s "
+                         "({} MiB), unpacking them {:.1f} s.\n",
+                         g_unpacks, g_unpack_hits, g_unpack_clears, double(g_buffer_hash_ns) / 1e9, g_buffer_hash_bytes >> 20,
+                         double(g_buffer_miss_ns) / 1e9);
         s.push_back(t);
     }
     if (M.gpu) {

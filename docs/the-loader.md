@@ -876,6 +876,15 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     Uploads went from 271 GiB of textures to 57 GiB, and none were let go. What is left
     is decoding textures (49 s), unpacking buffers (58 s), hashing textures' memory
     (15 s), and the GPU's draws (88 s, 20 of them waiting).
+49. **Buffers kept longer.** A buffer's elements, unpacked for the GPU, were kept by the
+    descriptor, offset, format and a hash of the memory, up to 512 MiB, and then all let
+    go at once: into the first scene that happened 89 times, and 111,824 buffers were
+    unpacked (46 s), most of them again. They may now take 2 GiB, and past that the least
+    lately used go, down to 1 GiB. The summary says how many were unpacked and found kept,
+    and how long hashing and unpacking took. In the same 300 seconds, 61,907 were unpacked
+    (4 s), 558,036 found kept, and only twice did any go; the buffers took 31 s, not 64,
+    and the loader got through 98,907 draws, not 86,204. The rest of the buffers' time is
+    hashing their memory (14 s) and copying the kept ones out for each draw.
 
 ## Files
 
