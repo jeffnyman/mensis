@@ -132,6 +132,8 @@ const char* const stage_names[ST_COUNT] = {
 std::atomic<u64> g_stage_ns[ST_COUNT];
 std::atomic<u64> g_texture_hash_ns{0}, g_texture_decode_ns{0}, g_buffer_unpack_ns{0}, g_translate_ns{0};
 std::atomic<u64> g_texture_hash_bytes{0}, g_texture_decoded{0};
+// the textures decoded texel by texel, by their format, tiling and type: how many, how long
+std::map<std::string, std::pair<u64, u64>> g_decoded_by;
 struct Lap {
     int stage;
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
@@ -1101,6 +1103,15 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         tx.layers = ti.array() ? ti.last_array - ti.base_array + 1 : cube ? std::max(ti.last_array, ti.base_array) - ti.base_array + 1
                     : ti.type == 10 ? ti.depth : 1;
         tx.integer = ti.nfmt == 4 || ti.nfmt == 5;
+        if (ti.type < 8) {  // not an image (a null descriptor, or one not set): it reads 0, as on the CPU
+            tx.type = 9;
+            tx.width = tx.height = tx.layers = 1;
+            std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
+            tx.key = tx.integer ? "zero:integer" : "zero";
+            if (!vkdraw::has_texture(tx.key)) tx.rgba.assign(4, 0.0f);
+            d.textures.push_back(std::move(tx));
+            continue;
+        }
         // a format the CPU can't read (an unused descriptor's, say) reads the same everywhere:
         // one texel of it does
         if (!layout(ti.dfmt).count) tx.width = tx.height = tx.layers = 1;
@@ -1145,7 +1156,18 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
                 continue;
             }
         }
-        Timer decoding(g_texture_decode_ns);
+        auto decode0 = std::chrono::steady_clock::now();
+        struct Tally {
+            std::pair<u64, u64>& to;
+            std::chrono::steady_clock::time_point t0;
+            ~Tally() {
+                u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+                to.first++, to.second += ns;
+                g_texture_decode_ns += ns;
+            }
+        } tally{g_decoded_by[std::format("format {}, number type {}, tile mode {}, type {}{}", ti.dfmt, ti.nfmt, ti.tiling, ti.type,
+                                         ti.all_ok ? "" : " (not all in memory)")],
+                decode0};
         g_texture_decoded++;
         tx.rgba.resize(size_t(tx.width) * tx.height * tx.layers * 4);
         float* o = tx.rgba.data();
@@ -1929,6 +1951,15 @@ std::vector<std::string> draw_report() {
                          "textures' memory {:.1f} s ({} MiB); decoding {} textures texel by texel {:.1f} s.\n",
                          double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
                          g_texture_hash_bytes >> 20, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
+        if (!g_decoded_by.empty()) {
+            std::vector<std::pair<std::pair<u64, u64>, std::string>> by;
+            for (auto& [what, v] : g_decoded_by) by.push_back({v, what});
+            std::sort(by.begin(), by.end(), [](auto& a, auto& b) { return a.first.second > b.first.second; });
+            t += "\nTextures decoded texel by texel:\n\n| Format | Times | Seconds |\n|---|---:|---:|\n";
+            for (size_t i = 0; i < by.size() && i < 20; i++)
+                t += std::format("| {} | {} | {:.1f} |\n", by[i].second, by[i].first.first, double(by[i].first.second) / 1e9);
+            t += "\n";
+        }
         t += std::format("Buffers: {} unpacked, {} found kept ({} times the least lately used let go); hashing their memory {:.1f} s "
                          "({} MiB), unpacking them {:.1f} s.\n",
                          g_unpacks, g_unpack_hits, g_unpack_clears, double(g_buffer_hash_ns) / 1e9, g_buffer_hash_bytes >> 20,

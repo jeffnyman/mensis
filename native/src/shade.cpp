@@ -1534,6 +1534,17 @@ void image_op(Wave& w, const Memory& mem, u32 w0, u32 w1) {
         for (int c = 0; c < 4; c++)
             if ((dmask >> c) & 1) w.v[(vdata + r++) & 255][size_t(ln)] = v[c];
     };
+    // a T# whose type isn't an image's (0 to 7: a null descriptor, or one not set): as the
+    // hardware does, every read of it is 0 (a gather's four too), and a store goes nowhere
+    if (t.type < 8) {
+        if (op == 8 || op == 9) return;
+        bool gather4 = op >= 64 && op < 96;
+        u32 regs = gather4 ? 4 : u32(std::popcount(dmask));
+        for (int ln = 0; ln < LANES; ln++)
+            if ((exec >> ln) & 1)
+                for (u32 r = 0; r < regs; r++) w.v[(vdata + r) & 255][size_t(ln)] = 0;
+        return;
+    }
     int n = coord_count(t.type);
     if (op <= 1 || (op >= 8 && op <= 9)) {  // image_load(_mip), image_store(_mip): integer coordinates
         bool store_op = op >= 8;

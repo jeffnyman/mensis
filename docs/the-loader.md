@@ -885,6 +885,19 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     (4 s), 558,036 found kept, and only twice did any go; the buffers took 31 s, not 64,
     and the loader got through 98,907 draws, not 86,204. The rest of the buffers' time is
     hashing their memory (14 s) and copying the kept ones out for each draw.
+50. **Descriptors that aren't images.** The summary now lists the textures decoded texel
+    by texel by format, tiling and type, with how many times and how long. Into the first
+    scene, 46 of their 68 seconds went to one kind, decoded 9,244 times: a T# of type 0,
+    which isn't an image's type (8 to 15), its other fields as they happened to be
+    (format 14, a size), and its memory not all in the game's; not all in memory, it
+    wasn't kept from draw to draw, and was decoded again each time, mostly from memory
+    that isn't there. The hardware reads such a descriptor as 0, and now so does the
+    loader: on the CPU every read of one gives 0 (a store to it goes nowhere), and on the
+    GPU it is one texel of 0, kept there. In the same 300 seconds the loader now gets
+    through 144,880 draws, not 98,156; 1,157 textures are decoded (20 s), mostly
+    block-compressed ones micro-tiled (tile mode 13) and a cube of 16-bit floats. The
+    draws' time is now mostly hashing memory (buffers 30 s, textures 19 s), copying kept
+    buffers out for each draw, and the GPU's draws (94 s).
 
 ## Files
 
