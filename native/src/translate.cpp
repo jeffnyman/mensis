@@ -481,6 +481,32 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
             case MIMG: {
                 u32 srsrc = ((in.w1 >> 16) & 0x1f) * 4, ssamp = ((in.w1 >> 21) & 0x1f) * 4;
                 u32 op = (w0 >> 18) & 0x7f;
+                if (compute && op == 8) {  // image_store: a store into the image's memory, a texel an element
+                    u32 t[8];
+                    bool ok = true;
+                    for (u32 k = 0; k < 8; k++) t[k] = get(srsrc + k, 0, ok);
+                    if (!ok) {
+                        v.why = "an image descriptor the shader works out";
+                        return v;
+                    }
+                    u64 base = (u64(t[0]) | (u64(t[1] & 0xff) << 32)) << 8;
+                    u32 dfmt = (t[1] >> 20) & 0x3f, nfmt = (t[1] >> 26) & 0xf, tiling = (t[3] >> 20) & 0x1f, type = (t[3] >> 28) & 0xf;
+                    u32 width = (t[2] & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1, pitch = std::max(((t[4] >> 13) & 0x3fff) + 1, width);
+                    bool micro = tiling == 5 || tiling == 9 || tiling == 13 || tiling == 19;
+                    u32 bpp = dfmt < 16 && nfmt < 8 ? element_bytes(dfmt, nfmt) : 0;
+                    if (type != 9 || micro || !bpp) {
+                        v.why = std::format("image stores of type {}, tile mode {}, format {}", type, tiling, dfmt);
+                        return v;
+                    }
+                    Values::Buffer b;
+                    b.v[0] = u32(base);
+                    b.v[1] = u32((base >> 32) & 0xfff) | (bpp << 16);
+                    b.v[2] = pitch * height;
+                    b.v[3] = 4 | (5 << 3) | (6 << 6) | (7 << 9);
+                    b.dfmt = dfmt, b.nfmt = nfmt, b.width = width, b.height = height, b.pitch = pitch;
+                    v.stores.push_back(b);
+                    break;
+                }
                 bool sampled = op >= 32;
                 Values::Image im;
                 im.compare = op >= 32 && op < 96 && (((op - 32) & 31) & 8);
@@ -1204,6 +1230,25 @@ void Writer::image_op(const Inst& in) {
         return;
     }
     u32 vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
+    if (cs && op == 8) {  // image_store, into kept memory as a buffer store by index: y * pitch + x
+        if (store >= cs->stores.size() || !cs->stores[store].width) {
+            fail("image stores not found before the dispatch");
+            return;
+        }
+        const CsState::Access& a = cs->stores[store];
+        u32 slot = cs->store_slot + 3 * store++;
+        std::string c[4] = {"0u", "0u", "0u", "0u"};
+        for (u32 k = 0, r = 0; k < 4; k++)
+            if ((dmask >> k) & 1) c[k] = src(256 + ((vdata + r++) & 255), 0);
+        std::string v = pack(a.dfmt, a.nfmt, c);
+        if (v.empty()) return;
+        vgprs.insert(vaddr);
+        vgprs.insert((vaddr + 1) & 255);
+        line(std::format("if (exec_lo != 0u && v{0} < {2}u && v{1} < {3}u) {{ uint p = v{1} * {4}u + v{0} + U[{5}]; "
+                         "imageStore(S{6}, ivec2(int(p % U[{7}]), int(p / U[{7}])), {8}); }}",
+                         vaddr, (vaddr + 1) & 255, a.width, a.height, a.pitch, slot, store - 1, slot + 1, v));
+        return;
+    }
     if (image >= st.image_types.size()) {
         fail("image instructions not found before the draw");
         return;

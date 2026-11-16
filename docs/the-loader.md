@@ -955,6 +955,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     read-backs only moved there: 10,089 in 300 seconds, as before, and as many draws.
     Most dispatches not on the GPU store into memory not kept there in whole pages (9,064
     in 200 seconds) or have no buffer stores (7,750).
+55. **Compute shaders' image stores on the GPU.** Most of the dispatches with no buffer
+    stores store into an image instead (`image_store`): one clears a 960x540 image of
+    16-bit floats, 8,160 groups of 64. A 2D image in rows (not micro-tiled) is memory too,
+    a texel an element and `pitch` of them to a row, so an image store is now taken as a
+    store into that memory by index (y times the pitch, plus x, inside the image's width
+    and height), and goes where buffer stores go: into the memory kept on the GPU. Into
+    the first scene, 18,299 dispatches went to the GPU in 300 seconds; validation is
+    clean, and `--gpu-check` is as before. But again the read-backs only moved (10,619,
+    the most of them by dispatches still on the CPU), and the draws got no further
+    (340,028, within a run's spread). Keeping the whole pages a store is in, when it isn't
+    whole pages, was tried too, and undone: a copy shader then kept the vertex data it
+    writes on the GPU, every draw unpacking those vertices on the CPU read it back, and
+    the loader got through a third of the draws. The work to do is in what reads the
+    GPU's memory on the CPU (draws' vertex and index buffers, dispatches the CPU runs),
+    not in sending more to the GPU.
 
 ## Files
 

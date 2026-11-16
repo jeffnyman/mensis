@@ -43,6 +43,9 @@ struct Values {
     struct Buffer {  // each buffer load's: the V#, the bytes into an element, the format
         u32 v[4] = {};
         u32 offset = 0, dfmt = 0, nfmt = 0;
+        // or a compute shader's image store, as a store into its memory (a texel an element,
+        // pitch of them to a row): the image's size, else 0
+        u32 width = 0, height = 0, pitch = 0;
     };
     std::vector<Buffer> buffers;
     std::vector<Buffer> stores;  // each buffer store's, the same way
@@ -105,6 +108,7 @@ struct CsState {
         // element starts and how far apart they are, in dwords, and how many there are
         bool raw = false;
         u32 sel[4] = {4, 5, 6, 7};  // a load's dst_sel
+        u32 width = 0, height = 0, pitch = 0;  // a store's, if into an image (its texels, pitch to a row)
     };
     std::vector<Access> stores, loads;
     u32 store_slot = 0, load_slot = 0;

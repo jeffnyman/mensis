@@ -1908,7 +1908,9 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
             return false;
         }
         d.stores.push_back(a);
-        st.stores.push_back({b.dfmt, b.nfmt, true, {}});
+        translate::CsState::Access ts{b.dfmt, b.nfmt, true, {}};
+        ts.width = b.width, ts.height = b.height, ts.pitch = b.pitch;
+        st.stores.push_back(ts);
     }
     // the loads: of memory kept on the GPU, from its image; of 32-bit values (one to four an
     // element), the memory as it is, the shader picking them out; else the elements unpacked
@@ -1965,7 +1967,7 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
     // translated once for the program and all of this
     std::string gkey = std::format("cs:{:x}:{}:{:x}:{}.{}.{}:{}:{}", cs, users, rsrc2, st.threads[0], st.threads[1], st.threads[2],
                                    st.store_slot, st.load_slot);
-    for (auto& a : st.stores) gkey += std::format(":s{}.{}", a.dfmt, a.nfmt);
+    for (auto& a : st.stores) gkey += std::format(":s{}.{}.{}x{}p{}", a.dfmt, a.nfmt, a.width, a.height, a.pitch);
     for (auto& a : st.loads) gkey += std::format(":l{}.{}.{}{}.{}{}{}{}", a.dfmt, a.nfmt, a.image, a.raw, a.sel[0], a.sel[1], a.sel[2], a.sel[3]);
     auto git = g_glsl.find(gkey);
     if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::compute_shader(prog, st)).first;
