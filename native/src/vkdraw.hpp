@@ -111,6 +111,9 @@ struct Dispatch {
     std::vector<Access> stores, loads;
     std::vector<u32> load_index;
     std::vector<std::vector<u32>> arrays;
+    // An array's memory as it is (address, bytes), if it is kept on the GPU (its array left
+    // empty): copied from there on the GPU, not read back first
+    std::vector<std::pair<u64, u64>> array_from;
 };
 bool dispatch(Dispatch& d, std::string& why);
 // Whether that memory is kept on the GPU, an element of bpp bytes a texel
@@ -133,7 +136,14 @@ bool barycentric();
 // A fault at addr (a write, or a read): if it is in a render target kept on the GPU, the
 // picture goes back into the memory, or the memory is let be written, and true: the access
 // can be tried again
-bool touched(u64 addr, bool write);
+bool touched(u64 addr, bool write, u64 rip = 0);
+// What the loader is doing on this thread (for the count of targets read back when touched)
+extern thread_local const char* t_doing;
+struct Doing {
+    const char* was;
+    explicit Doing(const char* what) : was(t_doing) { t_doing = what; }
+    ~Doing() { t_doing = was; }
+};
 // Draws it (into the batch, kept on the GPU; --gpu-check's copies at once); false, with the
 // reason, if it couldn't
 bool run(Draw& d, std::string& why);

@@ -940,6 +940,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     (303,312): preparing for the GPU took 35 s, not 48, but the GPU's stage took 136 s,
     not 125, most of it still copying uploads (39 s), reading targets back (34 s) and
     waiting for batches (36 s).
+54. **What reads kept memory back.** The summary now counts why each batch went to the GPU
+    and why each target was read back into memory, by what touched it: the loader says
+    what it is doing on each thread (the stage of a draw, hashing, unpacking, a dispatch,
+    the command processor, a call of the game's; the worker threads take on what gave them
+    their work), and a touch is counted under that. Into the first scene, of 26,000
+    batches 17,000 went to read a target back, and every one of the 10,000 read-backs was
+    the loader's own doing, not the game's: dispatches run on the CPU, a draw's setting up
+    (an index buffer a compute shader wrote), pixels drawn on the CPU, hashing, and a
+    compute shader's array of kept memory, copied here. That last is now copied on the GPU
+    instead, from the images the memory is kept in (a depth buffer's depth and stencil
+    too), into the dispatch's upload, each part of the array from its own image and the
+    rest from memory. But the same memory is then read by dispatches the CPU runs, and the
+    read-backs only moved there: 10,089 in 300 seconds, as before, and as many draws.
+    Most dispatches not on the GPU store into memory not kept there in whole pages (9,064
+    in 200 seconds) or have no buffer stores (7,750).
 
 ## Files
 

@@ -63,6 +63,7 @@ struct Pool {
     std::mutex m;
     std::condition_variable cv, done;
     std::function<void(int)> job;
+    const char* doing = nullptr;  // what the thread that gave the job is doing (for the count of targets read back)
     u64 generation = 0;
     int remaining = 0;
 
@@ -78,6 +79,7 @@ struct Pool {
                         cv.wait(lock, [&] { return generation != seen; });
                         seen = generation;
                         f = job;
+                        vkdraw::t_doing = doing;
                     }
                     f(i);
                     std::lock_guard lock(m);
@@ -91,6 +93,7 @@ struct Pool {
         {
             std::lock_guard lock(m);
             job = f;
+            doing = vkdraw::t_doing;
             remaining = n - 1;
             generation++;
         }
@@ -137,15 +140,20 @@ std::atomic<u64> g_texture_blocks{0}, g_texture_blocks_ns{0};  // textures sent 
 std::map<std::string, std::pair<u64, u64>> g_decoded_by;
 struct Lap {
     int stage;
+    const char* was = vkdraw::t_doing;  // what this thread was doing before
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    explicit Lap(int s) : stage(s) {}
+    explicit Lap(int s) : stage(s) { vkdraw::t_doing = stage_names[s]; }
     void to(int s) {
         auto now = std::chrono::steady_clock::now();
         g_stage_ns[stage] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t0).count());
         stage = s;
         t0 = now;
+        vkdraw::t_doing = stage_names[s];
     }
-    ~Lap() { to(stage); }
+    ~Lap() {
+        to(stage);
+        vkdraw::t_doing = was;
+    }
 };
 std::atomic<u64> g_clipped{0};  // triangles clipped to the guard band (on the CPU)
 std::atomic<u64> g_draws{0}, g_triangles{0}, g_pixels{0}, g_ps_waves{0}, g_dispatches{0}, g_groups{0};
@@ -722,6 +730,7 @@ std::unordered_map<u64, Hashed> g_hashed;  // by range (its start and length, mi
 u64 g_stamps_watched = 0, g_stamps_hashed = 0, g_hashed_bytes = 0;
 u64 page_written(u64 base, u64 n);
 u64 memory_stamp(u64 base, u64 n) {
+    vkdraw::Doing doing("hashing memory (to tell whether it changed)");
     u64 written = page_written(base, n);
     if (written != ~u64(0)) {
         std::lock_guard lock(g_pages_lock);
@@ -846,6 +855,7 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
         Timer missing(g_buffer_miss_ns);
         auto made = std::make_shared<std::vector<u32>>((n + 1) * 4);
         std::vector<u32>& data = *made;
+        vkdraw::Doing doing("unpacking a buffer");
         for (u32 i = 0; i < n; i++) buffer_element(b.v, b.dfmt, b.nfmt, b.offset, i, mem, &data[size_t(i) * 4]);
         if (stride == 0) std::copy_n(data.begin(), 4, data.begin() + 4);
         else buffer_element(b.v, b.dfmt, b.nfmt, b.offset, records, mem, &data[n * 4]);
@@ -1861,7 +1871,11 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
     u32 rsrc2 = r.sh[0x213], users = std::min((rsrc2 >> 1) & 0x1f, 16u);
     u32 user[16];
     for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x240 + k];
-    translate::Values vals = translate::evaluate(prog, user, users, mem, true);
+    translate::Values vals;
+    {
+        vkdraw::Doing doing("evaluating a compute shader's scalar loads");
+        vals = translate::evaluate(prog, user, users, mem, true);
+    }
     if (!vals.why.empty()) {
         why = "the shader has " + vals.why;
         return false;
@@ -1918,9 +1932,17 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
         } else if (raw_format && stride && stride % 4 == 0 && b.offset % 4 == 0 && records && !swizzled && !add_tid && mem.ok(base, span) &&
                    span <= (u64(256) << 20)) {
             ta.raw = true;
-            std::vector<u32> data((span + 3) / 4);
-            std::memcpy(data.data(), reinterpret_cast<const void*>(base), span);
-            arrays.push_back(std::move(data));
+            // kept on the GPU: copied there (else read back to be read here)
+            if (vkdraw::version(base) || vkdraw::version(base + span - 1)) {
+                arrays.emplace_back();
+                d.array_from.resize(arrays.size());
+                d.array_from.back() = {base, span};
+            } else {
+                std::vector<u32> data((span + 3) / 4);
+                vkdraw::Doing doing("copying a compute shader's array");
+                std::memcpy(data.data(), reinterpret_cast<const void*>(base), span);
+                arrays.push_back(std::move(data));
+            }
             raw_slots.push_back({i, {b.offset / 4, stride / 4, records}});
         } else {
             std::vector<vkdraw::Buffer> one;
@@ -1929,6 +1951,7 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
         }
         st.loads.push_back(ta);
     }
+    d.array_from.resize(arrays.size());
     d.arrays = std::move(arrays);
     st.user_count = users;
     st.rsrc2 = rsrc2;
@@ -1967,6 +1990,7 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     u64 cs = program(r, 0x20c);
     if (!cs) return "(no compute shader)";
     g_dispatches++;
+    vkdraw::Doing doing("preparing a dispatch");
     Memory mem;
     mem.snapshot();
     u32 rsrc2 = r.sh[0x213];
@@ -1983,6 +2007,7 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
         }
         g_gpu_dispatch_skipped[why]++;
     }
+    vkdraw::Doing on_cpu("a dispatch on the CPU");
     std::atomic<u64> next{0};
     struct NoIo : Io {
         void exp(u32, const Vec* const[4], bool, u64) override { note("exports from a compute shader"); }

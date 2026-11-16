@@ -35,7 +35,7 @@ DWORD g_slot = TLS_OUT_OF_INDEXES;
 LONG CALLBACK on_exception(EXCEPTION_POINTERS* e) {
     const EXCEPTION_RECORD* r = e->ExceptionRecord;
     if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters > 1 && r->ExceptionInformation[0] <= 1 &&
-        vkdraw::touched(r->ExceptionInformation[1], r->ExceptionInformation[0] == 1))
+        vkdraw::touched(r->ExceptionInformation[1], r->ExceptionInformation[0] == 1, e->ContextRecord->Rip))
         return EXCEPTION_CONTINUE_EXECUTION;  // any thread's, the loader's too
     GameThread* t = current_thread();
     if (!t || !t->enter.saved_rsp) return EXCEPTION_CONTINUE_SEARCH;

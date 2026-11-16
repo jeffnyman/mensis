@@ -47,6 +47,8 @@
 
 namespace mensis::vkdraw {
 
+thread_local const char* t_doing = nullptr;
+
 namespace {
 
 struct Gpu {
@@ -437,6 +439,7 @@ struct Kept {
     u64 regions = 0;  // memory kept on the GPU because a compute shader stored into it
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
     u64 depth_clears = 0;  // depth buffers cleared there
+    u64 arrays_kept = 0;  // compute shaders' arrays copied from kept memory there
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
     u64 wait_ns = 0, readback_ns = 0, upload_ns = 0;  // waiting for batches; reading targets back; copying uploads
     u64 upload_bytes = 0, texture_upload_bytes = 0;
@@ -765,8 +768,11 @@ VkCommandBuffer batch() {
 }
 
 // The batch to the GPU, and waited for; then what it used is free again
-bool flush_batch() {
+// Why batches went, and the targets read back (by why, and what touched them), counted
+std::map<std::string, u64> g_batch_why, g_readback_why;
+bool flush_batch(const char* why = "other") {
     if (!g_recording) return true;
+    g_batch_why[why]++;
     vkEndCommandBuffer(k.cmd);
     g_recording = false;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -792,9 +798,9 @@ bool flush_batch() {
 // For the next draw or dispatch: `bytes` of the upload buffer (from `base`) and a descriptor
 // set, both its own until the batch is done (which may first be flushed, to make room)
 bool reserve_batch(VkDeviceSize bytes, VkDeviceSize& base, VkDescriptorSet& set, std::string& why) {
-    if (g_sets == SETS || g_arena + bytes > k.upload.size) flush_batch();
+    if (g_sets == SETS || g_arena + bytes > k.upload.size) flush_batch("the batch full");
     if (!g_recording && bytes > k.upload.size &&
-        !k.upload.reserve(std::max(ARENA, bytes * 2), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        !k.upload.reserve(std::max(ARENA, bytes * 2), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
         why = "out of memory for the upload";
         return false;
@@ -813,8 +819,8 @@ bool reserve_batch(VkDeviceSize bytes, VkDeviceSize& base, VkDescriptorSet& set,
     return true;
 }
 
-// The GPU's picture back into the memory, which may then be read
-bool read_back(Resident& r) {
+// The GPU's picture back into the memory, which may then be read; `why` for the count
+bool read_back(Resident& r, const std::string& why) {
     auto t0 = std::chrono::steady_clock::now();
     struct Done {
         std::chrono::steady_clock::time_point t0;
@@ -822,7 +828,8 @@ bool read_back(Resident& r) {
     } done{t0};
     if (r.state != Resident::gpu) return true;
     VkDeviceSize sbytes = r.sbase ? VkDeviceSize(r.width) * r.height : 0, sat = (r.bytes + 255) & ~VkDeviceSize(255);
-    if (!flush_batch() || !k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
+    g_readback_why[std::format("{} ({}x{} at {:#x})", why, r.width, r.height, r.base)]++;
+    if (!flush_batch("a target to read back") || !k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
     barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT, rest_stage(r), T,
@@ -845,7 +852,7 @@ bool read_back(Resident& r) {
     hb.buffer = k.readback.buffer;
     hb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
-    if (!flush_batch()) return false;
+    if (!flush_batch("reading a target back")) return false;
     guard(r, 2);
     std::memcpy(reinterpret_cast<void*>(r.base), k.readback.p, r.bytes);
     if (r.sbase) std::memcpy(reinterpret_cast<void*>(r.sbase), k.readback.p + sat, sbytes);
@@ -857,9 +864,9 @@ bool read_back(Resident& r) {
 
 // The target let go: back into the memory, which is left unguarded
 void let_go(u64 base) {
-    flush_batch();  // nothing waiting may still use it
+    flush_batch("a target let go");  // nothing waiting may still use it
     Resident& r = g_resident[base];
-    read_back(r);
+    read_back(r, "let go");
     guard(r, 2);
     if (r.uints) vkDestroyImageView(g.device, r.uints, nullptr);
     for (auto& [f, v] : r.views) vkDestroyImageView(g.device, v, nullptr);
@@ -870,9 +877,9 @@ void let_go(u64 base) {
 }
 
 // Every kept target in the pages from lo to hi back into the memory
-void read_back_pages(u64 lo, u64 hi) {
+void read_back_pages(u64 lo, u64 hi, const char* why) {
     for (auto& [base, r] : g_resident)
-        if (in_pages(r, lo, hi)) read_back(r);
+        if (in_pages(r, lo, hi)) read_back(r, why);
 }
 
 // Memory kept: the image at its address if it is the same format and size, else a new one, once
@@ -937,7 +944,7 @@ bool make_kept_image(Resident& r, std::string& why) {
 bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why) {
     Resident n;
     n.format = format, n.width = width, n.height = rows, n.bpp = r.bpp, n.depth = is_depth(format);
-    if (r.state != Resident::memory && r.bytes > k.scratch.size && !flush_batch()) return false;  // (the scratch buffer in use)
+    if (r.state != Resident::memory && r.bytes > k.scratch.size && !flush_batch("the scratch buffer")) return false;  // (the scratch buffer in use)
     if (!make_kept_image(n, why)) return false;
     if (r.state != Resident::memory) {
         if (!k.scratch.reserve(r.bytes)) {
@@ -1066,9 +1073,9 @@ bool draw(Draw& d, std::string& why) {
             if (!direct[i]) scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
             continue;
         }
-        read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff));
+        read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff), "a texture in its pages, not of it");
     }
-    if (scratch_needed > k.scratch.size && (!flush_batch() || !k.scratch.reserve(scratch_needed))) {  // (not in use, to be made bigger)
+    if (scratch_needed > k.scratch.size && (!flush_batch("the scratch buffer") || !k.scratch.reserve(scratch_needed))) {  // (not in use, to be made bigger)
         why = "out of GPU memory";
         return false;
     }
@@ -1156,7 +1163,7 @@ bool draw(Draw& d, std::string& why) {
     // its place in the batch: the offsets above are from its start
     VkDeviceSize base;
     VkDescriptorSet set;
-    if (!kept && !flush_batch()) {  // --gpu-check's copies come back at once: nothing else waiting
+    if (!kept && !flush_batch("--gpu-check")) {  // --gpu-check's copies come back at once: nothing else waiting
         why = "the GPU didn't finish the draws before";
         return false;
     }
@@ -1425,7 +1432,7 @@ bool draw(Draw& d, std::string& why) {
     }
     for (auto& im : unkept)
         if (im.image) g_doomed.push_back(im);  // once the batch is done
-    if (!kept && !flush_batch()) {
+    if (!kept && !flush_batch("--gpu-check")) {
         why = "the GPU didn't finish the draw";
         return false;
     }
@@ -1580,6 +1587,49 @@ bool dispatch(Dispatch& d, std::string& why) {
         return p;
     };
     VkDeviceSize at_values = reserve(d.values.size() * 4);
+    // arrays of kept memory: each part of one in an image kept there (its elements whole texels)
+    // copied from it on the GPU, the rest from the memory (read back first if need be)
+    d.array_from.resize(d.arrays.size());
+    struct Piece {
+        u64 at, bytes;  // from the array's start
+        Resident* r;
+        bool stencil;  // from its stencil (a byte a texel), not its depth or colour
+    };
+    std::vector<std::vector<Piece>> pieces(d.arrays.size());
+    for (size_t i = 0; i < d.arrays.size(); i++) {
+        auto [address, bytes] = d.array_from[i];
+        if (!bytes) continue;
+        d.arrays[i].assign((bytes + 3) / 4, 0);
+        auto* out = reinterpret_cast<unsigned char*>(d.arrays[i].data());
+        for (u64 pos = address, end = address + bytes; pos < end;) {
+            Resident* in = nullptr;
+            bool stencil = false;
+            u64 next = end;  // where the next image kept there starts
+            for (auto& [rb, r] : g_resident) {
+                if (r.state == Resident::memory) continue;
+                u64 sbytes = u64(r.width) * r.height;
+                if (pos >= rb && pos < rb + r.bytes && (pos - rb) % r.bpp == 0) in = &r, stencil = false;
+                else if (r.sbase && pos >= r.sbase && pos < r.sbase + sbytes) in = &r, stencil = true;
+                else {
+                    if (rb > pos && rb < next) next = rb;
+                    if (r.sbase > pos && r.sbase < next) next = r.sbase;
+                }
+            }
+            u64 in_end = !in ? 0 : stencil ? in->sbase + u64(in->width) * in->height : in->base + in->bytes;
+            u32 bpp = !in ? 1 : stencil ? 1 : in->bpp;
+            u64 n = in ? (std::min(end, in_end) - pos) / bpp * bpp : 0;
+            if (n) {
+                pieces[i].push_back({pos - address, n, in, stencil});
+                pos += n;
+                continue;
+            }
+            u64 to = in ? std::min(end, in_end) : next;
+            read_back_pages(pos & ~u64(0xfff), (to + 0xfff) & ~u64(0xfff), "a compute shader's array, the part not in an image");
+            std::memcpy(out + (pos - address), reinterpret_cast<const void*>(pos), to - pos);
+            pos = to;
+        }
+        if (!pieces[i].empty()) k.arrays_kept++;
+    }
     std::vector<VkDeviceSize> at_arrays;
     for (auto& a : d.arrays) at_arrays.push_back(reserve(a.size() * 4));
     std::map<Resident*, VkDeviceSize> at_upload;
@@ -1627,6 +1677,47 @@ bool dispatch(Dispatch& d, std::string& why) {
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                X = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    // the arrays' parts in images kept there, from them: the rest of the first row, the whole
+    // rows, the start of the last
+    bool copied = false;
+    for (size_t i = 0; i < d.arrays.size(); i++)
+        for (const Piece& p : pieces[i]) {
+            Resident* r = p.r;
+            VkImageAspectFlags from = p.stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : r->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+            u32 bpp = p.stencil ? 1 : r->bpp;
+            u64 first = (d.array_from[i].first + p.at - (p.stencil ? r->sbase : r->base)) / bpp, n = p.bytes / bpp;
+            barrier(cmd, r->image.image, 1, rest(*r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(*r), VK_ACCESS_TRANSFER_READ_BIT,
+                    rest_stage(*r), T, aspect(*r));
+            std::vector<VkBufferImageCopy> parts;
+            for (u64 at_texel = first, end = first + n; at_texel < end;) {
+                u32 x = u32(at_texel % r->width), y = u32(at_texel / r->width);
+                VkBufferImageCopy c{};
+                c.bufferOffset = base + at_arrays[i] + p.at + (at_texel - first) * bpp;
+                c.imageSubresource = {from, 0, 0, 1};
+                c.imageOffset = {std::int32_t(x), std::int32_t(y), 0};
+                if (x || end - at_texel < r->width) {  // part of a row
+                    u32 w = u32(std::min<u64>(r->width - x, end - at_texel));
+                    c.imageExtent = {w, 1, 1};
+                    at_texel += w;
+                } else {  // whole rows
+                    u32 rows = u32((end - at_texel) / r->width);
+                    c.bufferRowLength = r->width;
+                    c.imageExtent = {r->width, rows, 1};
+                    at_texel += u64(rows) * r->width;
+                }
+                parts.push_back(c);
+            }
+            vkCmdCopyImageToBuffer(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.upload.buffer, u32(parts.size()), parts.data());
+            barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(*r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(*r), T,
+                    rest_stage(*r), aspect(*r));
+            copied = true;
+        }
+    if (copied) {
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, T, X, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                         SRW = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     for (Resident* r : used) {  // from as draws leave it (or from memory), for the shader to read and write
@@ -1682,7 +1773,7 @@ bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil, b
     bool whole = x0 == 0 && y0 == 0 && x1 == width && y1 == height;
     // a part of it: the scratch buffer filled with the values, copied into that rectangle
     VkDeviceSize area = VkDeviceSize(x1 - x0) * (y1 - y0), zbytes = (area * r.bpp + 3) & ~VkDeviceSize(3);
-    if (!whole && zbytes + area > k.scratch.size && (!flush_batch() || !k.scratch.reserve(zbytes + area))) return false;
+    if (!whole && zbytes + area > k.scratch.size && (!flush_batch("the scratch buffer") || !k.scratch.reserve(zbytes + area))) return false;
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
     barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest_access(r) | VK_ACCESS_TRANSFER_READ_BIT,
@@ -1755,10 +1846,10 @@ bool flush() {
         Inside() { t_inside = true; }
         ~Inside() { t_inside = false; }
     } inside;
-    return flush_batch();
+    return flush_batch("a command buffer of the game's done");
 }
 
-bool touched(u64 addr, bool write) {
+bool touched(u64 addr, bool write, u64 rip) {
     if (t_inside) return false;  // this thread is in the middle of a draw
     std::lock_guard lock(g_lock);
     t_inside = true;
@@ -1766,7 +1857,13 @@ bool touched(u64 addr, bool write) {
     for (auto& [base, r] : g_resident) {
         if ((addr < r.lo || addr >= r.hi) && (!r.sbase || addr < r.slo || addr >= r.shi)) continue;
         ours = true;
-        if (r.state == Resident::gpu && !read_back(r)) {
+        if (r.state == Resident::gpu &&
+            !read_back(r, t_doing ? std::format("touched by the loader: {}", t_doing)
+                          : rip >= 0x10000000 && current_thread() && current_thread()->in_call
+                              ? std::format("touched by the loader, in the game's call to {}", M.imports[current_thread()->in_call - 1].name)
+                              : std::format("touched by {} code at {:#x} ({}, on {})", rip < 0x10000000 ? "the game's" : "the loader's", rip,
+                                            write ? "a write" : "a read",
+                                            current_thread() ? std::format("game thread {}", current_thread()->name) : "a thread of the loader's"))) {
             ours = false;  // the GPU failed: the fault stands
         } else if (r.state == Resident::same && write) {  // the memory is now the newer
             guard(r, 2);
@@ -1809,6 +1906,16 @@ std::string device() {
     return s + " (the validation layer reported no problems)";
 }
 
+// A count as a table, the most first (up to 25 rows)
+std::string tally(const char* head, const std::map<std::string, u64>& m) {
+    std::vector<std::pair<u64, std::string>> by;
+    for (auto& [what, n] : m) by.push_back({n, what});
+    std::sort(by.rbegin(), by.rend());
+    std::string t = head;
+    for (size_t i = 0; i < by.size() && i < 25; i++) t += std::format("| {} | {} |\n", by[i].second, by[i].first);
+    return t;
+}
+
 std::string report() {
     std::lock_guard lock(g_lock);
     if (!k.draws) return {};
@@ -1817,12 +1924,15 @@ std::string report() {
                        "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times",
                        k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
                        k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures) +
-           (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s", k.dispatches, double(k.dispatch_ns) / 1e9) : "") +
+           (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s ({} of their arrays copied there from kept memory)", k.dispatches,
+                                       double(k.dispatch_ns) / 1e9, k.arrays_kept) : "") +
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
                        "Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes, k.batches) +
            std::format(". Of the time: {:.1f} s submitting batches and waiting for them, {:.1f} s reading targets back into "
                        "memory (waits included), {:.1f} s copying draws' data to upload ({} MiB of textures)",
-                       double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20);
+                       double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20) +
+           tally(".\n\nWhy batches went to the GPU:\n\n| Why | Times |\n|---|---:|\n", g_batch_why) +
+           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why);
 }
 
 }  // namespace mensis::vkdraw
@@ -1830,6 +1940,7 @@ std::string report() {
 #else  // no Vulkan SDK where this was built
 
 namespace mensis::vkdraw {
+thread_local const char* t_doing = nullptr;
 bool has_texture(const std::string&) { return false; }
 bool compressed() { return false; }
 bool barycentric() { return false; }
@@ -1837,7 +1948,7 @@ bool flush() { return true; }
 bool kept(u64, u64, u32) { return false; }
 bool clear_depth(u64, u32, u32, float, int, bool, u32, u32, u32, u32) { return false; }
 u64 version(u64) { return 0; }
-bool touched(u64, bool) { return false; }
+bool touched(u64, bool, u64) { return false; }
 bool dispatch(Dispatch&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";
     return false;

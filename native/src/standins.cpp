@@ -16,6 +16,7 @@
 #include <string>
 
 #include "loader.hpp"
+#include "vkdraw.hpp"
 
 namespace mensis {
 namespace {
@@ -54,6 +55,7 @@ i64 s_posix_memalign(const u64* a, std::string&) {
 
 // memcpy and memmove alike: the Python stand-in reads then writes, which is memmove
 i64 s_memcpy(const u64* a, std::string&) {
+    vkdraw::Doing doing("the game's memcpy (its stand-in)");
     std::memmove(ptr<void>(a[0]), ptr<void>(a[1]), a[2]);
     return i64(a[0]);
 }

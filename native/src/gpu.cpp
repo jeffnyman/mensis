@@ -430,7 +430,10 @@ struct Walk {
                     return std::format("fill {} bytes at {:#x} with {:#x}", bytes, dst, b[1]);
                 }
                 if (!in_heap(src, bytes)) return std::format("{} bytes from {:#x} (not done)", bytes, src);
-                std::memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), bytes);
+                {
+                    vkdraw::Doing doing("the command processor's copy (DMA_DATA)");
+                    std::memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), bytes);
+                }
                 return std::format("copy {} bytes {:#x} -> {:#x}", bytes, src, dst);
             }
             case 0x3c: {  // WAIT_REG_MEM: wait until memory compares true
@@ -481,6 +484,7 @@ void work(Queue* q) {
             file.open(dir / std::format("{}-{}.txt", q->name, number), std::ios::binary);
         }
         Walk w{*q, file.is_open() ? &file : nullptr};
+        vkdraw::Doing doing("the command processor (between draws)");
         for (auto [at, dw] : job.constants) {
             w.line(0, std::format("constant buffer {:#x}, {} dwords (listed, not run):", at, dw));
             w.run(at, dw, 1, true);
