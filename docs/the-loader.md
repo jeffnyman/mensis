@@ -864,6 +864,18 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     buffers; the GPU's draws themselves take 91 s, 26 of them waiting for 13,642 batches,
     7 reading targets back, 6 copying uploads: 271 GiB of textures, as the textures the
     GPU takes as they are in memory aren't kept from draw to draw but uploaded each time.
+48. **Textures kept.** A texture the GPU takes as it is in memory (8-bit RGBA in rows) is
+    now kept there from draw to draw too, under its T# and a hash of its memory, as the
+    decoded ones were; not one in memory the GPU keeps itself (a target read as a texture),
+    which it copies there, and which hashing on the CPU would only bring back. And the
+    textures kept there may now take a quarter of the GPU's memory (at least 2 GiB), not
+    2 GiB: decoded, a texture takes 16 bytes a texel, and those let go to stay within 2 GiB
+    were decoded again when next used. Into the first scene, in 300 seconds, the loader
+    now gets through 85,603 draws, 77,539 of them on the GPU (about 47,000 to 49,000 on the
+    GPU before), the draws' time about the same: some 2.9 ms a GPU draw, down from 4.6.
+    Uploads went from 271 GiB of textures to 57 GiB, and none were let go. What is left
+    is decoding textures (49 s), unpacking buffers (58 s), hashing textures' memory
+    (15 s), and the GPU's draws (88 s, 20 of them waiting).
 
 ## Files
 

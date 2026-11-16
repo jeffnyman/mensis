@@ -1088,6 +1088,16 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             tx.pitch = ti.epitch;
             tx.raw = reinterpret_cast<const unsigned char*>(ti.base);
             for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            // kept on the GPU from draw to draw too, under the T# and a hash of its memory;
+            // not memory kept there (a target's, read as a texture), which the GPU copies,
+            // and which hashing it here would only bring back
+            u64 bytes = u64(tx.pitch) * tx.height * tx.bpp;
+            if (!vkdraw::version(ti.base) && !vkdraw::version(ti.base + bytes - 1)) {
+                Timer hashing(g_texture_hash_ns);
+                g_texture_hash_bytes += bytes;
+                tx.key = std::format("raw:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
+                                     im.t[5], im.t[6], im.t[7], hash_memory(tx.raw, bytes));
+            }
             d.textures.push_back(std::move(tx));
             continue;
         }

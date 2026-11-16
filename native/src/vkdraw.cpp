@@ -495,7 +495,20 @@ constexpr u32 IMAGES = 31, BUFFERS = 31, PS_BUFFERS = 16;  // a pixel shader's t
 constexpr u32 STORES = 4, LOADS = 4;  // a compute shader's storage images: stores (32-35), loads (36-39)
 constexpr u32 SETS = 2048;  // descriptor sets in a batch (one a draw or dispatch)
 constexpr VkDeviceSize ARENA = VkDeviceSize(256) << 20;  // the upload buffer's least size
-constexpr VkDeviceSize TEXTURE_BUDGET = VkDeviceSize(2) << 30;
+// The textures kept on the GPU: a quarter of its own memory (its largest device-local heap),
+// at least 2 GiB. A texture let go may well be needed again, and decoded again.
+VkDeviceSize texture_budget() {
+    static VkDeviceSize budget = 0;
+    if (!budget) {
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g.gpu, &mp);
+        VkDeviceSize most = 0;
+        for (u32 i = 0; i < mp.memoryHeapCount; i++)
+            if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) most = std::max(most, mp.memoryHeaps[i].size);
+        budget = std::max(VkDeviceSize(2) << 30, most / 4);
+    }
+    return budget;
+}
 
 u32 image_binding(u32 i) { return i < 15 ? 1 + i : 40 + (i - 15); }
 
@@ -702,12 +715,12 @@ VkSampler sampler(const u32* s, bool nearest = false) {
 
 // Textures not used lately go when there are more than the budget
 void evict() {
-    if (k.texture_bytes <= TEXTURE_BUDGET) return;
+    if (k.texture_bytes <= texture_budget()) return;
     std::vector<std::pair<u64, std::string>> by_age;
     for (auto& [key, im] : k.textures) by_age.emplace_back(im.used, key);
     std::sort(by_age.begin(), by_age.end());
     for (auto& [used, key] : by_age) {
-        if (k.texture_bytes <= TEXTURE_BUDGET / 2) break;
+        if (k.texture_bytes <= texture_budget() / 2) break;
         if (used >= k.draws) continue;  // the draw being recorded uses it
         GpuImage& im = k.textures[key];
         k.texture_bytes -= im.bytes;
