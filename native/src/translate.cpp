@@ -47,7 +47,18 @@
 // holds, whether its lane is on or not, and the comparison writes vccu: every invocation takes
 // the branch the same way, as the console's wave does.
 //
-// Not yet: loops (branches backwards), other branches on vcc, buffer loads other than by index,
+// Loops (branches backwards) become GLSL loops, at most 65536 times round: a branch back sets
+// skip to the loop's id, and the loop's end goes round again if it says so; anything else
+// leaves. At the head no VGPR is taken as uniform, nor any SGPR the loop writes as a lane
+// mask, and the end checks that the loop made no other differ. A loop on uniform values goes
+// round the same in every invocation. In one each lane leaves on its own (s_cbranch_execnz
+// back, or s_cbranch_scc0 out of it on lane masks) a lane whose bit is gone does nothing more
+// in it on the console, so each invocation leaves when its own bit is gone, if the loop
+// changes no SGPR but lane masks. An s_buffer_load by an offset in an SGPR (a loop's, say)
+// reads the buffer's dwords the draw found (the whole buffer, up to 64 KiB, if the offset
+// isn't known before the draw), by the offset the shader works out.
+//
+// Not yet: other branches on vcc, buffer loads other than by index,
 // other stores, LDS instructions, depth export, gathers, depth-compare sampling, offsets, and
 // the rarer ALU ops. A shader with any of them isn't translated, and says what stopped it.
 
@@ -87,6 +98,69 @@ u32 inline_float(u32 code) {
     static const u32 v[] = {0x3f000000, 0xbf000000, 0x3f800000, 0xbf800000,
                             0x40000000, 0xc0000000, 0x40800000, 0xc0800000};
     return v[code - 240];
+}
+
+// A branch's target (SOPP)
+u64 branch_target(const Inst& in) { return in.at + 4 + u64(std::int64_t(std::int16_t(in.w0 & 0xffff)) * 4); }
+bool is_branch(const Inst& in) {
+    u32 op = (in.w0 >> 16) & 0x7f;
+    return in.enc == SOPP && op >= 2 && op <= 9 && op != 3;
+}
+
+// The loops: each backward branch's target (the loop's head), and the last backward branch to it
+std::map<u64, u64> find_loops(const Program& p) {
+    std::map<u64, u64> loops;
+    for (const Inst& in : p.code)
+        if (is_branch(in) && branch_target(in) <= in.at) loops[branch_target(in)] = in.at;
+    return loops;
+}
+
+// s_buffer_load by an offset in an SGPR: read, in the shader, from the buffer's dwords as the
+// draw found them, by the offset it works out (a loop's, say)
+bool dynamic_load(const Inst& in) {
+    u32 op = (in.w0 >> 22) & 0x1f;
+    return in.enc == SMRD && op >= 8 && op <= 12 && !((in.w0 >> 8) & 1) && (in.w0 & 0xff) < 128;
+}
+
+// The SGPRs an instruction may write (more, at times, than it does)
+void sgpr_writes(const Inst& in, std::vector<u32>& out) {
+    u32 w0 = in.w0;
+    auto add = [&](u32 code, u32 n) {
+        for (u32 k = 0; k < n; k++) out.push_back(code + k);
+    };
+    switch (in.enc) {
+        case SOP1: {
+            u32 op = (w0 >> 8) & 0xff;
+            add((w0 >> 16) & 0x7f, 2);
+            if (op >= 36 && op <= 43) add(126, 2);
+            break;
+        }
+        case SOP2: add((w0 >> 16) & 0x7f, 2); break;
+        case SOPK: {
+            u32 op = (w0 >> 23) & 0x1f;
+            if (op != 3 && !(op >= 4 && op <= 14)) add((w0 >> 16) & 0x7f, 1);
+            break;
+        }
+        case SMRD: add((w0 >> 15) & 0x7f, 1u << (((w0 >> 22) & 0x1f) & 7)); break;
+        case VOPC: add(106, 2); add(126, 2); break;
+        case VOP2: {
+            u32 op = (w0 >> 25) & 0x3f;
+            if (op >= 0x25 && op <= 0x2a) add(106, 2);
+            if (op == 1) add((w0 >> 17) & 0xff, 1);
+            break;
+        }
+        case VOP3: {
+            u32 op = (w0 >> 17) & 0x1ff;
+            if (op < 0x100) add(126, 2);
+            if (op < 0x100 || op == 0x101 || (op >= 0x125 && op <= 0x12a) || op == 0x16d || op == 0x182)
+                add(op >= 0x125 && op != 0x182 ? (w0 >> 8) & 0x7f : w0 & 0xff, 2);
+            break;
+        }
+        case VOP1:
+            if (((w0 >> 9) & 0xff) == 2) add((w0 >> 17) & 0xff, 1);
+            break;
+        default: break;
+    }
 }
 
 }  // namespace
@@ -200,9 +274,8 @@ void decode_into(Program& p, u64 pc, const shade::Memory& mem, const u32* user, 
             }
             if ((op >= 2 && op <= 9) || op == 10) {
                 std::int16_t offset = std::int16_t(w0 & 0xffff);
-                bool forward = offset >= 0 && op != 3 && op != 9 && op != 10;
-                if (!forward) {
-                    p.why = op == 10 ? "s_barrier" : offset < 0 ? "loops" : "branches taken when exec isn't 0";
+                if (op == 3 || op == 10 || (op == 9 && offset >= 0)) {
+                    p.why = op == 10 ? "s_barrier" : op == 3 ? "SOPP op 3" : "branches taken when exec isn't 0, forward";
                     return;
                 }
             }
@@ -258,8 +331,23 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
     // a branch's label, and the registers as they were at the branch: at the label, any the
     // code skipped may have changed aren't known
     std::map<u64, std::pair<std::array<u32, 128>, std::array<bool, 128>>> labels;
+    // at a loop's head, what the loop writes isn't known: it changes from pass to pass
+    std::map<u64, u64> loops = find_loops(p);
+    // the dynamic loads' windows: where its first dword goes in U, the address, how many
+    struct Window {
+        size_t header;
+        u64 at;
+        u32 n;
+    };
+    std::vector<Window> windows;
     for (const Inst& in : p.code) {
         u32 w0 = in.w0;
+        if (auto lp = loops.find(in.at); lp != loops.end()) {
+            std::vector<u32> written;
+            for (const Inst& x : p.code)
+                if (x.at >= lp->first && x.at <= lp->second) sgpr_writes(x, written);
+            for (u32 c : written) forget(c, 1);
+        }
         if (auto it = labels.find(in.at); it != labels.end()) {
             for (u32 k = 0; k < 128; k++)
                 if (s[k] != it->second.first[k] || known[k] != it->second.second[k]) known[k] = false;
@@ -312,6 +400,42 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                 }
                 u32 count = 1u << (op & 7);
                 bool ok = true;
+                if (dynamic_load(in)) {
+                    // the dwords at the offset, if it is known, else the whole buffer (the
+                    // offset is checked against it in the shader); in U: where they are, the
+                    // first one's index in the buffer, how many
+                    u32 desc[4];
+                    for (u32 k = 0; k < 4; k++) desc[k] = get(base + k, 0, ok);
+                    if (!ok) {
+                        v.why = "a scalar load through a buffer descriptor the shader works out";
+                        return v;
+                    }
+                    bool known_offset = true;
+                    u32 offset = get(off, 0, known_offset);
+                    u64 buffer = desc[0] | (u64(desc[1] & 0xfff) << 32);
+                    u32 stride = (desc[1] >> 16) & 0x3fff, first = 0, n = count;
+                    if (known_offset) {
+                        first = offset >> 2;
+                    } else {
+                        u64 bytes = stride ? u64(desc[2]) * stride : desc[2];
+                        n = u32(std::min<u64>(bytes / 4, 1u << 20));
+                        if (n > 16384) {
+                            v.why = "a scalar load, by an offset the shader works out, from a buffer of more than 64 KiB";
+                            return v;
+                        }
+                    }
+                    windows.push_back({v.u.size(), buffer + u64(first) * 4, n});
+                    v.u.push_back(0);
+                    v.u.push_back(first);
+                    v.u.push_back(n);
+                    for (u32 k = 0; k < count; k++) {
+                        u32 x = 0;
+                        if (known_offset && mem.ok(buffer + u64(first + k) * 4, 4))
+                            std::memcpy(&x, reinterpret_cast<const void*>(buffer + u64(first + k) * 4), 4);
+                        if (dst + k < 128) s[dst + k] = x, known[dst + k] = known_offset;
+                    }
+                    break;
+                }
                 u64 offset = imm ? u64(off) * 4 : get(off, in.lit, ok);
                 u64 at;
                 if (op >= 8) {  // through a buffer descriptor
@@ -390,6 +514,14 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
             default: break;
         }
     }
+    for (const Window& w : windows) {
+        v.u[w.header] = u32(v.u.size());
+        for (u32 k = 0; k < w.n; k++) {
+            u32 x = 0;
+            if (mem.ok(w.at + 4 * k, 4)) std::memcpy(&x, reinterpret_cast<const void*>(w.at + 4 * k), 4);
+            v.u.push_back(x);
+        }
+    }
     return v;
 }
 
@@ -429,6 +561,16 @@ struct Writer {
         bool vcc = false;  // vcc from a comparison of uniform values (vccu)
     } uni;
     std::map<u64, Uniform> uni_at;  // at each label, what is uniform on every branch to it
+    // The loops open where the code is, outermost first: each a GLSL loop, which a backward
+    // branch goes round (skip = its id) and anything else leaves
+    struct Loop {
+        u64 head = 0, end = 0;
+        u32 id = 0;
+        bool divergent = false;  // lanes leave it each on its own
+        std::set<u32> varying;  // the SGPRs taken as differing from lane to lane in it
+    };
+    std::vector<Loop> open_loops;
+    u32 loop_count = 0;
     bool shadow = false;  // writing an op as uniform: VGPR sources are their shadows
     bool varying_read = false;  // a source of this instruction may differ from lane to lane
     bool vccu_set = false;  // this instruction wrote vccu
@@ -605,31 +747,63 @@ void Writer::scalar(const Inst& in) {
             u32 op = (w0 >> 16) & 0x7f;
             if (op == 1 || op == 0 || op == 12 || (op >= 13 && op <= 17) || op == 19 || op == 20 || op == 21) return;
             if (op == 8) return;  // s_cbranch_execz: gone through (above)
-            if (op >= 2 && op <= 7 && op != 3) {  // s_branch, s_cbranch_scc0, _scc1, _vccz, _vccnz (forward)
-                // scc from lane masks: scc0 is taken when no lane's bit is left, which, like
-                // execz, only saves the time, and is gone through; scc1 can't be told here
-                if (op == 4 && scc_lanes) return;
-                if (op == 5 && scc_lanes) {
-                    fail("a branch on scc1 from lane masks");
-                    return;
-                }
-                // vcc from comparing uniform values: the same in every lane that is on, and
-                // vccu says it in every invocation
-                if (op >= 6 && !uni.vcc) {
-                    fail("a branch on vcc that differs from lane to lane");
-                    return;
-                }
-                static const char* cond[] = {"", "", "true", "", "!scc", "scc", "!vccu", "vccu"};
-                u64 to = in.at + 4 + u64(std::int64_t(std::int16_t(w0 & 0xffff)) * 4);
-                // what is uniform at the label: what is on every way there
-                if (auto it = uni_at.find(to); it == uni_at.end()) {
-                    uni_at[to] = uni;
+            if (is_branch(in)) {
+                u64 to = branch_target(in);
+                bool back = to <= in.at;
+                // the loops the branch leaves (forward, past their ends), and the one it goes round
+                Loop* round = nullptr;
+                for (Loop& l : open_loops)
+                    if (back && l.head == to) round = &l;
+                auto leaving = [&](bool each_lane) {
+                    for (Loop& l : open_loops)
+                        if (to > l.end) l.divergent = l.divergent || each_lane;
+                };
+                std::string c;
+                if (op == 9) {  // s_cbranch_execnz, back: each lane goes round while it is on
+                    if (!round) {
+                        fail("a branch taken when exec isn't 0, forward");
+                        return;
+                    }
+                    round->divergent = true;
+                    c = "exec_lo != 0u";
+                } else if ((op == 4 || op == 5) && scc_lanes) {
+                    // scc from lane masks: scc0 is taken when no lane's bit is left. Forward,
+                    // inside the loops it is in, it only saves the time, and is gone through;
+                    // out of a loop, each lane leaves when its own bit is gone, as a lane
+                    // whose bit is gone does nothing more in the loop on the console
+                    bool out = std::any_of(open_loops.begin(), open_loops.end(), [&](const Loop& l) { return to > l.end; });
+                    if (op == 4 && !back && !out) return;
+                    if (op == 5 || back) {
+                        fail("a branch on scc1, or backward, from lane masks");
+                        return;
+                    }
+                    leaving(true);
+                    c = "!scc";
                 } else {
-                    std::erase_if(it->second.vgprs, [&](u32 v) { return !uni.vgprs.count(v); });
-                    it->second.varying.insert(uni.varying.begin(), uni.varying.end());
-                    it->second.vcc = it->second.vcc && uni.vcc;
+                    // vcc from comparing uniform values: the same in every lane that is on, and
+                    // vccu says it in every invocation
+                    if (op >= 6 && !uni.vcc) {
+                        fail("a branch on vcc that differs from lane to lane");
+                        return;
+                    }
+                    static const char* cond[] = {"", "", "true", "", "!scc", "scc", "!vccu", "vccu"};
+                    c = cond[op];
                 }
-                line(std::format("if ({}) skip = {}u;", cond[op], label(to)));
+                u32 n;
+                if (back) {
+                    n = round->id;
+                } else {
+                    n = label(to);
+                    // what is uniform at the label: what is on every way there
+                    if (auto it = uni_at.find(to); it == uni_at.end()) {
+                        uni_at[to] = uni;
+                    } else {
+                        std::erase_if(it->second.vgprs, [&](u32 v) { return !uni.vgprs.count(v); });
+                        it->second.varying.insert(uni.varying.begin(), uni.varying.end());
+                        it->second.vcc = it->second.vcc && uni.vcc;
+                    }
+                }
+                line(std::format("if ({}) skip = {}u;", c, n));
                 line("}");
                 line("if (skip == 0u) {");
                 return;
@@ -722,6 +896,13 @@ void Writer::scalar(const Inst& in) {
         case SMRD: {
             u32 op = (w0 >> 22) & 0x1f, dst = (w0 >> 15) & 0x7f;
             u32 count = 1u << (op & 7);
+            if (dynamic_load(in)) {  // from the buffer's dwords in U (evaluate), by the offset
+                std::string l = std::format("{{ uint at = U[{}], o = ({} >> 2u) - U[{}], n = U[{}];", slot, src(w0 & 0xff, in.lit), slot + 1, slot + 2);
+                for (u32 k = 0; k < count; k++) l += std::format(" {} = o + {}u < n ? U[at + o + {}u] : 0u;", sdst(dst + k), k, k);
+                line(l + " }");
+                slot += 3;
+                return;
+            }
             for (u32 k = 0; k < count; k++) line(std::format("{} = U[{}];", sdst(dst + k), slot + k));
             slot += count;
             return;
@@ -1323,12 +1504,21 @@ bool translate_body(Writer& w, const Program& p) {
     w.line("uint skip = 0u;  // the label being skipped to, if any");
     w.line("if (skip == 0u) {");
     std::set<u64> reached;
+    // the loops, which must nest
+    std::map<u64, u64> loops = find_loops(p);
+    for (auto& [h1, e1] : loops)
+        for (auto& [h2, e2] : loops)
+            if (h1 < h2 && h2 <= e1 && e2 > e1) {
+                w.fail("loops that overlap");
+                return false;
+            }
     bool after_branch = false;  // the instruction before was s_branch: nothing falls through to here
     for (const Inst& in : p.code) {
-        if (auto it = w.labels.find(in.at); it != w.labels.end()) {
-            w.line("}");
+        auto it = w.labels.find(in.at);
+        auto head = loops.find(in.at);
+        if (it != w.labels.end() || head != loops.end()) w.line("}");
+        if (it != w.labels.end()) {
             w.line(std::format("if (skip == {}u) skip = 0u;", it->second));
-            w.line("if (skip == 0u) {");
             reached.insert(in.at);
             Writer::Uniform& there = w.uni_at[in.at];
             if (after_branch) {
@@ -1339,6 +1529,30 @@ bool translate_body(Writer& w, const Program& p) {
                 w.uni.vcc = w.uni.vcc && there.vcc;
             }
         }
+        if (head != loops.end()) {
+            // a loop's head: what the loop changes isn't uniform here (but for SGPRs that
+            // aren't lane masks, which the loop's end checks), and no VGPR is taken as uniform
+            Writer::Loop l;
+            l.head = head->first;
+            l.end = head->second;
+            l.id = 0x10000 + u32(w.loop_count++);
+            std::vector<u32> written;
+            for (const Inst& x : p.code) {
+                if (x.at < l.head || x.at > l.end) continue;
+                u32 op1 = (x.w0 >> 8) & 0xff, op2 = (x.w0 >> 23) & 0x7f;
+                bool masks = (x.enc != SOP2 && x.enc != SOPK && x.enc != SOP1 && x.enc != SOPC && x.enc != SOPP && x.enc != SMRD) ||
+                             (x.enc == SOP1 && (op1 == 4 || op1 == 8 || op1 == 10 || (op1 >= 36 && op1 <= 43))) ||
+                             (x.enc == SOP2 && ((op2 >= 15 && op2 <= 29 && (op2 & 1)) || op2 == 11));
+                if (masks) sgpr_writes(x, written);
+            }
+            w.uni.varying.insert(written.begin(), written.end());
+            w.uni.vgprs.clear();
+            w.uni.vcc = false;
+            l.varying = w.uni.varying;
+            w.open_loops.push_back(l);
+            w.line(std::format("for (uint pass{0} = 0u; pass{0} < 65536u; pass{0}++) {{  // a loop (at most 65536 times round)", l.id));
+        }
+        if (it != w.labels.end() || head != loops.end()) w.line("if (skip == 0u) {");
         after_branch = in.enc == SOPP && ((in.w0 >> 16) & 0x7f) == 2;
         size_t before = w.body.size();
         w.varying_read = w.vccu_set = false;
@@ -1387,8 +1601,41 @@ bool translate_body(Writer& w, const Program& p) {
             w.scc_lanes = (in.enc == SOP1 && (op1 == 8 || op1 == 10 || (op1 >= 36 && op1 <= 43))) ||
                           (in.enc == SOP2 && op2 >= 15 && op2 <= 29 && (op2 & 1));
         }
+        // a loop's end: round again if a branch back said so, else out
+        while (!w.open_loops.empty() && w.open_loops.back().end == in.at) {
+            Writer::Loop l = w.open_loops.back();
+            w.open_loops.pop_back();
+            w.line("}");
+            w.line(std::format("if (skip == {}u) {{ skip = 0u; continue; }}", l.id));
+            w.line("break;");
+            w.line("}");
+            w.line("if (skip == 0u) {");
+            // what was taken as uniform at the head must still be, at the end
+            for (u32 c : w.uni.varying)
+                if (!l.varying.count(c)) {
+                    w.fail("a loop that makes an SGPR differ from lane to lane");
+                    return false;
+                }
+            // a loop each lane leaves on its own: the lanes go round different numbers of
+            // times, so nothing in it may change what all of them see (SGPRs but lane masks)
+            if (l.divergent) {
+                std::vector<u32> written;
+                for (const Inst& x : p.code)
+                    if (x.at >= l.head && x.at <= l.end) sgpr_writes(x, written);
+                for (u32 c : written)
+                    if (c != 126 && c != 127 && !l.varying.count(c)) {
+                        w.fail("a loop each lane leaves on its own, changing scalar values");
+                        return false;
+                    }
+            }
+        }
     }
     w.line("}");
+    for (auto& [at, end] : loops)
+        if (!reached.count(at) && !std::any_of(p.code.begin(), p.code.end(), [&](const Inst& x) { return x.at == at; })) {
+            w.fail("a branch back to somewhere other than an instruction");
+            return false;
+        }
     for (auto& [at, n] : w.labels)
         if (!reached.count(at)) {
             w.fail("a branch to somewhere other than an instruction ahead");

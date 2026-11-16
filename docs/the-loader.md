@@ -302,7 +302,13 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   `s_cbranch_vccz` and `_vccnz` when vcc comes from comparing values the same in every lane
   that is on (constants, SGPRs, and VGPRs worked out from them since exec last changed): such
   a value is also kept, unmasked, in a shadow variable every invocation holds, so that every
-  invocation takes the branch the same way, as the console's wave does. A vertex shader's call to its
+  invocation takes the branch the same way, as the console's wave does. Loops become GLSL
+  loops (at most 65,536 times round): one on uniform values goes round the same in every
+  invocation; in one each lane leaves on its own (`s_cbranch_execnz` back, or `s_cbranch_scc0`
+  out of it on lane masks), each invocation leaves when its own bit is gone, as long as the
+  loop changes no SGPR but lane masks. An `s_buffer_load` by an offset in an SGPR reads the
+  buffer's dwords as the draw found them (all of it, up to 64 KiB, when the offset isn't
+  known before the draw), by the offset the shader works out. A vertex shader's call to its
   fetch shader is followed, and the fetch shader's instructions put in its place; their loads,
   each vertex's data by its index, read the buffer's elements as the CPU unpacked them. Its
   position goes through the console's viewport, recast as Vulkan's, and its parameters become
@@ -811,6 +817,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     branches taken alike, not yet the lit side of them. The CPU still fills some 550
     million pixels, for the draws with loops, depth export and depth-compare sampling,
     and for vertex shaders with more than 31 buffers.
+45. **Loops.** Three pixel shaders in the first scene have loops (260 draws). Two go round
+    on scalar values, the same in every lane: one over the scene's lights, a counter in an
+    SGPR, reading each light's four dwords with `s_buffer_load` at an offset worked out
+    from it; the third goes round a different number of times in each lane, each leaving
+    on its own (`s_cbranch_scc0` on what is left of a lane mask). A loop is now a GLSL
+    loop, at most 65,536 times round so that a mistake can't hang the GPU: a branch back
+    says to go round again, anything else leaves. In a loop each lane leaves on its own,
+    each invocation leaves when its own bit is gone, as a lane whose bit is gone does
+    nothing more in it on the console; that holds only if the loop changes nothing all
+    the lanes see, so one that changes an SGPR other than a lane mask isn't translated.
+    The light loop's load can't be found before the draw, the offset changing each time
+    round, so a scalar buffer load by an offset in an SGPR now reads the buffer's dwords
+    as the draw found them (all of it, up to 64 KiB, if the offset isn't known), by the
+    offset the shader works out, 0 past the end. No draw is left to the CPU for loops now.
+    Of 16 draws of the two scalar loops compared, all are the same on the GPU as on the
+    CPU in every pixel, the lights' over all 518,400 pixels of their target and the
+    other's over some 2 million; the third shader now stops at sampling with given
+    derivatives, so its loop isn't drawn on the GPU yet. Dispatches with loops stop at
+    other things now (scalar loads from addresses they work out, mostly).
 
 ## Files
 
