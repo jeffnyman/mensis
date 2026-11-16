@@ -1647,6 +1647,22 @@ void ds_op(Wave& w, u32 w0, u32 w1) {
         return;
     }
     u32 addr = w1 & 0xff, d0 = (w1 >> 8) & 0xff, d1 = (w1 >> 16) & 0xff, dst = w1 >> 24;
+    if (op == 53) {  // ds_swizzle_b32: lanes swap values, through no memory
+        // quad mode (offset bit 15): lane i of each 4 takes lane (offset >> 2i) & 3 of them;
+        // else bit-mask mode, within each 32: lane ((i & and) | or) ^ xor
+        u32 off = off0 | (off1 << 8);
+        u32 in[LANES];
+        for (int ln = 0; ln < LANES; ln++) in[ln] = w.v[addr][size_t(ln)];
+        u64 exec = w.exec();
+        for (int ln = 0; ln < LANES; ln++) {
+            if (!((exec >> ln) & 1)) continue;
+            int from;
+            if (off & 0x8000) from = (ln & ~3) | int((off >> (2 * (ln & 3))) & 3);
+            else from = (ln & ~31) | ((((ln & 31) & int(off & 0x1f)) | int((off >> 5) & 0x1f)) ^ int((off >> 10) & 0x1f));
+            w.v[dst][size_t(ln)] = in[from];
+        }
+        return;
+    }
     if (!w.lds || w.lds->empty()) {
         note("LDS operations outside a compute shader");
         return;

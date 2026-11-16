@@ -178,6 +178,7 @@ struct Target {  // a render target, from its CB_COLORn registers
     }
 };
 
+u64 g_draw_clears = 0;  // depth and stencil buffers cleared by a draw (clear_by_draw())
 u64 g_depth_clears = 0;  // depth buffers cleared (HTILE: expand_htile())
 
 // The depth buffer, from DB_DEPTH_CONTROL (0x200: the test on, writes on, the compare), DB_Z_INFO
@@ -354,6 +355,55 @@ void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
         std::memcpy(reinterpret_cast<void*>(db.base), v.data(), n * 2);
     }
     g_depth_clears++;
+}
+
+// A clear by a draw: with DB_RENDER_CONTROL's (0x000) DEPTH_CLEAR_ENABLE (bit 0) or
+// STENCIL_CLEAR_ENABLE (bit 1) on, the draw writes DB_DEPTH_CLEAR (0x00b), DB_STENCIL_CLEAR
+// (0x00a) wherever it covers, rather than its own depth (with HTILE, the console only marks the
+// tiles cleared). The draws are rectangles over what is to be cleared; here the scissors say
+// how much of the buffer that is (all of it, or a part, one shadow map of several in one depth
+// buffer, say), and it is filled with the values, on the GPU if the buffer is kept there, else
+// in memory. Returns what was done, or empty if it was no clear.
+std::string clear_by_draw(const GpuRegs& r, const Memory& mem) {
+    u32 rc = reg(r, 0x000, 0);
+    if (!(rc & 3)) return {};
+    u32 info = reg(r, 0x010, 0), format = info & 3, size = reg(r, 0x016, 0);
+    u64 read = u64(reg(r, 0x012, 0)) << 8, sread = u64(reg(r, 0x013, 0)) << 8;
+    if (format != 1 && format != 3) format = 0;
+    u32 bpp = format == 1 ? 2 : 4, pitch = ((size & 0x7ff) + 1) * 8, height = (((size >> 11) & 0x7ff) + 1) * 8;
+    u32 slice = reg(r, 0x002, 0) & 0x7ff;
+    u64 base = read + u64(slice) * pitch * height * bpp, sbase = sread + u64(slice) * pitch * height;
+    bool depth = (rc & 1) && format && read && mem.ok(base, u64(pitch) * height * bpp);
+    bool stencil = (rc & 2) && (reg(r, 0x011, 0) & 1) && sread && mem.ok(sbase, u64(pitch) * height);
+    if (!depth && !stencil) return {};
+    int x0 = 0, y0 = 0, x1 = 16384, y1 = 16384;
+    auto clip = [&](u32 tl, u32 br) {
+        x0 = std::max(x0, int(tl & 0x7fff)), y0 = std::max(y0, int((tl >> 16) & 0x7fff));
+        x1 = std::min(x1, int(br & 0x7fff)), y1 = std::min(y1, int((br >> 16) & 0x7fff));
+    };
+    clip(reg(r, 0x0c, 0), reg(r, 0x0d, 0x40004000));
+    clip(reg(r, 0x90, 0), reg(r, 0x91, 0x40004000));
+    if (reg(r, 0x292, 0) & 2) clip(reg(r, 0x94, 0), reg(r, 0x95, 0x40004000));
+    x1 = std::min(x1, int(pitch)), y1 = std::min(y1, int(height));
+    if (x0 >= x1 || y0 >= y1) return "a clear by a draw, of nothing";
+    float z = regf(r, 0x00b, 1);
+    int s = stencil ? int(reg(r, 0x00a, 0) & 0xff) : -1;
+    if (!(M.gpu && vkdraw::clear_depth(base, pitch, height, z, s, depth, u32(x0), u32(y0), u32(x1), u32(y1)))) {
+        // in memory, in rows: each row's stretch
+        size_t w = size_t(x1 - x0);
+        std::vector<float> zf(depth && format == 3 ? w : 0, z);
+        std::vector<std::uint16_t> zh(depth && format == 1 ? w : 0, std::uint16_t(std::nearbyint(std::clamp(z, 0.0f, 1.0f) * 65535.0f)));
+        for (int y = y0; y < y1; y++) {
+            u64 row = u64(y) * pitch + u64(x0);
+            if (!zf.empty()) std::memcpy(reinterpret_cast<void*>(base + row * 4), zf.data(), w * 4);
+            if (!zh.empty()) std::memcpy(reinterpret_cast<void*>(base + row * 2), zh.data(), w * 2);
+            if (stencil) std::memset(reinterpret_cast<void*>(sbase + row), s, w);
+        }
+    }
+    g_draw_clears++;
+    return std::format("a clear by a draw: {}{}{} ({}x{} at {}, {}, of {}x{})", depth ? std::format("depth to {}", z) : "",
+                       depth && stencil ? ", " : "", stencil ? std::format("stencil to {}", s) : "", x1 - x0, y1 - y0, x0, y0, pitch,
+                       height);
 }
 
 struct Tri {
@@ -787,9 +837,11 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         return false;
     }
     const Target& t = *first;
-    auto it = g_programs.find(ps);
-    if (it == g_programs.end()) it = g_programs.emplace(ps, translate::decode(ps, mem)).first;
-    const translate::Program& prog = it->second;
+    // (no pixel shader: depth and stencil alone, every pixel covered passing on, as if exported)
+    static const translate::Program no_program;
+    auto it = ps ? g_programs.find(ps) : g_programs.end();
+    if (ps && it == g_programs.end()) it = g_programs.emplace(ps, translate::decode(ps, mem)).first;
+    const translate::Program& prog = ps ? it->second : no_program;
     if (!prog.why.empty()) {
         why = "the shader has " + prog.why;
         return false;
@@ -797,7 +849,8 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     u32 user[16];
     for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x0c + k];
     u32 users = std::min(ps_user, 16u);
-    translate::Values vals = translate::evaluate(prog, user, users, mem);
+    translate::Values vals;
+    if (ps) vals = translate::evaluate(prog, user, users, mem);
     if (!vals.why.empty()) {
         why = "the shader has " + vals.why;
         return false;
@@ -840,11 +893,13 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         if (slot == unique.size()) unique.push_back(&im);
         st.image_slot.push_back(slot);
     }
+    static translate::Glsl no_shader;
+    if (no_shader.text.empty()) no_shader.text = "#version 450\nvoid main() {}\n";
     std::string gkey = std::format("ps:{:x}:{}", ps, st.key());
-    auto git = g_glsl.find(gkey);
-    if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::pixel_shader(prog, st)).first;
-    const translate::Glsl& gl = git->second;
-    if (gl.why.empty()) save_glsl("ps", ps, gl.text);
+    auto git = ps ? g_glsl.find(gkey) : g_glsl.end();
+    if (ps && git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::pixel_shader(prog, st)).first;
+    const translate::Glsl& gl = ps ? git->second : no_shader;
+    if (ps && gl.why.empty()) save_glsl("ps", ps, gl.text);
     if (!gl.why.empty()) {
         why = "the shader has " + gl.why;
         return false;
@@ -1144,6 +1199,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     }
     Memory mem;
     mem.snapshot();
+    if (std::string c = clear_by_draw(r, mem); !c.empty()) return c;
     u32 type = r.uc[0x242];
     bool rects, known;
     // the vertices: through the index buffer, or numbered
@@ -1163,7 +1219,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         note(std::format("primitive type {:#x}", type));
         return std::format("(primitive type {:#x}: not drawn)", type);
     }
-    if (!ps) return std::format("{} vertices (no pixel shader: nothing drawn)", count);
+    // (no pixel shader: no colour, but depth and stencil as for any other draw)
     // the targets, and the viewport and scissor
     Target targets[8];
     bool any = false;
@@ -1204,7 +1260,8 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     u32 ps_user = (r.sh[0x0b] >> 1) & 0x1f;
     u32 ena = reg(r, 0x1b3, 0), addr = reg(r, 0x1b4, 0);
     if (!addr) addr = ena;
-    bool save = g_saved < SAVED && g_saved_by_ps[ps] < 2;
+    bool save = g_saved < SAVED && g_saved_by_ps[ps] < (M.save_ps.empty() ? 2 : 8) && video_flips() >= M.save_from &&
+                (M.save_ps.empty() || std::find(M.save_ps.begin(), M.save_ps.end(), ps) != M.save_ps.end());
     int area[4] = {x0, y0, x1, y1};
     vkdraw::Draw check;
     std::string check_why, vertex_why;
@@ -1499,7 +1556,8 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
             w.set_exec(covered);  // every pixel covered runs (whether it is killed decides the stencil's operation)
             io.tri = &t;
             io.exported = 0;
-            run(w, ps, io, mem);
+            if (ps) run(w, ps, io, mem);
+            else io.exported = covered;  // no shader: nothing killed, no colour
             if (db.any())
                 for (int l = 0; l < LANES; l++) {
                     if (!((io.exported & covered) >> l & 1)) continue;
@@ -1757,6 +1815,8 @@ std::vector<std::string> draw_report() {
                     "pixel-shader waves), and the dispatches' {} groups.\n",
                     g_draws.load(), g_dispatches.load(), g_triangles.load(), g_clipped.load(), g_pixels.load(), g_ps_waves.load(),
                     g_groups.load()),
+        std::format("Depth buffers cleared the fast way (HTILE): {} times; depth and stencil buffers cleared by a draw: {} times.\n",
+                    g_depth_clears, g_draw_clears),
         std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
                     double(g_dispatch_ns) / 1e9,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};

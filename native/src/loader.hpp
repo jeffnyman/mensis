@@ -160,6 +160,8 @@ struct Machine {
 
     u64 max_calls = 0;
     u64 max_flips = 0;  // --frames: stop after this many flips
+    std::vector<u64> save_ps;  // --save-ps ADDRESS[,ADDRESS...]: only those pixel shaders' draws saved
+    u64 save_from = 0;  // --save-from F: draws saved to <out>/draws/ from flip F on
     u64 snapshots = 0;  // --snapshots N: the screen saved every N flips, to <out>/frames/
     unsigned seconds = 10;  // 0: no time limit
     bool draw = true;  // run the draws and dispatches (--no-draw: only follow the commands)

@@ -139,6 +139,13 @@ bool init() {
     VkPhysicalDeviceFeatures want{};
     want.shaderInt64 = have.shaderInt64;
     if (!have.geometryShader || !have.depthClamp) return fail("a GPU without geometry shaders or depth clamping");
+    // quad operations in pixel shaders (ds_swizzle_b32 in its quad mode, for derivatives)
+    VkPhysicalDeviceSubgroupProperties sub{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceProperties2 pr2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    pr2.pNext = &sub;
+    vkGetPhysicalDeviceProperties2(g.gpu, &pr2);
+    if (!(sub.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) || !(sub.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT))
+        return fail("a GPU without quad operations in pixel shaders");
     want.geometryShader = VK_TRUE;  // a rectangle's fourth corner
     want.depthClamp = VK_TRUE;  // depth isn't clipped: the console's draws here don't test it
     VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -1617,7 +1624,7 @@ bool dispatch(Dispatch& d, std::string& why) {
     return true;
 }
 
-bool clear_depth(u64 address, u32 width, u32 height, float value) {
+bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil, bool depth, u32 x0, u32 y0, u32 x1, u32 y1) {
     std::lock_guard lock(g_lock);
     struct Inside {
         Inside() { t_inside = true; }
@@ -1627,13 +1634,55 @@ bool clear_depth(u64 address, u32 width, u32 height, float value) {
     if (it == g_resident.end() || !it->second.depth || it->second.width != width || it->second.height != height) return false;
     Resident& r = it->second;
     if (r.state == Resident::memory) return false;  // (the memory may be the newer, the stencil's too: cleared there instead)
+    if (stencil >= 0 && !r.sbase) return false;
+    VkImageAspectFlags which = (depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil >= 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+    if (!which) return true;
+    x1 = std::min(x1, width), y1 = std::min(y1, height);
+    if (x0 >= x1 || y0 >= y1) return true;
+    bool whole = x0 == 0 && y0 == 0 && x1 == width && y1 == height;
+    // a part of it: the scratch buffer filled with the values, copied into that rectangle
+    VkDeviceSize area = VkDeviceSize(x1 - x0) * (y1 - y0), zbytes = (area * r.bpp + 3) & ~VkDeviceSize(3);
+    if (!whole && zbytes + area > k.scratch.size && (!flush_batch() || !k.scratch.reserve(zbytes + area))) return false;
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
     barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest_access(r) | VK_ACCESS_TRANSFER_READ_BIT,
             VK_ACCESS_TRANSFER_WRITE_BIT, rest_stage(r) | T, T, aspect(r));
-    VkClearDepthStencilValue v{value, 0};
-    VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};  // the depth alone (not a stencil beside it)
-    vkCmdClearDepthStencilImage(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+    if (whole) {
+        VkClearDepthStencilValue v{value, u32(std::max(stencil, 0))};
+        VkImageSubresourceRange range{which, 0, 1, 0, 1};  // the depth, the stencil, or both
+        vkCmdClearDepthStencilImage(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+    } else {
+        VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.buffer = k.scratch.buffer;
+        bb.size = VK_WHOLE_SIZE;
+        bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+        u32 zbits;
+        if (r.bpp == 2) {
+            u32 h = u32(std::nearbyint(std::clamp(value, 0.0f, 1.0f) * 65535.0f));
+            zbits = h | (h << 16);
+        } else {
+            std::memcpy(&zbits, &value, 4);
+        }
+        if (depth) vkCmdFillBuffer(cmd, k.scratch.buffer, 0, zbytes, zbits);
+        if (stencil >= 0) vkCmdFillBuffer(cmd, k.scratch.buffer, zbytes, (area + 3) & ~VkDeviceSize(3), u32(stencil) * 0x01010101u);
+        bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+        VkBufferImageCopy c[2]{};
+        u32 n = 0;
+        for (int s = 0; s < 2; s++) {
+            if (s == 0 ? !depth : stencil < 0) continue;
+            c[n].bufferOffset = s == 0 ? 0 : zbytes;
+            c[n].imageSubresource = {VkImageAspectFlags(s == 0 ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT), 0, 0, 1};
+            c[n].imageOffset = {std::int32_t(x0), std::int32_t(y0), 0};
+            c[n].imageExtent = {x1 - x0, y1 - y0, 1};
+            n++;
+        }
+        vkCmdCopyBufferToImage(cmd, k.scratch.buffer, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, n, c);
+    }
     barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_WRITE_BIT, rest_access(r), T, rest_stage(r),
             aspect(r));
     if (r.state != Resident::gpu) {  // the image is now the newer
@@ -1742,7 +1791,7 @@ bool has_texture(const std::string&) { return false; }
 bool barycentric() { return false; }
 bool flush() { return true; }
 bool kept(u64, u64, u32) { return false; }
-bool clear_depth(u64, u32, u32, float) { return false; }
+bool clear_depth(u64, u32, u32, float, int, bool, u32, u32, u32, u32) { return false; }
 u64 version(u64) { return 0; }
 bool touched(u64, bool) { return false; }
 bool dispatch(Dispatch&, std::string& why) {

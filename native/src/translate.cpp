@@ -200,7 +200,14 @@ void decode_into(Program& p, u64 pc, const shade::Memory& mem, const u32* user, 
                 }
             }
         }
-        if (in.enc == DS) p.why = "LDS instructions";
+        if (in.enc == DS) {
+            // ds_swizzle_b32 in its quad mode (offset bit 15) swaps values within each 2x2
+            // quad, through no memory: a subgroup's quad operations do the same. The rest
+            // reads and writes the LDS.
+            u32 op = (w0 >> 18) & 0xff;
+            if (op != 53) p.why = "LDS instructions";
+            else if (!(w0 & 0x8000)) p.why = "ds_swizzle_b32 in its bit-mask mode";
+        }
         if (!p.why.empty()) return;
     }
     p.why = "no s_endpgm in 4096 instructions";
@@ -527,7 +534,32 @@ struct Writer {
     void image_op(const Inst& in);
     void buffer_op(const Inst& in);
     void export_op(const Inst& in);
+    void swizzle_op(const Inst& in);
+    bool quad = false;  // quad operations used (GL_KHR_shader_subgroup_quad)
 };
+
+// ds_swizzle_b32 vdst, vaddr, quad mode: lane i of each quad takes the value of lane
+// (pattern >> 2i) & 3 of its quad. The lanes of a subgroup's quad are the same four (in a
+// pixel shader, the 2x2 pixels in the same order: top left, top right, bottom left, bottom
+// right), helpers included; exec doesn't change which lanes are read.
+void Writer::swizzle_op(const Inst& in) {
+    if (vertex || cs) {
+        fail("ds_swizzle_b32 outside a pixel shader");
+        return;
+    }
+    u32 pattern = in.w0 & 0xff, d = in.w1 >> 24;
+    std::string a = src(256 + (in.w1 & 0xff), 0);
+    quad = true;
+    u32 s0 = pattern & 3;
+    if (pattern == s0 * 0x55) {  // every lane the same one
+        vwrite(d, std::format("subgroupQuadBroadcast({}, {}u)", a, s0));
+        return;
+    }
+    line(std::format("{{ uint x = {}; uint q[4] = uint[4](subgroupQuadBroadcast(x, 0u), subgroupQuadBroadcast(x, 1u), "
+                     "subgroupQuadBroadcast(x, 2u), subgroupQuadBroadcast(x, 3u)); "
+                     "uint r = q[({}u >> (2u * (gl_SubgroupInvocationID & 3u))) & 3u]; if (exec_lo != 0u) {} = r; }}",
+                     a, pattern, vdst(d)));
+}
 
 void Writer::scalar(const Inst& in) {
     u32 w0 = in.w0;
@@ -1249,6 +1281,7 @@ bool translate_body(Writer& w, const Program& p) {
             case MIMG: w.image_op(in); break;
             case MUBUF: case MTBUF: w.buffer_op(in); break;
             case EXP: w.export_op(in); break;
+            case DS: w.swizzle_op(in); break;  // (the decoder lets no other through)
             default: w.fail("instruction format"); break;
         }
         if (!w.why.empty()) return false;
@@ -1407,6 +1440,7 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     s += w.body;
     s += "    if (!exported) discard;\n}\n";
     if (st.barycentric) s.insert(s.find('\n') + 1, "#extension GL_EXT_fragment_shader_barycentric : require\n");
+    if (w.quad) s.insert(s.find('\n') + 1, "#extension GL_KHR_shader_subgroup_quad : require\n");
     if (s.find("uint64_t") != std::string::npos)
         s.insert(s.find('\n') + 1, "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n");
     g.text = s;

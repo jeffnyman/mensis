@@ -107,9 +107,11 @@ struct Dispatch {
 bool dispatch(Dispatch& d, std::string& why);
 // Whether that memory is kept on the GPU, an element of bpp bytes a texel
 bool kept(u64 address, u64 bytes, u32 bpp);
-// A depth buffer kept on the GPU, cleared there to that value (its stencil, if any, left as it
-// is); false if it isn't kept there as that size
-bool clear_depth(u64 address, u32 width, u32 height, float value);
+// A depth buffer kept on the GPU, cleared there (all of it, or the rectangle from x0, y0 to x1,
+// y1): its depth to that value if depth, its stencil to the other if it is 0 to 255 (else left
+// as it is); false if it isn't kept there as that size, or has no stencil buffer to clear
+bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil = -1, bool depth = true, u32 x0 = 0, u32 y0 = 0,
+                 u32 x1 = ~0u, u32 y1 = ~0u);
 // If that memory is kept on the GPU, a number that changes whenever anything writes it (a draw,
 // a dispatch, the CPU); else 0
 u64 version(u64 address);

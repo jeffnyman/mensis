@@ -5,7 +5,13 @@
 //
 //     mensis-loader <prepared.elf> <symbols.tsv> <out dir> [--seconds N] [--calls N]
 //                   [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]...
-//                   [--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N] [--name TEXT]
+//                   [--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N] [--name TEXT] [--save-from F]
+//                   [--save-ps ADDRESS[,ADDRESS...]]
+//
+// --save-from F saves draws to <out>/draws/ (and compares them, with --gpu-check) only from
+// flip F on, for the draws of a scene well into a run rather than the title screen's.
+// --save-ps ADDRESS,... (hex, as draws/index.txt and shaders/ name them) saves only the draws
+// of those pixel shaders, eight of each, as many in all as the other draws would have been.
 //
 // --name is what the player types when the game opens the system's keyboard (a name for the
 // character): "Hunter" if not given.
@@ -575,6 +581,12 @@ int main(int argc, char** argv) {
             M.app0.push_back(argv[++i]);
         } else if (a == "--name" && i + 1 < argc) {
             M.name = argv[++i];
+        } else if (a == "--save-ps" && i + 1 < argc) {
+            std::stringstream list(argv[++i]);
+            for (std::string item; std::getline(list, item, ',');)
+                if (!item.empty()) M.save_ps.push_back(std::stoull(item, nullptr, 16));
+        } else if (a == "--save-from" && i + 1 < argc) {
+            M.save_from = std::stoull(argv[++i]);
         } else if (a == "--snapshots" && i + 1 < argc) {
             M.snapshots = std::stoull(argv[++i]);
         } else if ((a == "--seconds" || a == "--calls" || a == "--frames" || a == "--log") &&
@@ -591,7 +603,7 @@ int main(int argc, char** argv) {
     if (pos.size() != 3) {
         std::cerr << "usage: mensis-loader <prepared.elf> <symbols.tsv> <out dir> "
                      "[--seconds N] [--calls N] [--frames N] [--log N] [--window] [--no-draw] [--cpu] [--gpu-check] [--app0 DIR]... "
-                     "[--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N] [--name TEXT]\n";
+                     "[--press F:BUTTONS[,F:BUTTONS]...] [--snapshots N] [--name TEXT] [--save-from F] [--save-ps ADDRESS]\n";
         return 2;
     }
     M.out_dir = pos[2];

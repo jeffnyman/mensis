@@ -148,7 +148,10 @@ menu, the message about playing offline, and "New Game" again (the buttons
 by name: cross, circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3,
 options, touchpad; `down+circle` presses two at once). The summary lists the presses the
 game saw. `--snapshots 50` saves the screen every 50 frames, at half size, to `frames/`, which
-shows where a long run was when, and so when to press what. These presses, with `--seconds
+shows where a long run was when, and so when to press what. `--save-from 2000` saves draws
+to `draws/` (and, with `--gpu-check`, compares them) only from frame 2000 on, and
+`--save-ps 2d3355600,...` only the draws of those pixel shaders (eight of each), for draws
+well into a run. These presses, with `--seconds
 260`, go on through the brightness and control settings to character creation:
 
 ```
@@ -328,8 +331,9 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   the image it was copied from, if it was; a load of other memory reads it as it is, if its
   elements are 32-bit values, else as the CPU unpacked it. A pixel shader's buffer loads read the buffer's elements as the CPU unpacked them, as a
   vertex shader's do. Not yet translated: loops (branches backwards), branches on `vcc` or on
-  `scc1` from a lane mask, buffer loads other than by index, other stores, LDS instructions,
-  depth export, gathers, depth-compare sampling; a shader with any of them says so, and is
+  `scc1` from a lane mask, buffer loads other than by index, other stores, LDS instructions
+  (but for `ds_swizzle_b32` in a pixel shader, swapping values within each 2x2 quad of
+  pixels, which a subgroup's quad operations do), depth export, gathers, depth-compare sampling; a shader with any of them says so, and is
   left to the CPU (for a vertex shader, the GPU is given the CPU's vertices instead). A draw
   with depth has its depth buffer kept on the GPU too, as a depth image (its memory brought
   back and taken up as a render target's is), with its stencil buffer if it has one (one
@@ -762,7 +766,28 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     by Vulkan, as before; one given the CPU's vertices gets the clipped triangles. Loading
     the first scene, 203,531 triangles were clipped and none skipped. The scene is still
     slow to draw (the draws took 437 s of a 500-second run, still behind the loading
-    screen): most of that is the 6,120 draws whose shaders use LDS, drawn on the CPU.
+    screen); the 6,120 draws whose shaders use LDS, drawn on the CPU, were the most of any
+    one kind.
+43. **LDS, and the shadow maps.** The LDS instructions in those pixel shaders were all
+    `ds_swizzle_b32` in its quad mode: each pixel taking a value from one of the 2x2 quad of
+    pixels it is shaded with, here to work out how the depth changes from pixel to pixel.
+    The shaders are the shadow casters, writing depth and depth squared into small variance
+    shadow maps. The translation does it with GLSL's subgroup quad operations, whose quads
+    are the same four pixels in the same order; the CPU's interpreter didn't do it at all
+    (it left the register as it was), and now does, both its modes. Comparing those draws
+    (`--save-ps`, new, and `--save-from`) showed they drew nothing at all, on the GPU or
+    the CPU: the shadow maps' depth was 0, every caster failing its test. The game clears
+    it with a draw that has no pixel shader, which writes depth all the same, and the
+    loader had dropped every such draw; they are drawn now, depth and stencil alone, on the
+    CPU and the GPU (an empty fragment shader). A clear by a draw (DB_RENDER_CONTROL's
+    depth or stencil clear) is done too, over the part of the buffer its scissors leave,
+    on the GPU if the buffer is kept there. With all that, of 80 draws of the 23 shaders
+    with `ds_swizzle_b32`, 72 are the same on the GPU as on the CPU in every pixel, the
+    rest but for 1 to 7 pixels on triangles' edges. The LDS draws are off the CPU (the
+    triangles it draws went from 16.5 million to about 1 million), but the draws still
+    take about 436 s of a 500-second run: the CPU still fills some 570 million pixels, for
+    the draws left to it, those with branches, loops, depth export and depth-compare
+    sampling.
 
 ## Files
 
