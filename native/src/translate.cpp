@@ -40,7 +40,14 @@
 // taken when no lane's bit is left (a shader's pixels all killed, say), and is gone through,
 // as execz is; s_cbranch_scc1 on it isn't translated.
 //
-// Not yet: loops (branches backwards), branches on vcc, buffer loads other than by index,
+// s_cbranch_vccz and _vccnz are translated when vcc comes from comparing values that are the
+// same in every lane that is on (uniform): constants, SGPRs other than lane masks, and VGPRs a
+// vector op wrote from such values since exec last changed (lanes that come on hold others).
+// Such an op also writes its result, unmasked, to a shadow variable that every invocation then
+// holds, whether its lane is on or not, and the comparison writes vccu: every invocation takes
+// the branch the same way, as the console's wave does.
+//
+// Not yet: loops (branches backwards), other branches on vcc, buffer loads other than by index,
 // other stores, LDS instructions, depth export, gathers, depth-compare sampling, offsets, and
 // the rarer ALU ops. A shader with any of them isn't translated, and says what stopped it.
 
@@ -193,9 +200,9 @@ void decode_into(Program& p, u64 pc, const shade::Memory& mem, const u32* user, 
             }
             if ((op >= 2 && op <= 9) || op == 10) {
                 std::int16_t offset = std::int16_t(w0 & 0xffff);
-                bool forward = offset >= 0 && (op == 2 || op == 4 || op == 5 || op == 8);
+                bool forward = offset >= 0 && op != 3 && op != 9 && op != 10;
                 if (!forward) {
-                    p.why = op == 10 ? "s_barrier" : offset < 0 ? "loops" : "branches on vcc, or taken when exec isn't 0";
+                    p.why = op == 10 ? "s_barrier" : offset < 0 ? "loops" : "branches taken when exec isn't 0";
                     return;
                 }
             }
@@ -260,7 +267,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
         }
         if (in.enc == SOPP) {
             u32 op = (w0 >> 16) & 0x7f;
-            if (op == 2 || op == 4 || op == 5) {
+            if (op == 2 || (op >= 4 && op <= 7)) {
                 u64 to = in.at + 4 + u64(std::int64_t(std::int16_t(w0 & 0xffff)) * 4);
                 if (!labels.count(to)) {
                     auto& snap = labels[to];
@@ -412,6 +419,21 @@ struct Writer {
     const CsState* cs = nullptr;  // a compute shader's
     u32 store = 0;  // the next buffer store's
     bool scc_lanes = false;  // scc was last set by an operation on lane masks: it differs from lane to lane
+
+    // Values the same in every lane that is on (uniform), for the branches on vcc. A vector op
+    // whose sources are all uniform also writes its result, unmasked, to a shadow (vu<n>),
+    // which every invocation then holds, on or not; a comparison of them into vcc writes vccu.
+    struct Uniform {
+        std::set<u32> vgprs;  // VGPRs whose shadows hold what every lane that is on has
+        std::set<u32> varying;  // SGPRs (and m0) that may differ from lane to lane: lane masks
+        bool vcc = false;  // vcc from a comparison of uniform values (vccu)
+    } uni;
+    std::map<u64, Uniform> uni_at;  // at each label, what is uniform on every branch to it
+    bool shadow = false;  // writing an op as uniform: VGPR sources are their shadows
+    bool varying_read = false;  // a source of this instruction may differ from lane to lane
+    bool vccu_set = false;  // this instruction wrote vccu
+    std::vector<u32> s_written, v_written, v_shadowed;  // this instruction's destinations, and shadows
+    std::set<u32> shadows;  // the shadows used
     std::string body, why;
     u32 slot = 16;  // the next scalar load's place in U
     u32 image = 0;  // the next image instruction's binding
@@ -475,11 +497,16 @@ struct Writer {
     std::string src(u32 code, u32 lit) {
         if (code >= 256) {
             vgprs.insert(code - 256);
+            if (!uni.vgprs.count(code - 256)) varying_read = true;
+            else if (shadow) return std::format("vu{}", code - 256);
             return std::format("v{}", code - 256);
         }
         if (code <= 192 && code >= 128) return std::format("{}u", code - 128);
         if (code >= 193 && code <= 208) return hex(u32(192 - int(code)));
         if (code >= 240 && code <= 247) return hex(inline_float(code));
+        if (code == 106 || code == 107 || code == 126 || code == 127 || code == 251 || code == 252 ||
+            (code == 253 && scc_lanes) || uni.varying.count(code))
+            varying_read = true;
         switch (code) {
             case 251: return "(vcc_lo == 0u ? 1u : 0u)";
             case 252: return "(exec_lo == 0u ? 1u : 0u)";
@@ -506,20 +533,30 @@ struct Writer {
     std::string sdst(u32 code) {
         std::string r = sreg(code);
         if (r.empty()) fail(std::format("destination {}", code));
+        s_written.push_back(code);
         return r.empty() ? "dummy" : r;
     }
     std::string vdst(u32 v) {
         vgprs.insert(v);
+        v_written.push_back(v);
         return std::format("v{}", v);
     }
-    // A vector result, written where exec is set
+    // A vector result, written where exec is set (and to its shadow, if uniform)
     void vwrite(u32 v, const std::string& expr) {
-        line(std::format("{{ uint r = {}; if (exec_lo != 0u) {} = r; }}", expr, vdst(v)));
+        line(std::format("{{ uint r = {}; if (exec_lo != 0u) {} = r;{} }}", expr, vdst(v), shadow_write(v)));
+    }
+    std::string shadow_write(u32 v) {
+        if (!shadow) return "";
+        shadows.insert(v);
+        v_shadowed.push_back(v);
+        return std::format(" vu{} = r;", v);
     }
     // A lane mask, from a condition, into an SGPR pair (inactive lanes' bits are 0)
     void mask_write(u32 code, const std::string& cond) {
         std::string lo = sdst(code), hi = sdst(code + 1);
-        line(std::format("{{ uint m = (exec_lo != 0u && ({})) ? 0xffffffffu : 0u; {} = m; {} = m; }}", cond, lo, hi));
+        std::string u;
+        if (shadow && code == 106) u = " vccu = c;", vccu_set = true;
+        line(std::format("{{ bool c = {}; uint m = (exec_lo != 0u && c) ? 0xffffffffu : 0u; {} = m; {} = m;{} }}", cond, lo, hi, u));
     }
 
     std::map<u64, u32> labels;  // each branch's target, numbered from 1
@@ -568,7 +605,7 @@ void Writer::scalar(const Inst& in) {
             u32 op = (w0 >> 16) & 0x7f;
             if (op == 1 || op == 0 || op == 12 || (op >= 13 && op <= 17) || op == 19 || op == 20 || op == 21) return;
             if (op == 8) return;  // s_cbranch_execz: gone through (above)
-            if (op == 2 || op == 4 || op == 5) {  // s_branch, s_cbranch_scc0, _scc1 (forward)
+            if (op >= 2 && op <= 7 && op != 3) {  // s_branch, s_cbranch_scc0, _scc1, _vccz, _vccnz (forward)
                 // scc from lane masks: scc0 is taken when no lane's bit is left, which, like
                 // execz, only saves the time, and is gone through; scc1 can't be told here
                 if (op == 4 && scc_lanes) return;
@@ -576,8 +613,23 @@ void Writer::scalar(const Inst& in) {
                     fail("a branch on scc1 from lane masks");
                     return;
                 }
+                // vcc from comparing uniform values: the same in every lane that is on, and
+                // vccu says it in every invocation
+                if (op >= 6 && !uni.vcc) {
+                    fail("a branch on vcc that differs from lane to lane");
+                    return;
+                }
+                static const char* cond[] = {"", "", "true", "", "!scc", "scc", "!vccu", "vccu"};
                 u64 to = in.at + 4 + u64(std::int64_t(std::int16_t(w0 & 0xffff)) * 4);
-                line(std::format("if ({}) skip = {}u;", op == 2 ? "true" : op == 4 ? "!scc" : "scc", label(to)));
+                // what is uniform at the label: what is on every way there
+                if (auto it = uni_at.find(to); it == uni_at.end()) {
+                    uni_at[to] = uni;
+                } else {
+                    std::erase_if(it->second.vgprs, [&](u32 v) { return !uni.vgprs.count(v); });
+                    it->second.varying.insert(uni.varying.begin(), uni.varying.end());
+                    it->second.vcc = it->second.vcc && uni.vcc;
+                }
+                line(std::format("if ({}) skip = {}u;", cond[op], label(to)));
                 line("}");
                 line("if (skip == 0u) {");
                 return;
@@ -615,6 +667,8 @@ void Writer::scalar(const Inst& in) {
                 static const char* f[] = {"a & e", "a | e", "a ^ e", "a & ~e", "a | ~e", "~(a & e)", "~(a | e)", "~(a ^ e)"};
                 line(std::format("{{ uint a = {}, e = exec_lo; {} = exec_lo; {} = exec_hi; exec_lo = {}; exec_hi = exec_lo; scc = exec_lo != 0u; }}",
                                  a, sdst(dst), sdst(dst + 1), f[op - 36]));
+                s_written.push_back(126);
+                varying_read = true;  // (the old exec)
                 return;
             }
             fail(std::format("SOP1 op {}", op));
@@ -840,7 +894,10 @@ void Writer::vector(const Inst& in) {
             return;
         }
         mask_write(sd, c);
-        if (x) line(std::format("exec_lo = {}; exec_hi = exec_lo;", sreg(sd)));
+        if (x) {
+            line(std::format("exec_lo = {}; exec_hi = exec_lo;", sreg(sd)));
+            s_written.push_back(126);
+        }
         return;
     }
     if (op == 0x100) {  // v_cndmask_b32: src2 is the lane mask
@@ -880,7 +937,7 @@ void Writer::vector(const Inst& in) {
             uexpr = "floatBitsToUint(" + fsrc(srcs[k], lit, (abs >> k) & 1, (neg >> k) & 1) + ")";
         decl += std::format("uint {0} = {1}; float f{0} = uintBitsToFloat({0}); ", name, uexpr);
     }
-    if (e.find('d') != std::string::npos) decl += std::format("uint d = {}; ", vdst(vd));
+    if (e.find('d') != std::string::npos) decl += std::format("uint d = {}; ", src(256 + vd, 0));  // (read, as v_mac's)
     std::string r = is_float ? "(" + e + ")" : e;
     if (is_float) {
         if (omod == 1) r = "(" + r + " * 2.0)";
@@ -889,7 +946,7 @@ void Writer::vector(const Inst& in) {
         if (clamp) r = "clamp(" + r + ", 0.0, 1.0)";
         r = "floatBitsToUint(" + r + ")";
     }
-    line(std::format("{{ {}uint r = {}; if (exec_lo != 0u) {} = r; }}", decl, r, vdst(vd)));
+    line(std::format("{{ {}uint r = {}; if (exec_lo != 0u) {} = r;{} }}", decl, r, vdst(vd), shadow_write(vd)));
 }
 
 // The PS input VGPRs: which bit of SPI_PS_INPUT_ADDR each VGPR comes from
@@ -1266,17 +1323,41 @@ bool translate_body(Writer& w, const Program& p) {
     w.line("uint skip = 0u;  // the label being skipped to, if any");
     w.line("if (skip == 0u) {");
     std::set<u64> reached;
+    bool after_branch = false;  // the instruction before was s_branch: nothing falls through to here
     for (const Inst& in : p.code) {
         if (auto it = w.labels.find(in.at); it != w.labels.end()) {
             w.line("}");
             w.line(std::format("if (skip == {}u) skip = 0u;", it->second));
             w.line("if (skip == 0u) {");
             reached.insert(in.at);
+            Writer::Uniform& there = w.uni_at[in.at];
+            if (after_branch) {
+                w.uni = there;
+            } else {
+                std::erase_if(w.uni.vgprs, [&](u32 v) { return !there.vgprs.count(v); });
+                w.uni.varying.insert(there.varying.begin(), there.varying.end());
+                w.uni.vcc = w.uni.vcc && there.vcc;
+            }
         }
+        after_branch = in.enc == SOPP && ((in.w0 >> 16) & 0x7f) == 2;
         size_t before = w.body.size();
+        w.varying_read = w.vccu_set = false;
+        w.s_written.clear();
+        w.v_written.clear();
+        w.v_shadowed.clear();
         switch (in.enc) {
             case SOP2: case SOPK: case SOP1: case SOPC: case SOPP: case SMRD: w.scalar(in); break;
-            case VOP1: case VOP2: case VOPC: case VOP3: w.vector(in); break;
+            case VOP1: case VOP2: case VOPC: case VOP3:
+                w.vector(in);
+                if (!w.varying_read && w.why.empty()) {  // again, as uniform
+                    w.body.resize(before);
+                    w.s_written.clear();
+                    w.v_written.clear();
+                    w.shadow = true;
+                    w.vector(in);
+                    w.shadow = false;
+                }
+                break;
             case VINTRP: w.interp_op(in); break;
             case MIMG: w.image_op(in); break;
             case MUBUF: case MTBUF: w.buffer_op(in); break;
@@ -1285,6 +1366,20 @@ bool translate_body(Writer& w, const Program& p) {
             default: w.fail("instruction format"); break;
         }
         if (!w.why.empty()) return false;
+        // what is uniform now: the VGPRs written as uniform; the SGPRs a scalar op wrote from
+        // uniform sources (a vector op writes lane masks); vcc if a uniform comparison wrote it.
+        // When exec changes, lanes that were off may come on, holding other values.
+        bool vector_op = in.enc != SOP2 && in.enc != SOPK && in.enc != SOP1 && in.enc != SOPC && in.enc != SOPP && in.enc != SMRD;
+        for (u32 v : w.v_written) {
+            if (std::find(w.v_shadowed.begin(), w.v_shadowed.end(), v) != w.v_shadowed.end()) w.uni.vgprs.insert(v);
+            else w.uni.vgprs.erase(v);
+        }
+        for (u32 c : w.s_written) {
+            if (c == 126 || c == 127) w.uni.vgprs.clear();
+            if (c == 106 || c == 107) w.uni.vcc = w.vccu_set;
+            if (vector_op || w.varying_read) w.uni.varying.insert(c);
+            else w.uni.varying.erase(c);
+        }
         // scc, if this set it: from lane masks (64-bit bitwise operations, s_not_b64, s_wqm_b64,
         // s_*_saveexec_b64) or not
         if (w.body.find("scc = ", before) != std::string::npos) {
@@ -1307,6 +1402,8 @@ std::string registers(const Writer& w, u32 user_count, const std::string& exec, 
                       const std::map<u32, std::string>& sinit = {}) {
     std::string s = std::format("    uint exec_lo = {}, exec_hi = exec_lo;\n", exec);
     s += "    uint vcc_lo = 0u, vcc_hi = 0u, m0 = 0u, dummy = 0u;\n    bool scc = false, exported = false;\n";
+    s += "    bool vccu = false;\n";
+    for (u32 k : w.shadows) s += std::format("    uint vu{} = 0u;\n", k);
     for (u32 k = 0; k < 104; k++)
         s += std::format("    uint s{} = {};\n", k,
                          k < user_count && k < 16 ? std::format("U[{}]", k) : sinit.count(k) ? sinit.at(k) : "0u");

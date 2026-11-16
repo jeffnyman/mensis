@@ -298,7 +298,11 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   when no lane is on, which then does nothing a lane can see, so it is simply gone through; so
   is `s_cbranch_scc0` on a lane mask (taken when no pixel is left, after the shader has killed
   some); the others (`s_branch`, `s_cbranch_scc0` and `_scc1` on scalar values, the same in
-  every lane) are taken, a variable saying which label the code is skipping to. A vertex shader's call to its
+  every lane) are taken, a variable saying which label the code is skipping to. So are
+  `s_cbranch_vccz` and `_vccnz` when vcc comes from comparing values the same in every lane
+  that is on (constants, SGPRs, and VGPRs worked out from them since exec last changed): such
+  a value is also kept, unmasked, in a shadow variable every invocation holds, so that every
+  invocation takes the branch the same way, as the console's wave does. A vertex shader's call to its
   fetch shader is followed, and the fetch shader's instructions put in its place; their loads,
   each vertex's data by its index, read the buffer's elements as the CPU unpacked them. Its
   position goes through the console's viewport, recast as Vulkan's, and its parameters become
@@ -788,6 +792,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     take about 436 s of a 500-second run: the CPU still fills some 570 million pixels, for
     the draws left to it, those with branches, loops, depth export and depth-compare
     sampling.
+44. **Branches on vcc.** The branches that stopped a translation were nearly all
+    `s_cbranch_vccz`, and every one of them tested a value the same in every pixel: a
+    constant from the draw's buffer compared with 0 (is this light on, say), through a VGPR
+    just set to 0. In a wave that is the same branch for all its lanes; in an invocation
+    per lane, as here, each lane holds only its own bit of vcc, and a lane that is off
+    holds 0 and would go the other way. So the translation now follows which values are
+    the same in every lane that is on: constants, SGPRs that aren't lane masks, and VGPRs
+    a vector op wrote from those since exec last changed (lanes that come on then hold
+    other values). Such an op also writes its result, unmasked, to a shadow variable,
+    which every invocation holds whether its lane is on or not, and a comparison of them
+    into vcc writes `vccu`, which the branch then goes on. At a label, what is the same
+    in every lane is what was on every way there. A branch on vcc that differs from lane
+    to lane still isn't translated, and says so. Loading the first scene, no draw is left to
+    the CPU for its branches now (there were 280 to 1,037 a run). Of 32 draws of those
+    shaders compared, all 32 are the same on the GPU as on the CPU, but none of them
+    changed a pixel there (lights that add nothing, it seems), so the check shows the
+    branches taken alike, not yet the lit side of them. The CPU still fills some 550
+    million pixels, for the draws with loops, depth export and depth-compare sampling,
+    and for vertex shaders with more than 31 buffers.
 
 ## Files
 
