@@ -22,8 +22,8 @@
 // depth is written (if they passed) and the stencil operation for how they fared is done. The
 // depth buffer is 32-bit floats or 16-bit unorm, in rows, as the loader keeps targets.
 //
-// Not done yet: depth exported by a shader, clipping to the near plane (a triangle with a vertex
-// behind the eye is skipped), multisampling, mip levels past the first.
+// A triangle reaching past the guard band, or behind the eye, is clipped first, as the hardware
+// does. Not done yet: depth exported by a shader, multisampling, mip levels past the first.
 //
 // Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
 // translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp), into its render
@@ -116,6 +116,7 @@ struct Timer {  // adds the time from here to the end of the scope
     explicit Timer(std::atomic<u64>& t) : to(t) {}
     ~Timer() { to += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); }
 };
+std::atomic<u64> g_clipped{0};  // triangles clipped to the guard band (on the CPU)
 std::atomic<u64> g_draws{0}, g_triangles{0}, g_pixels{0}, g_ps_waves{0}, g_dispatches{0}, g_groups{0};
 
 u32 reg(const GpuRegs& r, u32 i, u32 dflt) { return r.ctx_set[i] ? r.ctx[i] : dflt; }
@@ -1291,8 +1292,12 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     u32 cull = reg(r, 0x205, 0);
     std::vector<Tri> tris;
     tris.reserve(tris_in.size() * (rects ? 2 : 1));
-    u64 behind = 0;
-    auto add = [&](size_t a, size_t b, size_t c) {
+    u64 behind = 0, clipped = 0;
+    bool divide = !((vte >> 8) & 1);
+    // the guard band: how far past the viewport (in its own widths, as clip space has it) the
+    // hardware lets a triangle reach before it clips it
+    float gx = std::max(1.0f, regf(r, 0x2fc, 1)), gy = std::max(1.0f, regf(r, 0x2fa, 1));
+    auto triangle = [&](size_t a, size_t b, size_t c) {
         Tri t;
         size_t v[3] = {a, b, c};
         for (int k = 0; k < 3; k++) {
@@ -1302,7 +1307,6 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 behind++;
                 return;
             }
-            bool divide = !((vte >> 8) & 1);
             float nx = divide ? p[0] / w : p[0], ny = divide ? p[1] / w : p[1], nz = divide ? p[2] / w : p[2];
             t.x[k] = (vte & 1 ? nx * xs : nx) + (vte & 2 ? xo : 0);
             t.y[k] = (vte & 4 ? ny * ys : ny) + (vte & 8 ? yo : 0);
@@ -1317,12 +1321,59 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         if ((t.front && (cull & 1)) || (!t.front && (cull & 2))) return;
         tris.push_back(t);
     };
+    // A triangle reaching past the guard band (or behind the eye, which the band's planes
+    // imply) is clipped in clip space, as the hardware does: to the planes -g w <= x <= g w and
+    // the same for y (and w > 0). Depth isn't clipped (the GPU clamps it, as here). The new
+    // corners are new vertices, their parameters in proportion; the polygon left is drawn as
+    // a fan.
+    constexpr float EPS = 1e-6f;
+    auto plane = [&](const float* p, int i) {
+        switch (i) {
+            case 0: return gx * p[3] + p[0];
+            case 1: return gx * p[3] - p[0];
+            case 2: return gy * p[3] + p[1];
+            case 3: return gy * p[3] - p[1];
+            default: return p[3] - EPS;
+        }
+    };
+    auto add = [&](size_t a, size_t b, size_t c) {
+        size_t v[3] = {a, b, c};
+        bool inside = true;
+        for (int k = 0; k < 3 && inside; k++)
+            for (int i = 0; i < 5; i++)
+                if (!(plane(&out.pos[v[k] * 4], i) >= 0)) {
+                    inside = false;
+                    break;
+                }
+        if (inside || !divide) return triangle(a, b, c);
+        std::vector<size_t> poly{a, b, c}, next;
+        for (int i = 0; i < 5 && poly.size() >= 3; i++) {
+            next.clear();
+            for (size_t k = 0; k < poly.size(); k++) {
+                size_t p = poly[k], q = poly[(k + 1) % poly.size()];
+                float dp = plane(&out.pos[p * 4], i), dq = plane(&out.pos[q * 4], i);
+                if (dp >= 0) next.push_back(p);
+                if ((dp >= 0) != (dq >= 0)) {  // the edge crosses the plane: a corner there
+                    float s = dp / (dp - dq);
+                    size_t n = out.pos.size() / 4, P = out.params * 4;
+                    for (int c = 0; c < 4; c++) out.pos.push_back(out.pos[p * 4 + c] + s * (out.pos[q * 4 + c] - out.pos[p * 4 + c]));
+                    for (size_t j = 0; j < P; j++) out.param.push_back(out.param[p * P + j] + s * (out.param[q * P + j] - out.param[p * P + j]));
+                    next.push_back(n);
+                }
+            }
+            poly.swap(next);
+        }
+        if (poly.size() < 3) return;  // all of it past the band, or behind the eye: nothing to see
+        clipped++;
+        for (size_t k = 1; k + 1 < poly.size(); k++) triangle(poly[0], poly[k], poly[k + 1]);
+    };
     for (size_t k = 0; k < tris_in.size(); k++) {
         auto [a, b, c] = tris_in[k];
         add(a, b, c);
         if (rects) add(b, count + k, c);
     }
-    if (behind) note("triangles with a vertex behind the eye (skipped)", behind);
+    if (behind) note("triangles with a vertex behind the eye, positions not divided by w (skipped)", behind);
+    g_clipped += clipped;
     g_triangles += tris.size();
     if (tris.empty() || x0 >= x1 || y0 >= y1) return std::format("{} vertices, nothing on screen", count);
     if (save && M.gpu_check) {
@@ -1702,9 +1753,10 @@ std::vector<std::string> draw_report() {
     if (!M.draw) return {"## Drawing\n", "Not done (`--no-draw`).\n"};
     std::vector<std::string> s = {
         "## Drawing\n",
-        std::format("{} draws and {} dispatches. On the CPU: {} triangles, {} pixels ({} pixel-shader waves), and the "
-                    "dispatches' {} groups.\n",
-                    g_draws.load(), g_dispatches.load(), g_triangles.load(), g_pixels.load(), g_ps_waves.load(), g_groups.load()),
+        std::format("{} draws and {} dispatches. On the CPU: {} triangles ({} clipped to the guard band first), {} pixels ({} "
+                    "pixel-shader waves), and the dispatches' {} groups.\n",
+                    g_draws.load(), g_dispatches.load(), g_triangles.load(), g_clipped.load(), g_pixels.load(), g_ps_waves.load(),
+                    g_groups.load()),
         std::format("The draws took {:.1f} s and the dispatches {:.1f} s, of the run's {:.1f}.\n", double(g_draw_ns) / 1e9,
                     double(g_dispatch_ns) / 1e9,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - M.t0).count())};

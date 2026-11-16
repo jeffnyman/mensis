@@ -158,9 +158,12 @@ shows where a long run was when, and so when to press what. These presses, with 
 and `,2100:circle,2150:up,2190:circle,2240:left,2270:circle` added (`--seconds 500`) name
 the character (the system's keyboard isn't shown: what the player types is `--name`,
 "Hunter" if not given), choose Finish, and answer YES to "Finalize contract?". The game
-then saves the character; from then on the main menu starts at "Continue", and
-`--press 1000:down,1060:circle,1400:circle,1500:circle,1650:circle,1800:circle` goes
-straight to loading the game where it was left. (Delete `files/savedata` to start over.)
+then saves the character; from then on the main menu starts at "Continue". A run stopped
+in the game (as one stopped by `--seconds` is) leaves the game a note that it wasn't left by
+Exit Game, which it shows first next time, so after the first such run
+`--press 1000:circle,1480:down,1530:circle,1640:circle,1760:circle,1900:circle` answers that,
+picks "Play Offline", the two messages about the network, and "Continue", and the game
+loads where it was left. (Delete `files/savedata` to start over.)
 
 The game's own files (`/app0/`) are read from `work/update`, then `work/base`: the 1.09
 update's files over the base game's, as [the package](the-package.md) extracts them. Run from
@@ -262,12 +265,16 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   its stencil value against the draw's reference (front and back faces each their own), as
   Vulkan does it: the pixel shader runs for every pixel covered, colour is written where both
   tests pass, and for the pixels the shader didn't kill the depth is written (where they
-  passed) and the stencil operation for how they fared is done. A depth buffer is cleared the
+  passed) and the stencil operation for how they fared is done. A triangle reaching past the
+  guard band (the game sets how far past the viewport that is) or behind the eye is clipped
+  first, as the hardware does: cut to the band's planes in clip space, before the divide by
+  w, its new corners new vertices, the polygon left drawn as a fan; depth isn't clipped, but
+  clamped. A depth buffer is cleared the
   console's fast way: each 8x8 tile marked cleared in its HTILE buffer, the console reading a
   cleared tile as the clear value; when every tile is marked so, the loader fills the depth
   buffer with that value (on the GPU, if it is kept there), once for each time the HTILE
   buffer is written. Not done yet: a depth buffer cleared in part, mip levels past the first,
-  a triangle with a vertex behind the eye, multisampling; the summary counts whatever a run
+  multisampling; the summary counts whatever a run
   met that wasn't done.
 * **Translating the shaders**, for the PC's GPU (`translate.cpp`). A pixel, vertex or compute shader
   becomes GLSL (`shaders/`, beside its disassembly), which the Vulkan SDK's compiler (shaderc) turns into SPIR-V, the form a GPU takes
@@ -744,6 +751,18 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     draws took 436 s of a 500-second run), and the summary lists what it needs: triangles
     with a vertex behind the eye (35 million skipped), LDS in vertex and pixel shaders,
     depth-compare sampling, BC6 textures, mip levels, and tessellation.
+42. **Clipping.** A triangle with a corner behind the eye was skipped, which is fine for a
+    menu but not for a world seen from inside it: the first scene skipped 35 million of
+    them. The CPU now clips each triangle as the
+    GPU does, in clip space before the divide by w, to the guard band's planes (where the
+    game's registers put them; their planes leave out what is behind the eye too); the
+    corners where its edges cross a plane are new vertices, their parameters worked out in
+    proportion, and the polygon left is drawn as a fan of triangles. Depth isn't clipped:
+    as on the GPU here, it is clamped. A draw done on the GPU, vertices and all, is clipped
+    by Vulkan, as before; one given the CPU's vertices gets the clipped triangles. Loading
+    the first scene, 203,531 triangles were clipped and none skipped. The scene is still
+    slow to draw (the draws took 437 s of a 500-second run, still behind the loading
+    screen): most of that is the 6,120 draws whose shaders use LDS, drawn on the CPU.
 
 ## Files
 
