@@ -922,6 +922,24 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     copying draws' data to upload, 33 s reading targets back into memory when touched,
     34 s submitting batches and waiting for them), setting up (31 s) and decoding
     textures (30 s).
+53. **Compressed textures sent compressed.** A block-compressed texture was decoded on the
+    CPU, texel by texel, into four 32-bit floats a texel (16 bytes, where BC7 has 1 and
+    BC1 half of one), and those were uploaded: most of 17.5 GB of textures into the first
+    scene. Now a 2D texture in BC1 to BC5 or BC7 (UNORM, or SRGB where there is one: the
+    ones the CPU decodes) is sent as its blocks, their micro tiles undone (each 8- or
+    16-byte block copied to its place in rows), in Vulkan's format for it
+    (`textureCompressionBC`), and the GPU decodes it; kept there like the rest, under the
+    T# and a hash of its memory. Our BC7 decoder (`bc7.cpp`), which the GPU's now stands
+    beside, gave the same bytes as Pillow's for 4,096 random blocks, 512 in each mode.
+    Into the first scene, 803 textures went as their blocks (0.1 s), 928 were still
+    decoded (16 s, nearly all one cube of 16-bit floats, decoded 614 times), and 13.5 GB
+    of textures were uploaded, not 17.5. With `--gpu-check` into the first scene 74 or 75
+    of 78 draws are the same as the CPU's, as before: one small draw (pixel shader
+    0x313a0b400, of a 16x16 BC7 texture) differed in one run and not in the next, and
+    differs from run to run in what it draws. The draws got no further in 300 seconds
+    (303,312): preparing for the GPU took 35 s, not 48, but the GPU's stage took 136 s,
+    not 125, most of it still copying uploads (39 s), reading targets back (34 s) and
+    waiting for batches (36 s).
 
 ## Files
 

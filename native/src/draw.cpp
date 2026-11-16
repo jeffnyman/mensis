@@ -132,6 +132,7 @@ const char* const stage_names[ST_COUNT] = {
 std::atomic<u64> g_stage_ns[ST_COUNT];
 std::atomic<u64> g_texture_hash_ns{0}, g_texture_decode_ns{0}, g_buffer_unpack_ns{0}, g_translate_ns{0};
 std::atomic<u64> g_texture_hash_bytes{0}, g_texture_decoded{0};
+std::atomic<u64> g_texture_blocks{0}, g_texture_blocks_ns{0};  // textures sent as their compressed blocks
 // the textures decoded texel by texel, by their format, tiling and type: how many, how long
 std::map<std::string, std::pair<u64, u64>> g_decoded_by;
 struct Lap {
@@ -1213,6 +1214,40 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             d.textures.push_back(std::move(tx));
             continue;
         }
+        // block-compressed, 2D (BC1-5, BC7, as the CPU decodes them): the blocks, their tiling
+        // undone, in rows, for the GPU to decode; kept there like the rest
+        u32 bc = !ti.block || ti.type != 9 || !ti.all_ok || !vkdraw::compressed() ? 0
+                 : ti.nfmt == 0 ? (ti.dfmt == 35 ? 133 : ti.dfmt == 36 ? 135 : ti.dfmt == 37 ? 137 : ti.dfmt == 38 ? 139
+                                   : ti.dfmt == 39 ? 141 : ti.dfmt == 41 ? 145 : 0)  // VK_FORMAT_BCn_..._UNORM_BLOCK
+                 : ti.nfmt == 9 ? (ti.dfmt == 35 ? 134 : ti.dfmt == 36 ? 136 : ti.dfmt == 37 ? 138 : ti.dfmt == 41 ? 146 : 0)  // _SRGB_BLOCK
+                                : 0;
+        if (bc) {
+            tx.format = bc;
+            tx.block = ti.bytes;
+            u32 across = (ti.width + 3) / 4, down = (ti.height + 3) / 4;
+            tx.pitch = across * 4;
+            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            {
+                Timer hashing(g_texture_hash_ns);
+                u64 before = g_hashed_bytes;
+                u64 h = memory_stamp(ti.base, ti.size);
+                g_texture_hash_bytes += g_hashed_bytes - before;
+                tx.key = std::format("bc:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
+                                     im.t[5], im.t[6], im.t[7], h);
+            }
+            if (!vkdraw::has_texture(tx.key)) {
+                Timer sending(g_texture_blocks_ns);
+                g_texture_blocks++;
+                tx.blocks.resize(size_t(across) * down * ti.bytes);
+                unsigned char* o = tx.blocks.data();
+                for (u32 y = 0; y < down; y++)
+                    for (u32 x = 0; x < across; x++, o += ti.bytes)
+                        std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, x, y, 0)),
+                                    ti.bytes);
+            }
+            d.textures.push_back(std::move(tx));
+            continue;
+        }
         if (ti.all_ok) {
             u64 h = 0;
             if (layout(ti.dfmt).count) {
@@ -2020,9 +2055,10 @@ std::vector<std::string> draw_report() {
         for (int k = 0; k < ST_COUNT; k++)
             if (g_stage_ns[k]) t += std::format("| {} | {:.1f} |\n", stage_names[k], double(g_stage_ns[k]) / 1e9);
         t += std::format("\nOf which: translating and evaluating shaders {:.1f} s; unpacking buffers {:.1f} s; telling "
-                         "whether textures' memory changed {:.1f} s ({} MiB hashed); decoding {} textures texel by texel {:.1f} s.\n",
+                         "whether textures' memory changed {:.1f} s ({} MiB hashed); sending {} as their compressed blocks {:.1f} s; "
+                         "decoding {} texel by texel {:.1f} s.\n",
                          double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
-                         g_texture_hash_bytes >> 20, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
+                         g_texture_hash_bytes >> 20, u64(g_texture_blocks), double(g_texture_blocks_ns) / 1e9, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
         if (!g_decoded_by.empty()) {
             std::vector<std::pair<std::pair<u64, u64>, std::string>> by;
             for (auto& [what, v] : g_decoded_by) by.push_back({v, what});

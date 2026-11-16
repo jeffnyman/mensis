@@ -58,7 +58,7 @@ struct Gpu {
     u32 family = 0;
     VkQueue queue = VK_NULL_HANDLE;
     VkCommandPool pool = VK_NULL_HANDLE;
-    bool validation = false, int64 = false, barycentric = false;
+    bool validation = false, int64 = false, barycentric = false, bc = false;
     shaderc_compiler_t compiler = nullptr;
     std::map<std::string, std::vector<u32>> spirv;  // compiled, by source
 };
@@ -138,6 +138,8 @@ bool init() {
     g.int64 = have.shaderInt64;
     VkPhysicalDeviceFeatures want{};
     want.shaderInt64 = have.shaderInt64;
+    want.textureCompressionBC = have.textureCompressionBC;  // textures sent as their compressed blocks
+    g.bc = have.textureCompressionBC;
     if (!have.geometryShader || !have.depthClamp) return fail("a GPU without geometry shaders or depth clamping");
     // quad operations in pixel shaders (ds_swizzle_b32 in its quad mode, for derivatives)
     VkPhysicalDeviceSubgroupProperties sub{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -713,6 +715,12 @@ VkSampler sampler(const u32* s, bool nearest = false) {
     return v;
 }
 
+// A texture's texels' bytes, as uploaded
+VkDeviceSize texel_bytes(const Texture& t) {
+    if (t.block) return t.blocks.size();
+    return t.format ? VkDeviceSize(t.pitch) * t.height * t.layers * t.bpp : t.rgba.size() * 4;
+}
+
 // Textures not used lately go when there are more than the budget
 void evict() {
     if (k.texture_bytes <= texture_budget()) return;
@@ -1121,7 +1129,7 @@ bool draw(Draw& d, std::string& why) {
                 images[i]->used = k.draws;
                 continue;
             }
-            if (!t.format && t.rgba.empty()) {  // let go since has_texture() said it was kept
+            if ((!t.format && t.rgba.empty()) || (t.block && t.blocks.empty())) {  // let go since has_texture() said it was kept
                 why = "a texture let go meanwhile";
                 return false;
             }
@@ -1142,7 +1150,7 @@ bool draw(Draw& d, std::string& why) {
         im.used = k.draws;
         if (!t.key.empty()) k.texture_bytes += im.bytes;
         images[i] = &im;
-        at_texels[i] = place(t.format ? VkDeviceSize(t.pitch) * t.height * t.layers * t.bpp : t.rgba.size() * 4);
+        at_texels[i] = place(texel_bytes(t));
         k.texture_uploads++;
     }
     // its place in the batch: the offsets above are from its start
@@ -1184,8 +1192,9 @@ bool draw(Draw& d, std::string& why) {
     for (size_t i = 0; i < d.textures.size(); i++) {
         if (at_texels[i] == ~VkDeviceSize(0)) continue;
         const Texture& t = d.textures[i];
-        size_t bytes = t.format ? size_t(t.pitch) * t.height * t.layers * t.bpp : t.rgba.size() * 4;
-        if (t.format) std::memcpy(up + at_texels[i], t.raw, bytes);
+        size_t bytes = texel_bytes(t);
+        if (t.block) std::memcpy(up + at_texels[i], t.blocks.data(), bytes);
+        else if (t.format) std::memcpy(up + at_texels[i], t.raw, bytes);
         else std::memcpy(up + at_texels[i], t.rgba.data(), bytes);
         k.texture_upload_bytes += bytes;
     }
@@ -1451,6 +1460,11 @@ bool draw(Draw& d, std::string& why) {
 bool barycentric() {
     std::lock_guard lock(g_lock);
     return init() && g.barycentric;
+}
+
+bool compressed() {
+    std::lock_guard lock(g_lock);
+    return init() && g.bc;
 }
 
 bool has_texture(const std::string& key) {
@@ -1817,6 +1831,7 @@ std::string report() {
 
 namespace mensis::vkdraw {
 bool has_texture(const std::string&) { return false; }
+bool compressed() { return false; }
 bool barycentric() { return false; }
 bool flush() { return true; }
 bool kept(u64, u64, u32) { return false; }

@@ -31,6 +31,10 @@ struct Texture {
     u32 format = 0, pitch = 0, bpp = 4, swizzle[4] = {4, 5, 6, 7};
     bool integer = false;  // rgba holds integers' bits: a texture of 32-bit uints, read nearest
     const unsigned char* raw = nullptr;
+    // Or block-compressed (format a BC one): `block` bytes a 4x4 block, the blocks in rows of
+    // pitch / 4 (pitch a multiple of 4), held here
+    u32 block = 0;
+    std::vector<unsigned char> blocks;
 };
 
 // A buffer's elements (a uvec4 each), shared with the kept ones it came from
@@ -121,6 +125,8 @@ bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil = 
 u64 version(u64 address);
 
 bool has_texture(const std::string& key);
+// Whether textures can be sent as their compressed blocks (BC1-7, textureCompressionBC)
+bool compressed();
 // Whether a pixel shader can have its triangle's corners' attributes and its barycentrics
 // (VK_KHR_fragment_shader_barycentric), to interpolate as the console does
 bool barycentric();
