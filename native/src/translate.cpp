@@ -58,8 +58,12 @@
 // reads the buffer's dwords the draw found (the whole buffer, up to 64 KiB, if the offset
 // isn't known before the draw), by the offset the shader works out.
 //
+// A depth-compare sample (image_sample_c...) is done as the CPU's interpreter does it: the 2x2
+// texels a bilinear read would use (textureGather), each compared with the reference by the
+// sampler's function, then weighed as bilinear filtering weighs them (or the nearest alone).
+//
 // Not yet: other branches on vcc, buffer loads other than by index,
-// other stores, LDS instructions, depth export, gathers, depth-compare sampling, offsets, and
+// other stores, LDS instructions, depth export, gathers, offsets, and
 // the rarer ALU ops. A shader with any of them isn't translated, and says what stopped it.
 
 #include "translate.hpp"
@@ -479,6 +483,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                 u32 op = (w0 >> 18) & 0x7f;
                 bool sampled = op >= 32;
                 Values::Image im;
+                im.compare = op >= 32 && op < 96 && (((op - 32) & 31) & 8);
                 bool ok = true;
                 for (u32 k = 0; k < 8; k++) im.t[k] = get(srsrc + k, 0, ok);
                 if (sampled)
@@ -529,6 +534,7 @@ std::string PsState::key() const {
     std::string k = std::format("{}:{:x}:{:x}:{:x}:{}:{:x}:{:x}", user_count, ena, addr, col_format, barycentric, add_tid, targets);
     for (u32 c : input_cntl) k += std::format(":{:x}", c);
     for (size_t i = 0; i < image_types.size(); i++) k += std::format(":t{}{}", image_types[i], unnormalized[i] ? "u" : "");
+    for (u32 c : compare) k += std::format(":c{:x}", c);
     for (u32 s : image_slot) k += std::format(":s{}", s);
     for (bool b : integer) k += b ? ":i" : ":f";
     for (u32 s : buffer_slot) k += std::format(":b{}", s);
@@ -1206,6 +1212,7 @@ void Writer::image_op(const Inst& in) {
     bool unnorm = st.unnormalized[image];
     std::string t = std::format("t{}", st.image_slot.empty() ? image : st.image_slot[image]);
     bool integer = image < st.integer.size() && st.integer[image];
+    u32 compare = image < st.compare.size() ? st.compare[image] : 0;
     image++;
     if (type != 8 && type != 9 && type != 10 && type != 11 && type != 12 && type != 13) {
         fail(std::format("images of type {}", type));
@@ -1234,8 +1241,9 @@ void Writer::image_op(const Inst& in) {
                              image, type == 8 || type == 9 ? 2 : 3, t, integer ? "uvec4" : "vec4");
     } else if (op >= 32 && op < 64) {
         u32 k = (op - 32) & 31, m = k & 7;
-        if (k & 8) {
-            fail("depth-compare sampling");
+        bool cmp = k & 8;
+        if (cmp && (integer || type == 10)) {
+            fail("depth-compare sampling of integer or 3D textures");
             return;
         }
         if (k & 16) {
@@ -1249,6 +1257,8 @@ void Writer::image_op(const Inst& in) {
         u32 at = 0;
         std::string bias;
         if (m == 5 || m == 6) bias = fva(at++);
+        std::string ref;
+        if (cmp) ref = fva(at++);  // the z-compare value, after the bias
         u32 n = type == 8 ? 1 : type == 10 || type == 11 || type == 13 ? 3 : 2;
         std::string x = fva(at), y = n > 1 ? fva(at + 1) : "", z = n > 2 ? fva(at + 2) : "";
         std::string lod = m == 4 ? fva(at + n) : "";
@@ -1268,7 +1278,20 @@ void Writer::image_op(const Inst& in) {
             case 11: c = std::format("vec3({} - 1.0, {} - 1.0, {})", x, y, z); break;
             default: c = std::format("vec3({}, {}, {})", x, y, z); break;
         }
-        if (m == 4) result = std::format("textureLod({}, {}, {})", t, c, lod);
+        if (cmp) {
+            // depth-compare, as the CPU does it: the 2x2 texels a bilinear read would use
+            // (textureGather: (x0,y1), (x1,y1), (x1,y0), (x0,y0)), each compared with the
+            // reference, then weighed as bilinear (or, point-sampled, the nearest), level 0
+            u32 func = compare & 7;
+            std::string r = (compare & 16) ? std::format("clamp({}, 0.0, 1.0)", ref) : ref;
+            line(std::format("vec2 f{0} = vec2({1}).xy * vec2(textureSize({2}, 0).xy) - 0.5; vec2 w{0} = {3}; "
+                             "vec4 g{0} = textureGather({2}, {1}, 0); float ref{0} = {4};",
+                             image, c, t, (compare & 8) ? std::format("fract(f{})", image) : std::format("step(0.5, fract(f{}))", image), r));
+            line(std::format("vec4 p{0} = vec4(depth_test({1}u, ref{0}, g{0}.x), depth_test({1}u, ref{0}, g{0}.y), "
+                             "depth_test({1}u, ref{0}, g{0}.z), depth_test({1}u, ref{0}, g{0}.w));",
+                             image, func));
+            result = std::format("vec4(mix(mix(p{0}.w, p{0}.z, w{0}.x), mix(p{0}.x, p{0}.y, w{0}.x), w{0}.y))", image);
+        } else if (m == 4) result = std::format("textureLod({}, {}, {})", t, c, lod);
         else if (m == 7) result = std::format("textureLod({}, {}, 0.0)", t, c);
         else if (!bias.empty()) result = std::format("texture({}, {}, {})", t, c, bias);
         else result = std::format("texture({}, {})", t, c);
@@ -1490,6 +1513,12 @@ uint f2h_mode(float x, bool toward_zero) {
     if (q == 0x400u) { q = 0u; he++; }
     if (he >= 31) return s | (toward_zero ? 0x7bffu : 0x7c00u);
     return s | (uint(he) << 10) | q;
+}
+// a depth-compare sample's test of one texel: the reference <func> the texel's depth
+float depth_test(uint func, float ref, float d) {
+    bool pass = func == 1u ? ref < d : func == 2u ? ref == d : func == 3u ? ref <= d : func == 4u ? ref > d :
+                func == 5u ? ref != d : func == 6u ? ref >= d : func == 7u;
+    return pass ? 1.0 : 0.0;
 }
 uint f2h(float x) { return f2h_mode(x, false); }
 uint f2h_rtz(float x) { return f2h_mode(x, true); }

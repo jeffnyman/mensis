@@ -381,8 +381,10 @@ struct Sampler {
     u32 clamp[3] = {0, 0, 0};
     bool unnormalized = false;
     u32 mag = 0, min = 0, border = 0;
+    u32 func = 0;  // a depth-compare sample's: the reference <func> the texel (0 never ... 7 always)
     explicit Sampler(const u32* s) {
         for (int k = 0; k < 3; k++) clamp[k] = (s[0] >> (3 * k)) & 7;
+        func = (s[0] >> 12) & 7;
         unnormalized = (s[0] >> 15) & 1;
         mag = (s[2] >> 20) & 3;
         min = (s[2] >> 22) & 3;
@@ -508,6 +510,31 @@ void filtered(const Image& t, const Memory& mem, const Sampler& s, u32 filter, f
         float bottom = f(c[2][k]) * (1 - ax) + f(c[3][k]) * ax;
         o[k] = u(top * (1 - ay) + bottom * ay);
     }
+}
+
+// A depth-compare sample: the texels a read would use, each compared with the reference (its
+// depth the texel's first component, after dst_sel), then weighed as bilinear filtering
+// weighs them, or the nearest one alone. 1 where it passes, 0 where not.
+float compared(const Image& t, const Memory& mem, const Sampler& s, u32 filter, float x, float y, u32 slice, float ref) {
+    auto test = [&](int tx, int ty) {
+        u32 raw[4], sw[4];
+        fetch_addressed(t, mem, s, tx, ty, slice, raw);
+        swizzle(t.sel, false, raw, sw);
+        float d = f(sw[0]);
+        bool pass = s.func == 1 ? ref < d : s.func == 2 ? ref == d : s.func == 3 ? ref <= d : s.func == 4 ? ref > d :
+                    s.func == 5 ? ref != d : s.func == 6 ? ref >= d : s.func == 7;
+        return pass ? 1.0f : 0.0f;
+    };
+    float fx = x - 0.5f, fy = y - 0.5f;
+    int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+    float ax = fx - float(x0), ay = fy - float(y0);
+    if (filter == 0) {  // the nearest: the weights 0 or 1
+        ax = ax >= 0.5f ? 1.0f : 0.0f;
+        ay = ay >= 0.5f ? 1.0f : 0.0f;
+    }
+    float top = test(x0, y0) * (1 - ax) + test(x0 + 1, y0) * ax;
+    float bottom = test(x0, y0 + 1) * (1 - ax) + test(x0 + 1, y0 + 1) * ax;
+    return top * (1 - ay) + bottom * ay;
 }
 
 // ---- operands ----
@@ -1551,14 +1578,13 @@ void image_op(Wave& w, const Memory& mem, u32 w0, u32 w1) {
     u32 m = k & 7;
     bool compare = sample ? (k & 8) : op == 106 || op == 107 || op == 110 || op == 111;
     bool bias = m == 5 || m == 6, derivs = m == 2 || m == 3 || cd, lod_given = m == 4, zero_lod = m == 7;
-    if (compare) note("depth-compare sampling (done without the compare)");
     Sampler s(&w.s[ssamp]);
     bool normalized = !unorm && !s.unnormalized;
     // the address registers, in order: offset, bias, z-compare, derivatives, coordinates, lod
     int at = 0;
     int r_offset = offset ? at++ : -1;
     int r_bias = bias ? at++ : -1;
-    if (compare) at++;
+    int r_compare = compare ? at++ : -1;
     int r_derivs = derivs ? at : -1;
     if (derivs) at += 2 * deriv_dims(t.type);
     int r_coords = at;
@@ -1632,6 +1658,14 @@ void image_op(Wave& w, const Memory& mem, u32 w0, u32 w1) {
                 out[j] = sw[comp];
             }
             for (int j = 0; j < 4; j++) w.v[(vdata + u32(j)) & 255][size_t(ln)] = out[j];
+            continue;
+        }
+        if (compare) {
+            float ref = f(vaddr_at(r_compare, ln));
+            if (t.nfmt == 0) ref = std::clamp(ref, 0.0f, 1.0f);  // a unorm texture's range
+            float r = compared(t, mem, s, filter, tx, ty, slice, ref);
+            out[0] = out[1] = out[2] = out[3] = u(r);
+            write_out(ln, out);
             continue;
         }
         filtered(t, mem, s, filter, tx, ty, slice, raw);

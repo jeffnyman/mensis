@@ -37,6 +37,7 @@ struct Values {
     struct Image {
         u32 t[8] = {};
         u32 s[4] = {};
+        bool compare = false;  // a depth-compare sample (image_sample_c...)
     };
     std::vector<Image> images;
     struct Buffer {  // each buffer load's: the V#, the bytes into an element, the format
@@ -60,6 +61,10 @@ struct PsState {
     std::vector<bool> unnormalized;  // and whether its sampler's coordinates are in texels
     std::vector<u32> image_slot;  // and which texture it reads (one for each descriptor); empty: one each
     std::vector<bool> integer;  // and whether its texels are integers (read as they are: usampler); empty: none
+    // and, for a depth-compare sample, its sampler's compare function (bits 0-2), whether it
+    // filters bilinearly (8), and whether the reference is clamped to 0-1 (16, a unorm
+    // texture); 0 for any other; empty: none
+    std::vector<u32> compare;
     std::vector<u32> buffer_slot;  // each buffer load's buffer (one for each descriptor, offset and format); empty: one each
     u32 add_tid = 0;  // which buffer loads' descriptors add the lane to the index (not done)
     // The GPU gives a pixel shader its corners' attributes and barycentrics: v_interp is then

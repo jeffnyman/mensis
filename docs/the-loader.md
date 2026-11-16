@@ -308,7 +308,10 @@ the repository's root, or name the folders with `--app0` (more than once, first 
   out of it on lane masks), each invocation leaves when its own bit is gone, as long as the
   loop changes no SGPR but lane masks. An `s_buffer_load` by an offset in an SGPR reads the
   buffer's dwords as the draw found them (all of it, up to 64 KiB, when the offset isn't
-  known before the draw), by the offset the shader works out. A vertex shader's call to its
+  known before the draw), by the offset the shader works out. A depth-compare sample
+  (`image_sample_c_lz`, a shadow map's) reads the 2x2 texels a bilinear read would use
+  (`textureGather`), compares each with the reference by the sampler's function, and weighs
+  the results as bilinear filtering does (or takes the nearest), as the CPU does it. A vertex shader's call to its
   fetch shader is followed, and the fetch shader's instructions put in its place; their loads,
   each vertex's data by its index, read the buffer's elements as the CPU unpacked them. Its
   position goes through the console's viewport, recast as Vulkan's, and its parameters become
@@ -836,6 +839,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     other's over some 2 million; the third shader now stops at sampling with given
     derivatives, so its loop isn't drawn on the GPU yet. Dispatches with loops stop at
     other things now (scalar loads from addresses they work out, mostly).
+46. **Shadows: depth-compare sampling.** The shaders that read the shadow maps sample them
+    with `image_sample_c_lz`: each texel's depth compared with the pixel's (the reference,
+    in the address registers after any bias), by the sampler's compare function, 1 where
+    it passes and 0 where not, then filtered. The CPU's interpreter had sampled the depth
+    and left the compare out, so every shadow read came back as a depth, not as lit or
+    not. Both now do it the same way: the 2x2 texels a bilinear read would use, each
+    compared, then weighed as bilinear filtering weighs them (percentage-closer filtering)
+    or, if the sampler doesn't filter, the nearest alone; the reference clamped to 0-1 for
+    a unorm texture. On the GPU the texels come from `textureGather`, which needs no
+    depth format or compare sampler. Of 24 draws of those shaders compared, all are the
+    same on the GPU as on the CPU, the main lighting pass's over all 2 million pixels of
+    its target. The pixels the CPU fills, loading the first scene, went from about 450
+    million to about 120 million; the draws still take about 430 s of a 500-second run,
+    so the time is now going somewhere other than pixels.
 
 ## Files
 

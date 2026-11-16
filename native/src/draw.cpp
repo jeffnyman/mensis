@@ -887,6 +887,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         st.unnormalized.push_back((im.s[0] >> 15) & 1);
         u32 nfmt = (im.t[1] >> 26) & 0xf;
         st.integer.push_back(nfmt == 4 || nfmt == 5);
+        st.compare.push_back(im.compare ? ((im.s[0] >> 12) & 7) | (((im.s[2] >> 20) & 3) ? 8u : 0u) | (nfmt == 0 ? 16u : 0u) : 0u);
         u32 slot = 0;
         while (slot < unique.size() && (std::memcmp(unique[slot]->t, im.t, sizeof im.t) || std::memcmp(unique[slot]->s, im.s, sizeof im.s)))
             slot++;
