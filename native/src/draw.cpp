@@ -789,7 +789,7 @@ void save_glsl(const char* kind, u64 at, const std::string& text) {
 // memory read (up to 2 GiB of them; then the least lately used go, down to 1 GiB)
 u64 g_unpacked_bytes = 0, g_unpack_hits = 0, g_unpacks = 0, g_unpack_clears = 0;
 struct Unpacked {
-    std::vector<u32> data;
+    std::shared_ptr<const std::vector<u32>> data;  // shared with the draws that use it, not copied
     u64 used = 0;  // when last found (g_unpack_hits + g_unpacks then)
 };
 std::unordered_map<std::string, Unpacked> g_unpacked;
@@ -804,7 +804,7 @@ void unpacked_let_go() {
     u64 bytes = g_unpacked_bytes;
     for (auto& [used, key] : by_age) {
         if (bytes <= UNPACKED_BUDGET / 2) break;
-        bytes -= g_unpacked[*key].data.size() * 4;
+        bytes -= g_unpacked[*key].data->size() * 4;
         doomed.push_back(*key);
     }
     for (auto& key : doomed) g_unpacked.erase(key);
@@ -813,7 +813,7 @@ void unpacked_let_go() {
 }
 std::atomic<u64> g_buffer_hash_ns{0}, g_buffer_miss_ns{0}, g_buffer_hash_bytes{0};
 
-bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const Memory& mem, std::vector<std::vector<u32>>& out,
+bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const Memory& mem, std::vector<vkdraw::Buffer>& out,
                     std::string& why) {
     Timer timer(g_buffer_unpack_ns);
     for (const auto& b : buffers) {
@@ -843,16 +843,17 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
         }
         g_unpacks++;
         Timer missing(g_buffer_miss_ns);
-        std::vector<u32> data((n + 1) * 4);
+        auto made = std::make_shared<std::vector<u32>>((n + 1) * 4);
+        std::vector<u32>& data = *made;
         for (u32 i = 0; i < n; i++) buffer_element(b.v, b.dfmt, b.nfmt, b.offset, i, mem, &data[size_t(i) * 4]);
         if (stride == 0) std::copy_n(data.begin(), 4, data.begin() + 4);
         else buffer_element(b.v, b.dfmt, b.nfmt, b.offset, records, mem, &data[n * 4]);
         if (!key.empty()) {
             g_unpacked_bytes += data.size() * 4;
-            g_unpacked[key] = {data, g_unpack_hits + g_unpacks};
+            g_unpacked[key] = {made, g_unpack_hits + g_unpacks};
             if (g_unpacked_bytes > UNPACKED_BUDGET) unpacked_let_go();
         }
-        out.push_back(std::move(data));
+        out.push_back(std::move(made));
     }
     return true;
 }
@@ -1887,9 +1888,9 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
             arrays.push_back(std::move(data));
             raw_slots.push_back({i, {b.offset / 4, stride / 4, records}});
         } else {
-            std::vector<std::vector<u32>> one;
+            std::vector<vkdraw::Buffer> one;
             if (!unpack_buffers({b}, mem, one, why)) return false;
-            arrays.push_back(std::move(one[0]));
+            arrays.push_back(*one[0]);
         }
         st.loads.push_back(ta);
     }

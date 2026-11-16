@@ -913,6 +913,15 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     counts both. The draws' time is now mostly the GPU's draws (109 s), copying kept
     buffers out for each draw (most of the 48 s of "unpacking buffers"), and decoding
     textures (23 s).
+52. **Kept buffers shared, not copied.** A buffer found kept was copied whole into each
+    draw that used it, and then copied again into the GPU's upload buffer. Now the draw
+    shares the kept one (it is never changed once unpacked; a buffer let go stays for as
+    long as a draw still holds it), and only the copy to the GPU is left. In the same 300
+    seconds, "unpacking buffers" took 8.5 s, not 48, and the loader got through 308,050
+    draws, not 198,237. The draws' time is now mostly the GPU's draws (125 s: of it 35 s
+    copying draws' data to upload, 33 s reading targets back into memory when touched,
+    34 s submitting batches and waiting for them), setting up (31 s) and decoding
+    textures (30 s).
 
 ## Files
 

@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,9 @@ struct Texture {
     const unsigned char* raw = nullptr;
 };
 
+// A buffer's elements (a uvec4 each), shared with the kept ones it came from
+using Buffer = std::shared_ptr<const std::vector<u32>>;
+
 struct Draw {
     std::string vs, ps;  // GLSL
     u32 attributes = 0;
@@ -43,11 +47,11 @@ struct Draw {
     std::vector<u32> indices;
     std::string gs;
     std::vector<u32> vs_values;
-    std::vector<std::vector<u32>> vs_buffers;
+    std::vector<Buffer> vs_buffers;
     float viewport[8] = {};
     u32 cull = 0;  // PA_SU_SC_MODE_CNTL: bit 0 the front faces, bit 1 the back, bit 2 front is clockwise
     std::vector<u32> values;  // the shader's U: user SGPRs and what its scalar loads read
-    std::vector<std::vector<u32>> ps_buffers;  // the pixel shader's buffers, as the vertex shader's
+    std::vector<Buffer> ps_buffers;  // the pixel shader's buffers, as the vertex shader's
     std::vector<Texture> textures;
     // The render targets, by their place (0-7), all the same size, `bpp` bytes a pixel in
     // rows: each the game's memory (`address`), kept on the GPU; or, if address is 0, read

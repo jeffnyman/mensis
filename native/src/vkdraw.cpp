@@ -1093,9 +1093,9 @@ bool draw(Draw& d, std::string& why) {
     VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
     VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
     std::vector<VkDeviceSize> at_buffers;
-    for (auto& b : d.vs_buffers) at_buffers.push_back(place(b.size() * 4));
+    for (auto& b : d.vs_buffers) at_buffers.push_back(place(b->size() * 4));
     std::vector<VkDeviceSize> at_ps_buffers;
-    for (auto& b : d.ps_buffers) at_ps_buffers.push_back(place(b.size() * 4));
+    for (auto& b : d.ps_buffers) at_ps_buffers.push_back(place(b->size() * 4));
     // the textures not kept yet, made and uploaded
     std::vector<GpuImage*> images(d.textures.size());
     std::vector<VkDeviceSize> at_texels(d.textures.size(), ~VkDeviceSize(0));
@@ -1178,9 +1178,9 @@ bool draw(Draw& d, std::string& why) {
     std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
     std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
     std::memcpy(up + at_vs_values, d.vs_values.data(), d.vs_values.size() * 4);
-    for (size_t i = 0; i < d.vs_buffers.size(); i++) std::memcpy(up + at_buffers[i], d.vs_buffers[i].data(), d.vs_buffers[i].size() * 4);
+    for (size_t i = 0; i < d.vs_buffers.size(); i++) std::memcpy(up + at_buffers[i], d.vs_buffers[i]->data(), d.vs_buffers[i]->size() * 4);
     for (size_t i = 0; i < d.ps_buffers.size(); i++)
-        std::memcpy(up + at_ps_buffers[i], d.ps_buffers[i].data(), d.ps_buffers[i].size() * 4);
+        std::memcpy(up + at_ps_buffers[i], d.ps_buffers[i]->data(), d.ps_buffers[i]->size() * 4);
     for (size_t i = 0; i < d.textures.size(); i++) {
         if (at_texels[i] == ~VkDeviceSize(0)) continue;
         const Texture& t = d.textures[i];
@@ -1236,9 +1236,9 @@ bool draw(Draw& d, std::string& why) {
     }
     if (gpu_vertices) {
         write_buffer(16, at_vs_values, d.vs_values.size() * 4);
-        for (u32 i = 0; i < d.vs_buffers.size(); i++) write_buffer(i < 15 ? 17 + i : 72 + (i - 15), at_buffers[i], d.vs_buffers[i].size() * 4);
+        for (u32 i = 0; i < d.vs_buffers.size(); i++) write_buffer(i < 15 ? 17 + i : 72 + (i - 15), at_buffers[i], d.vs_buffers[i]->size() * 4);
     }
-    for (u32 i = 0; i < d.ps_buffers.size(); i++) write_buffer(56 + i, at_ps_buffers[i], d.ps_buffers[i].size() * 4);
+    for (u32 i = 0; i < d.ps_buffers.size(); i++) write_buffer(56 + i, at_ps_buffers[i], d.ps_buffers[i]->size() * 4);
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
     // the commands, into the batch
