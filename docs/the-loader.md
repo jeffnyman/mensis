@@ -898,6 +898,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     block-compressed ones micro-tiled (tile mode 13) and a cube of 16-bit floats. The
     draws' time is now mostly hashing memory (buffers 30 s, textures 19 s), copying kept
     buffers out for each draw, and the GPU's draws (94 s).
+51. **Memory hashed again only once written.** A kept texture or buffer was found again by
+    a hash of its memory, hashed for each draw: 49 of the draws' seconds into the first
+    scene. On Windows the game's heap is now reserved with the OS noting which pages are
+    written (`MEM_WRITE_WATCH`), and before a range is hashed the loader asks which of its
+    pages were written since it last asked (`GetWriteWatch`), giving those a new number;
+    while the highest number of a range's pages is what it was when the range was last
+    hashed, the hash is as it was, and the memory isn't read. (Keyed by those numbers
+    alone, memory the game wrote again with what it held already was taken as changed,
+    and a cube texture of 16-bit floats was decoded twice as often; hashed when written,
+    it still matches.) In the same 300 seconds, memory was told unchanged without reading
+    it 1,560,338 times and hashed 46,559 times; telling took 4.5 s, not 49, and the loader
+    got through 198,237 draws, not 144,880. Linux still hashes every time. The summary
+    counts both. The draws' time is now mostly the GPU's draws (109 s), copying kept
+    buffers out for each draw (most of the 48 s of "unpacking buffers"), and decoding
+    textures (23 s).
 
 ## Files
 

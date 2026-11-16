@@ -259,7 +259,11 @@ u64 sync_alloc(u64 size, u64 align);  // memory for the loader's own objects, at
 // What differs between Linux and Windows (platform_linux.cpp, platform_windows.cpp).
 namespace platform {
 void reserve(u64 addr, u64 size);  // address space at exactly addr; dies if it's taken
-bool try_reserve(u64 addr, u64 size);  // the same, but says whether it could
+// The same, but says whether it could; watched: the OS notes which pages are written (Windows)
+bool try_reserve(u64 addr, u64 size, bool watched = false);
+// The pages (their addresses) in [addr, addr + size) of watched memory written since last asked
+// of them, and forgets them; false if that can't be told (not watched, or not on this platform)
+bool written_pages(u64 addr, u64 size, std::vector<u64>& pages);
 void commit(u64 addr, u64 size);  // make reserved memory usable (read, write, execute)
 // What committed memory may be used for: 0 nothing, 1 reading, 2 anything (as committed)
 void protect(u64 addr, u64 size, int access);

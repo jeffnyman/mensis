@@ -263,7 +263,7 @@ void setup() {
     map(STACK_TOP - STACK_SIZE, STACK_SIZE);
     bool heap = false;
     for (u64 base : HEAP_BASES)
-        if (platform::try_reserve(base, HEAP_RESERVE)) {
+        if (platform::try_reserve(base, HEAP_RESERVE, true)) {
             M.heap_base = M.heap_top = M.heap_committed = base;
             heap = true;
             break;

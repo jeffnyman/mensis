@@ -299,9 +299,20 @@ void reserve(u64 addr, u64 size) {
     }
 }
 
-bool try_reserve(u64 addr, u64 size) {
-    return VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE,
+bool try_reserve(u64 addr, u64 size, bool watched) {
+    return VirtualAlloc(reinterpret_cast<void*>(addr), size, MEM_RESERVE | (watched ? MEM_WRITE_WATCH : 0),
                         PAGE_EXECUTE_READWRITE) == reinterpret_cast<void*>(addr);
+}
+
+bool written_pages(u64 addr, u64 size, std::vector<u64>& pages) {
+    ULONG_PTR count = (size + 0xfff) / 0x1000 + 1;
+    pages.resize(count);
+    ULONG granularity = 0;
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, reinterpret_cast<void*>(addr), SIZE_T(size), reinterpret_cast<void**>(pages.data()),
+                      &count, &granularity) != 0)
+        return false;
+    pages.resize(count);
+    return true;
 }
 
 void commit(u64 addr, u64 size) {

@@ -61,7 +61,9 @@ void reserve(u64 addr, u64 size) {
                         std::strerror(errno)));
 }
 
-bool try_reserve(u64 addr, u64 size) {
+bool written_pages(u64, u64, std::vector<u64>&) { return false; }  // not yet: hashed instead
+
+bool try_reserve(u64 addr, u64 size, bool) {
     void* p = mmap(reinterpret_cast<void*>(addr), size, PROT_READ | PROT_WRITE | PROT_EXEC,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
     if (p == reinterpret_cast<void*>(addr)) return true;

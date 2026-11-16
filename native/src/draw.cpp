@@ -345,6 +345,7 @@ DepthBuffer depth_buffer(const GpuRegs& r, const Memory& mem) {
 }
 
 u64 hash_memory(const unsigned char* p, u64 n);
+u64 memory_stamp(u64 base, u64 n);
 
 // A depth buffer's fast clear. With HTILE on (DB_Z_INFO bit 29), a clear only marks each 8x8
 // tile cleared in the HTILE buffer (DB_HTILE_DATA_BASE, 0x005: a 32-bit word a tile, its low 4
@@ -362,7 +363,7 @@ void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
     u64 tiles = u64(db.pitch / 8) * (db.height / 8);
     if (!h || !mem.ok(h, tiles * 4)) return;
     u64 v = M.gpu ? vkdraw::version(h) : 0;
-    u64 stamp = v ? v << 1 : hash_memory(reinterpret_cast<const unsigned char*>(h), tiles * 4) | 1;
+    u64 stamp = v ? v << 1 : memory_stamp(h, tiles * 4) | 1;
     u64& seen = g_htile_seen[h ^ db.base];
     if (seen == stamp) return;
     seen = stamp;
@@ -703,6 +704,72 @@ u64 hash_memory(const unsigned char* p, u64 n) {
     return h[0] ^ (h[1] * 3) ^ (h[2] * 5) ^ (h[3] * 7) ^ n;
 }
 
+// What n bytes of memory hold, as a hash of them (for the textures and buffers kept from draw
+// to draw), hashed again only when they may have changed. In the heap, on Windows, the OS notes
+// the pages written: each time some are found written, they are given a new number, and while
+// the highest number of a range's pages is what it was when the range was last hashed, the
+// range is as it was, and its hash is too. Memory written with what it held already still
+// hashes the same.
+std::mutex g_pages_lock;
+std::vector<u32> g_page_written, g_chunk_written;  // the heap's pages' numbers, and the highest of each 2 MiB
+u32 g_page_writes = 0;
+bool g_watched = false, g_unwatched = false;  // pages found written at least once; never (not watched)
+struct Hashed {
+    u64 base, n, written, hash;
+};
+std::unordered_map<u64, Hashed> g_hashed;  // by range (its start and length, mixed): its pages' number then, and its hash
+u64 g_stamps_watched = 0, g_stamps_hashed = 0, g_hashed_bytes = 0;
+u64 page_written(u64 base, u64 n);
+u64 memory_stamp(u64 base, u64 n) {
+    u64 written = page_written(base, n);
+    if (written != ~u64(0)) {
+        std::lock_guard lock(g_pages_lock);
+        u64 range = base ^ (n * 0x9e3779b97f4a7c15ull);
+        auto it = g_hashed.find(range);
+        if (it != g_hashed.end() && it->second.base == base && it->second.n == n && it->second.written == written) {
+            g_stamps_watched++;
+            return it->second.hash;
+        }
+        if (g_hashed.size() > (1u << 20)) g_hashed.clear();
+        u64 h = hash_memory(reinterpret_cast<const unsigned char*>(base), n);
+        g_hashed[range] = {base, n, written, h};
+        g_stamps_hashed++, g_hashed_bytes += n;
+        return h;
+    }
+    g_stamps_hashed++, g_hashed_bytes += n;
+    return hash_memory(reinterpret_cast<const unsigned char*>(base), n);
+}
+
+// The highest number of the pages of [base, base + n) (in the heap, watched); ~0 if not told
+u64 page_written(u64 base, u64 n) {
+    if (!g_unwatched && n && base >= M.heap_base && base + n <= M.heap_base + HEAP_RESERVE) {
+        static thread_local std::vector<u64> pages;
+        std::lock_guard lock(g_pages_lock);
+        u64 lo = base & ~u64(0xfff), hi = (base + n + 0xfff) & ~u64(0xfff);
+        if (platform::written_pages(lo, hi - lo, pages)) {
+            if (!g_watched) {
+                g_page_written.assign(HEAP_RESERVE >> 12, 0);
+                g_chunk_written.assign(HEAP_RESERVE >> 21, 0);
+                g_watched = true;
+            }
+            if (!pages.empty()) {
+                g_page_writes++;
+                for (u64 p : pages) {
+                    u64 i = (p - M.heap_base) >> 12;
+                    g_page_written[i] = g_chunk_written[i >> 9] = g_page_writes;
+                }
+            }
+            u32 most = 0;
+            for (u64 i = (lo - M.heap_base) >> 12, end = (hi - M.heap_base) >> 12; i < end;)
+                if (!(i & 511) && i + 512 <= end) most = std::max(most, g_chunk_written[i >> 9]), i += 512;
+                else most = std::max(most, g_page_written[i++]);
+            return most;
+        }
+        if (!g_watched) g_unwatched = true;
+    }
+    return ~u64(0);
+}
+
 // A shader's translation, beside its disassembly: shaders/<vs|ps>-<address>.glsl, the first
 // time it is translated in a run
 void save_glsl(const char* kind, u64 at, const std::string& text) {
@@ -762,8 +829,9 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
             u64 h;
             {
                 Timer hashing(g_buffer_hash_ns);
-                h = hash_memory(reinterpret_cast<const unsigned char*>(base), span);
-                g_buffer_hash_bytes += span;
+                u64 before = g_hashed_bytes;
+                h = memory_stamp(base, span);
+                g_buffer_hash_bytes += g_hashed_bytes - before;
             }
             key = std::format("{:x}.{:x}.{:x}.{:x}:{}:{}:{}:{:x}", b.v[0], b.v[1], b.v[2], b.v[3], b.offset, b.dfmt, b.nfmt, h);
             if (auto it = g_unpacked.find(key); it != g_unpacked.end()) {
@@ -1135,9 +1203,11 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             u64 bytes = u64(tx.pitch) * tx.height * tx.bpp;
             if (!vkdraw::version(ti.base) && !vkdraw::version(ti.base + bytes - 1)) {
                 Timer hashing(g_texture_hash_ns);
-                g_texture_hash_bytes += bytes;
+                u64 before = g_hashed_bytes;
+                u64 h = memory_stamp(ti.base, bytes);
+                g_texture_hash_bytes += g_hashed_bytes - before;
                 tx.key = std::format("raw:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
-                                     im.t[5], im.t[6], im.t[7], hash_memory(tx.raw, bytes));
+                                     im.t[5], im.t[6], im.t[7], h);
             }
             d.textures.push_back(std::move(tx));
             continue;
@@ -1146,8 +1216,9 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             u64 h = 0;
             if (layout(ti.dfmt).count) {
                 Timer hashing(g_texture_hash_ns);
-                h = hash_memory(reinterpret_cast<const unsigned char*>(ti.base), ti.size);
-                g_texture_hash_bytes += ti.size;
+                u64 before = g_hashed_bytes;
+                h = memory_stamp(ti.base, ti.size);
+                g_texture_hash_bytes += g_hashed_bytes - before;
             }
             tx.key = std::format("{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4], im.t[5],
                                  im.t[6], im.t[7], h);
@@ -1947,8 +2018,8 @@ std::vector<std::string> draw_report() {
         std::string t = "Where the draws' time went:\n\n| Stage | Seconds |\n|---|---:|\n";
         for (int k = 0; k < ST_COUNT; k++)
             if (g_stage_ns[k]) t += std::format("| {} | {:.1f} |\n", stage_names[k], double(g_stage_ns[k]) / 1e9);
-        t += std::format("\nOf which: translating and evaluating shaders {:.1f} s; unpacking buffers {:.1f} s; hashing "
-                         "textures' memory {:.1f} s ({} MiB); decoding {} textures texel by texel {:.1f} s.\n",
+        t += std::format("\nOf which: translating and evaluating shaders {:.1f} s; unpacking buffers {:.1f} s; telling "
+                         "whether textures' memory changed {:.1f} s ({} MiB hashed); decoding {} textures texel by texel {:.1f} s.\n",
                          double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
                          g_texture_hash_bytes >> 20, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
         if (!g_decoded_by.empty()) {
@@ -1960,10 +2031,12 @@ std::vector<std::string> draw_report() {
                 t += std::format("| {} | {} | {:.1f} |\n", by[i].second, by[i].first.first, double(by[i].first.second) / 1e9);
             t += "\n";
         }
-        t += std::format("Buffers: {} unpacked, {} found kept ({} times the least lately used let go); hashing their memory {:.1f} s "
-                         "({} MiB), unpacking them {:.1f} s.\n",
+        t += std::format("Buffers: {} unpacked, {} found kept ({} times the least lately used let go); telling whether their "
+                         "memory changed {:.1f} s ({} MiB hashed), unpacking them {:.1f} s.\n",
                          g_unpacks, g_unpack_hits, g_unpack_clears, double(g_buffer_hash_ns) / 1e9, g_buffer_hash_bytes >> 20,
                          double(g_buffer_miss_ns) / 1e9);
+        t += std::format("Memory told changed or not: {} times from the pages the OS saw written (not hashed again), {} times by hashing it.\n",
+                         g_stamps_watched, g_stamps_hashed);
         s.push_back(t);
     }
     if (M.gpu) {
