@@ -998,6 +998,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     29.3 s to 2.8, and the draws from 319,781 to 343,678 (a little past a run's spread).
     In-game `--gpu-check`: 77 of 80 the same (75 of 78 before; the two new are this
     shader's), their depth the same in every pixel; validation is clean.
+58. **The draws' larger buffers kept on the GPU.** Of the 39.8 seconds "copying draws'
+    data to upload", 39.0 were not textures but the draws' buffers: every draw copied
+    each buffer it reads (the elements unpacked, 16 bytes each) into the upload buffer,
+    944 GB of them in 300 seconds, although 97% of them were the very buffers an earlier
+    draw had (the loader shares an unpacked buffer while its memory is unchanged). The
+    larger ones (from 64 KiB) now go into a pool on the GPU (an eighth of its memory, from
+    256 MiB to 2 GiB), once, and later draws bind them there. The pool is a ring: a new
+    buffer goes where the last one ended, those it lands on are let go, and the copy into
+    it waits, in the batch, for the draws before that read what was there (a buffer of
+    the draw's own is never let go for it: that one goes up with the draw). Into the first
+    scene in 300 seconds: 5,825 sent (5.4 GiB), 540,103 found there; the copying went
+    from 39.8 s to 1.8 (the buffers from 944 GB to 25), and the draws from 347,971 to
+    411,696. With and without the pool, the frames saved at flips 1,700 to 1,800 are the
+    same in every pixel; validation is clean, and `--gpu-check` is as before.
 
 ## Files
 

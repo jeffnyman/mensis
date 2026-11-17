@@ -444,6 +444,7 @@ struct Kept {
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
     u64 wait_ns = 0, readback_ns = 0, upload_ns = 0;  // waiting for batches; reading targets back; copying uploads
     u64 upload_bytes = 0, texture_upload_bytes = 0;
+    u64 buffer_upload_ns = 0, buffer_upload_bytes = 0;  // of which: the draws' buffers (vertices, indices, loads)
 };
 Kept k;
 
@@ -517,6 +518,100 @@ VkDeviceSize texture_budget() {
 }
 
 u32 image_binding(u32 i) { return i < 15 ? 1 + i : 40 + (i - 15); }
+
+// The draws' larger buffers (unpacked elements, from 64 KiB), kept on the GPU in one pool: a
+// buffer the draw before used too (the same one, shared: the memory it came from unchanged)
+// goes up once, not with every draw. The pool is a ring (an eighth of the GPU's memory, from
+// 256 MiB to 2 GiB): a buffer goes in where the last went, and those it lands on are let go
+// (a copy into the pool waits, in the batch, for the draws before that read it).
+struct BufferPool {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize size = 0, head = 0;
+    bool tried = false;
+    struct Entry {
+        std::weak_ptr<const std::vector<u32>> data;
+        VkDeviceSize at = 0, bytes = 0;
+        u64 draw = 0;  // the last draw that used it
+    };
+    std::unordered_map<const std::vector<u32>*, Entry> entries;
+    std::map<VkDeviceSize, const std::vector<u32>*> by_place;
+    u64 sent = 0, found = 0, let_go = 0, sent_bytes = 0;
+} g_pool;
+constexpr VkDeviceSize POOLED = 64 << 10;
+
+bool pool_ready() {
+    if (g_pool.buffer) return true;
+    if (g_pool.tried) return false;
+    g_pool.tried = true;
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g.gpu, &mp);
+    VkDeviceSize most = 0;
+    for (u32 i = 0; i < mp.memoryHeapCount; i++)
+        if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) most = std::max(most, mp.memoryHeaps[i].size);
+    VkDeviceSize size = std::clamp(most / 8, VkDeviceSize(256) << 20, VkDeviceSize(2) << 30);
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = size;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateBuffer(g.device, &bi, nullptr, &g_pool.buffer) != VK_SUCCESS) return g_pool.buffer = VK_NULL_HANDLE, false;
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(g.device, g_pool.buffer, &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (ai.memoryTypeIndex == ~0u || vkAllocateMemory(g.device, &ai, nullptr, &g_pool.memory) != VK_SUCCESS) {
+        vkDestroyBuffer(g.device, g_pool.buffer, nullptr);
+        g_pool.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindBufferMemory(g.device, g_pool.buffer, g_pool.memory, 0);
+    g_pool.size = size;
+    return true;
+}
+
+// A buffer's place in the pool, for the draw `draw`: true if it has one (send: it must first be
+// copied there); false if it goes up with the draw, as the smaller ones do
+bool pooled(const Buffer& b, u64 draw, VkDeviceSize& at, bool& send) {
+    VkDeviceSize bytes = (VkDeviceSize(b->size()) * 4 + 255) & ~VkDeviceSize(255);
+    if (bytes < POOLED || !pool_ready() || bytes > g_pool.size / 4) return false;
+    auto it = g_pool.entries.find(b.get());
+    if (it != g_pool.entries.end()) {
+        if (it->second.data.lock() == b) {
+            it->second.draw = draw;
+            at = it->second.at;
+            send = false;
+            g_pool.found++;
+            return true;
+        }
+        g_pool.by_place.erase(it->second.at);  // another buffer, since gone, was at that address
+        g_pool.entries.erase(it);
+    }
+    if (g_pool.head + bytes > g_pool.size) g_pool.head = 0;
+    VkDeviceSize lo = g_pool.head, hi = lo + bytes;
+    // those in the way: let go, unless this draw uses one (then this one goes up with it)
+    std::vector<const std::vector<u32>*> doomed;
+    auto p = g_pool.by_place.lower_bound(lo);
+    if (p != g_pool.by_place.begin()) --p;
+    for (; p != g_pool.by_place.end() && p->first < hi; ++p) {
+        const auto& e = g_pool.entries[p->second];
+        if (e.at + e.bytes <= lo) continue;
+        if (e.draw == draw) return false;
+        doomed.push_back(p->second);
+    }
+    for (auto* key : doomed) {
+        g_pool.by_place.erase(g_pool.entries[key].at);
+        g_pool.entries.erase(key);
+        g_pool.let_go++;
+    }
+    g_pool.entries[b.get()] = {b, lo, bytes, draw};
+    g_pool.by_place[lo] = b.get();
+    g_pool.head = hi;
+    g_pool.sent++;
+    g_pool.sent_bytes += bytes;
+    at = lo;
+    send = true;
+    return true;
+}
 
 // One descriptor set layout for every draw, with each binding there to be used or not
 bool prepare_kept() {
@@ -1119,10 +1214,35 @@ bool draw(Draw& d, std::string& why) {
     VkDeviceSize at_values = place(d.values.size() * 4);
     VkDeviceSize at_vertices = place(d.vertices.size() * 4), at_indices = place(d.indices.size() * 4);
     VkDeviceSize at_vs_values = place(d.vs_values.size() * 4);
+    // each buffer: in the pool (sent there first, from the upload, if it isn't there yet), or
+    // in the upload alone
+    struct InPool {
+        VkDeviceSize at = 0;
+        bool pooled = false, send = false;
+    };
+    std::vector<InPool> vs_pool(d.vs_buffers.size()), ps_pool(d.ps_buffers.size());
+    // (if the draw fails before they are sent, the pool forgets them)
+    struct Unsent {
+        std::vector<const std::vector<u32>*> keys;
+        bool sent = false;
+        ~Unsent() {
+            if (sent) return;
+            for (auto* key : keys)
+                if (auto it = g_pool.entries.find(key); it != g_pool.entries.end()) {
+                    g_pool.by_place.erase(it->second.at);
+                    g_pool.entries.erase(it);
+                }
+        }
+    } unsent;
+    auto place_buffer = [&](const Buffer& b, InPool& p) {
+        p.pooled = pooled(b, k.draws, p.at, p.send);
+        if (p.send) unsent.keys.push_back(b.get());
+        return !p.pooled || p.send ? place(b->size() * 4) : 0;
+    };
     std::vector<VkDeviceSize> at_buffers;
-    for (auto& b : d.vs_buffers) at_buffers.push_back(place(b->size() * 4));
+    for (size_t i = 0; i < d.vs_buffers.size(); i++) at_buffers.push_back(place_buffer(d.vs_buffers[i], vs_pool[i]));
     std::vector<VkDeviceSize> at_ps_buffers;
-    for (auto& b : d.ps_buffers) at_ps_buffers.push_back(place(b->size() * 4));
+    for (size_t i = 0; i < d.ps_buffers.size(); i++) at_ps_buffers.push_back(place_buffer(d.ps_buffers[i], ps_pool[i]));
     // the textures not kept yet, made and uploaded
     std::vector<GpuImage*> images(d.textures.size());
     std::vector<VkDeviceSize> at_texels(d.textures.size(), ~VkDeviceSize(0));
@@ -1205,9 +1325,19 @@ bool draw(Draw& d, std::string& why) {
     std::memcpy(up + at_vertices, d.vertices.data(), d.vertices.size() * 4);
     std::memcpy(up + at_indices, d.indices.data(), d.indices.size() * 4);
     std::memcpy(up + at_vs_values, d.vs_values.data(), d.vs_values.size() * 4);
-    for (size_t i = 0; i < d.vs_buffers.size(); i++) std::memcpy(up + at_buffers[i], d.vs_buffers[i]->data(), d.vs_buffers[i]->size() * 4);
+    k.buffer_upload_bytes += (d.vertices.size() + d.indices.size() + d.vs_values.size()) * 4;
+    for (size_t i = 0; i < d.vs_buffers.size(); i++)
+        if (!vs_pool[i].pooled || vs_pool[i].send) {
+            std::memcpy(up + at_buffers[i], d.vs_buffers[i]->data(), d.vs_buffers[i]->size() * 4);
+            k.buffer_upload_bytes += d.vs_buffers[i]->size() * 4;
+        }
     for (size_t i = 0; i < d.ps_buffers.size(); i++)
-        std::memcpy(up + at_ps_buffers[i], d.ps_buffers[i]->data(), d.ps_buffers[i]->size() * 4);
+        if (!ps_pool[i].pooled || ps_pool[i].send) {
+            std::memcpy(up + at_ps_buffers[i], d.ps_buffers[i]->data(), d.ps_buffers[i]->size() * 4);
+            k.buffer_upload_bytes += d.ps_buffers[i]->size() * 4;
+        }
+    auto buffers1 = std::chrono::steady_clock::now();
+    k.buffer_upload_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(buffers1 - copy0).count());
     for (size_t i = 0; i < d.textures.size(); i++) {
         if (at_texels[i] == ~VkDeviceSize(0)) continue;
         const Texture& t = d.textures[i];
@@ -1241,8 +1371,8 @@ bool draw(Draw& d, std::string& why) {
     binfo.reserve(2 + d.vs_buffers.size() + d.ps_buffers.size());
     iinfo.reserve(d.textures.size());
     std::vector<VkWriteDescriptorSet> writes;
-    auto write_buffer = [&](u32 binding, VkDeviceSize offset, VkDeviceSize bytes) {
-        binfo.push_back({k.upload.buffer, offset, std::max<VkDeviceSize>(bytes, 16)});
+    auto write_buffer = [&](u32 binding, VkDeviceSize offset, VkDeviceSize bytes, VkBuffer buffer = VK_NULL_HANDLE) {
+        binfo.push_back({buffer ? buffer : k.upload.buffer, offset, std::max<VkDeviceSize>(bytes, 16)});
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set;
         w.dstBinding = binding;
@@ -1250,6 +1380,11 @@ bool draw(Draw& d, std::string& why) {
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w.pBufferInfo = &binfo.back();
         writes.push_back(w);
+    };
+    // a buffer's descriptor: its place in the pool, or in the upload
+    auto write_pooled = [&](u32 binding, VkDeviceSize offset, const Buffer& b, const InPool& p) {
+        if (p.pooled) write_buffer(binding, p.at, b->size() * 4, g_pool.buffer);
+        else write_buffer(binding, offset, b->size() * 4);
     };
     write_buffer(0, at_values, d.values.size() * 4);
     for (u32 i = 0; i < d.textures.size(); i++) {
@@ -1264,14 +1399,36 @@ bool draw(Draw& d, std::string& why) {
     }
     if (gpu_vertices) {
         write_buffer(16, at_vs_values, d.vs_values.size() * 4);
-        for (u32 i = 0; i < d.vs_buffers.size(); i++) write_buffer(i < 15 ? 17 + i : 72 + (i - 15), at_buffers[i], d.vs_buffers[i]->size() * 4);
+        for (u32 i = 0; i < d.vs_buffers.size(); i++)
+            write_pooled(i < 15 ? 17 + i : 72 + (i - 15), at_buffers[i], d.vs_buffers[i], vs_pool[i]);
     }
-    for (u32 i = 0; i < d.ps_buffers.size(); i++) write_buffer(56 + i, at_ps_buffers[i], d.ps_buffers[i]->size() * 4);
+    for (u32 i = 0; i < d.ps_buffers.size(); i++) write_pooled(56 + i, at_ps_buffers[i], d.ps_buffers[i], ps_pool[i]);
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
     // the commands, into the batch
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    // the buffers new to the pool, into it: once the draws before have read what was there
+    {
+        std::vector<VkBufferCopy> sends;
+        for (size_t i = 0; i < d.vs_buffers.size(); i++)
+            if (vs_pool[i].send) sends.push_back({at_buffers[i], vs_pool[i].at, d.vs_buffers[i]->size() * 4});
+        for (size_t i = 0; i < d.ps_buffers.size(); i++)
+            if (ps_pool[i].send) sends.push_back({at_ps_buffers[i], ps_pool[i].at, d.ps_buffers[i]->size() * 4});
+        if (!sends.empty()) {
+            const VkPipelineStageFlags S = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+                                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, S | T, T, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            vkCmdCopyBuffer(cmd, k.upload.buffer, g_pool.buffer, u32(sends.size()), sends.data());
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, T, S, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        }
+        unsent.sent = true;
+    }
     const VkPipelineStageFlags C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     // the textures that are kept targets, copied first (before this draw changes its own)
@@ -2140,9 +2297,13 @@ std::string report() {
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
                        "Depth buffers' fast clears seen to there: {}. Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes,
                        k.htile_checks, k.batches) +
+           std::format(". The draws' larger buffers kept there ({} MiB for them): {} sent ({} MiB), {} found there, {} let go",
+                       g_pool.size >> 20, g_pool.sent, g_pool.sent_bytes >> 20, g_pool.found, g_pool.let_go) +
            std::format(". Of the time: {:.1f} s submitting batches and waiting for them, {:.1f} s reading targets back into "
-                       "memory (waits included), {:.1f} s copying draws' data to upload ({} MiB of textures)",
-                       double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20) +
+                       "memory (waits included), {:.1f} s copying draws' data to upload ({} MiB of textures; and {:.1f} s of it "
+                       "the draws' buffers, {} MiB)",
+                       double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20,
+                       double(k.buffer_upload_ns) / 1e9, k.buffer_upload_bytes >> 20) +
            tally(".\n\nWhy batches went to the GPU:\n\n| Why | Times |\n|---|---:|\n", g_batch_why) +
            tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why) + readback_time();
 }
