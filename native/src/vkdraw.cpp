@@ -203,15 +203,24 @@ bool init() {
     return true;
 }
 
+u64 g_compile_ns = 0, g_compiled = 0;  // GLSL compiled into SPIR-V: the time, how many
 bool compile(const std::string& src, shaderc_shader_kind kind, std::vector<u32>& out, std::string& why) {
     auto it = g.spirv.find(src);
     if (it != g.spirv.end()) {
         out = it->second;
         return true;
     }
+    auto t0 = std::chrono::steady_clock::now();
+    struct Tally {
+        std::chrono::steady_clock::time_point t0;
+        ~Tally() {
+            g_compile_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            g_compiled++;
+        }
+    } tally{t0};
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
     shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
-    shaderc_compile_options_set_optimization_level(o, shaderc_optimization_level_performance);
+    shaderc_compile_options_set_optimization_level(o, shaderc_optimization_level_zero);
     shaderc_compilation_result_t r =
         shaderc_compile_into_spv(g.compiler, src.data(), src.size(), kind, kind == shaderc_vertex_shader ? "vs.glsl" : "ps.glsl", "main", o);
     bool ok = shaderc_result_get_compilation_status(r) == shaderc_compilation_status_success;
@@ -703,7 +712,9 @@ VkShaderModule module(const std::string& src, shaderc_shader_kind kind, std::str
 VkPipeline pipeline(const Draw& d, std::string& why) {
     bool gpu_vertices = !d.indices.empty();
     std::hash<std::string> h;
-    std::string key = std::format("{:x}:{:x}:{:x}:{:x}:{}:{}", h(d.vs), h(d.gs), h(d.ps), d.cull, d.attributes, gpu_vertices);
+    // (the shaders by their hashes: made once where they are kept, if they are, as most are)
+    std::string key = std::format("{:x}:{:x}:{:x}:{:x}:{}:{}", d.vs_id ? d.vs_id : h(d.vs), h(d.gs), d.ps_id ? d.ps_id : h(d.ps), d.cull,
+                                  d.attributes, gpu_vertices);
     for (const auto& t : d.targets) key += std::format(":{}.{:x}.{:x}", t.format, t.blend, t.mask);
     key += std::format(":z{}.{}.{}.{}", d.depth.format, d.depth.test, d.depth.write, d.depth.func);
     if (d.depth.stencil_test)
@@ -1258,7 +1269,23 @@ VkComponentSwizzle swizzle(u32 sel) {
     }
 }
 
+// The CPU's time in a draw on the GPU, by part (each part from its mark to the next; waits
+// for the GPU in it included)
+std::map<std::string, u64> g_part_ns;
+struct Parts {
+    const char* what;
+    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    explicit Parts(const char* w) : what(w) {}
+    void to(const char* w) {
+        auto now = std::chrono::steady_clock::now();
+        g_part_ns[what] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count());
+        what = w, t = now;
+    }
+    ~Parts() { to(nullptr); }
+};
+
 bool draw(Draw& d, std::string& why) {
+    Parts part("the pipeline, found");
     if (!prepare_kept()) {
         why = g.why;
         return false;
@@ -1273,8 +1300,11 @@ bool draw(Draw& d, std::string& why) {
     bool kept = d.depth.format && d.depth.address;
     for (const auto& t : d.targets)
         if (t.format) kept = t.address != 0;
+    size_t pipelines = k.pipelines.size();
     VkPipeline pipe = pipeline(d, why);
+    if (k.pipelines.size() != pipelines) part.what = "the pipeline, made (its shaders compiled)";
     if (!pipe) return false;
+    part.to("the targets and depth buffer, found or made");
     // the depth buffer, then the targets: kept, or --gpu-check's copies, by their format, size
     // and place
     Resident* zres = nullptr;
@@ -1285,6 +1315,7 @@ bool draw(Draw& d, std::string& why) {
     if (kept)
         for (size_t i = 0; i < nt; i++)
             if (d.targets[i].format && !(res[i] = resident(d, d.targets[i], why))) return false;
+    part.to("textures in kept memory, found (or read back)");
     // a texture read as it is in memory: copied on the GPU from kept memory there (of the same
     // size of texel): straight from its image if it is that image laid out the same way, else
     // through a buffer, the image's texels in order, the texture's rows picked out of them (a
@@ -1316,6 +1347,7 @@ bool draw(Draw& d, std::string& why) {
     }
     k.draws++;
 
+    part.to("the upload's places, the pool's, the textures made");
     // everything going up, in one buffer: each piece's place in it
     VkDeviceSize at = 0;
     auto place = [&](VkDeviceSize bytes) {
@@ -1424,6 +1456,7 @@ bool draw(Draw& d, std::string& why) {
         at_texels[i] = place(texel_bytes(t));
         k.texture_uploads++;
     }
+    part.to("its place in the batch (the batch sent first, if full)");
     // its place in the batch: the offsets above are from its start
     VkDeviceSize base;
     VkDescriptorSet set;
@@ -1436,6 +1469,7 @@ bool draw(Draw& d, std::string& why) {
         why = "out of memory for the readback";
         return false;
     }
+    part.to("copying into the upload");
     for (auto& a : at_target) a += base;
     at_depth += base;
     at_stencil += base;
@@ -1481,6 +1515,7 @@ bool draw(Draw& d, std::string& why) {
     }
     k.upload_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy0).count());
 
+    part.to("the descriptors");
     std::vector<GpuImage*> target(nt, nullptr);
     for (size_t i = 0; i < nt; i++) {
         if (!d.targets[i].format) continue;
@@ -1537,6 +1572,7 @@ bool draw(Draw& d, std::string& why) {
     for (u32 i = 0; i < d.ps_buffers.size(); i++) write_pooled(56 + i, at_ps_buffers[i], d.ps_buffers[i], ps_pool[i]);
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
+    part.to("the commands, recorded");
     // the commands, into the batch
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -2394,7 +2430,7 @@ bool run(Draw& d, std::string& why) {
         why = g.why;
         return false;
     }
-    if ((d.ps.find("uint64_t") != std::string::npos || d.vs.find("uint64_t") != std::string::npos) && !g.int64) {
+    if (!g.int64 && (d.ps.find("uint64_t") != std::string::npos || d.vs.find("uint64_t") != std::string::npos)) {
         why = "the GPU has no 64-bit integers";
         return false;
     }
@@ -2423,6 +2459,19 @@ std::string tally(const char* head, const std::map<std::string, u64>& m) {
 }
 
 // The GPU's time, by what it was doing, the most first
+// The CPU's time in the draws on the GPU, by part, the most first
+std::string part_time() {
+    if (g_part_ns.empty()) return {};
+    std::vector<std::pair<u64, std::string>> by;
+    u64 all = 0;
+    for (auto& [what, ns] : g_part_ns) by.push_back({ns, what}), all += ns;
+    std::sort(by.rbegin(), by.rend());
+    std::string t = std::format("\nThe CPU's time in the draws on the GPU, {:.1f} s in all, by part (waits for the GPU included):\n\n| Part | Seconds |\n|---|---:|\n",
+                                double(all) / 1e9);
+    for (auto& [ns, what] : by) t += std::format("| {} | {:.2f} |\n", what, double(ns) / 1e9);
+    return t + std::format("\nOf which: {} shaders' GLSL compiled into SPIR-V (shaderc), {:.1f} s.\n", g_compiled, double(g_compile_ns) / 1e9);
+}
+
 std::string gpu_time() {
     if (g_time.ns.empty()) return {};
     std::vector<std::pair<u64, std::string>> by;
@@ -2469,7 +2518,7 @@ std::string report() {
                        double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20,
                        double(k.buffer_upload_ns) / 1e9, k.buffer_upload_bytes >> 20) +
            tally(".\n\nWhy batches went to the GPU:\n\n| Why | Times |\n|---|---:|\n", g_batch_why) +
-           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why) + readback_time() + gpu_time();
+           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why) + readback_time() + gpu_time() + part_time();
 }
 
 }  // namespace mensis::vkdraw

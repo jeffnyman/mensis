@@ -919,6 +919,7 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
         Timer timer(g_translate_ns);
         if (git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::vertex_shader(prog, st)).first;
     }
+    if (!git->second.id) git->second.id = std::hash<std::string>{}(git->second.text) | 1;
     const translate::Glsl& g = git->second;
     if (!g.why.empty()) {
         why = "the vertex shader has " + g.why;
@@ -943,6 +944,7 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     if (rects) d.gs = translate::rect_geometry_shader(attributes);
     save_glsl("vs", vs, g.text);
     d.vs = g.text;
+    d.vs_id = g.id;
     d.vs_values = vals.u;
     d.cull = reg(r, 0x205, 0);
     return true;
@@ -1067,13 +1069,14 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         st.image_slot.push_back(slot);
     }
     static translate::Glsl no_shader;
-    if (no_shader.text.empty()) no_shader.text = "#version 450\nvoid main() {}\n";
+    if (no_shader.text.empty()) no_shader.text = "#version 450\nvoid main() {}\n", no_shader.id = std::hash<std::string>{}(no_shader.text) | 1;
     std::string gkey = std::format("ps:{:x}:{}", ps, st.key());
     auto git = ps ? g_glsl.find(gkey) : g_glsl.end();
     {
         Timer timer(g_translate_ns);
         if (ps && git == g_glsl.end()) git = g_glsl.emplace(gkey, translate::pixel_shader(prog, st)).first;
     }
+    if (ps && !git->second.id) git->second.id = std::hash<std::string>{}(git->second.text) | 1;
     const translate::Glsl& gl = ps ? git->second : no_shader;
     if (ps && gl.why.empty()) save_glsl("ps", ps, gl.text);
     if (!gl.why.empty()) {
@@ -1081,6 +1084,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         return false;
     }
     d.ps = gl.text;
+    d.ps_id = gl.id;
     d.attributes = gl.attributes;
     if (!unpack_buffers(ps_buffers, mem, d.ps_buffers, why)) return false;
     // each target the shader exports to (one it doesn't is left as it is, as on the CPU)
@@ -1165,6 +1169,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         d.vs_buffers.clear();
         d.gs.clear();
         d.vs = translate::pass_vertex_shader(gl.attributes);
+        d.vs_id = 0;
     }
     // Or the CPU's vertices, in clip space for a viewport the size of the target; the
     // attributes as SPI_PS_INPUT_CNTL picks them from the vertex shader's parameters

@@ -1101,6 +1101,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     a triangle's edge (and its depth by 0.00007), the GPU's vertex arithmetic rounding
     otherwise than the CPU's; the validation layer reported nothing.
 
+64. **Pipelines: the SPIR-V not optimized, and the shaders told apart by a hash made once.**
+    The summary now gives the CPU's time in the draws on the GPU by part (the parts of
+    `vkdraw.cpp`'s `draw`, waits included) and the time shaderc took. Of 101.5 seconds there
+    in a 300-second run, 89 went on the pipeline. Most of that was making new ones (about
+    190 milliseconds each, 223 in 120 seconds): shaderc compiled each shader's GLSL with its
+    optimizer on, which on shaders of up to 180 KB of GLSL is slow, and the driver optimizes
+    them again anyway. It now compiles without it (9 milliseconds a shader). The rest was
+    finding the pipeline a draw already had: its key hashed the vertex and pixel shaders'
+    whole GLSL on every draw, about 44 microseconds a draw. Each translation kept in
+    `draw.cpp` now has its hash made once, which the draw carries, and the key uses it (the
+    check for 64-bit integers also no longer reads the GLSL where the GPU has them). In 300
+    seconds: the draws on the GPU took the CPU 22.7 and 23.8 seconds in two runs (101.5
+    before), new pipelines 2.7 (266 shaders compiled in 2.4); the stage "the GPU's draws"
+    went from about 105 seconds to 25-26; draws 1,537,880 and 1,530,785 (859,002 and
+    833,409). The time to make a new pipeline depends too on the driver's own cache of
+    pipelines on disk: the first run after a change to the SPIR-V took 20.4 seconds for 281
+    of them, later runs about 3. `--gpu-check` as before (77 of 80, depth the same), the
+    validation layer reporting nothing.
+
 ## Files
 
 | Path | |

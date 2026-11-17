@@ -119,6 +119,7 @@ struct CsState {
 
 struct Glsl {
     std::string text, why;
+    u64 id = 0;  // (for whoever keeps it: the text's hash, made once, to tell it apart quickly)
     u32 attributes = 0;  // how many interpolated inputs (attributes 0 to n-1) it reads
     u32 buffers = 0;  // how many buffer loads (a vertex shader's)
     u32 outputs = 0;  // a pixel shader's: the render targets it exports to, a bit each

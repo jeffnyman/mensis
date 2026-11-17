@@ -42,6 +42,7 @@ using Buffer = std::shared_ptr<const std::vector<u32>>;
 
 struct Draw {
     std::string vs, ps;  // GLSL
+    u64 vs_id = 0, ps_id = 0;  // each one's hash, if known (made once, where it is kept): else made here
     u32 attributes = 0;
     std::vector<float> vertices;  // the CPU's: each vertex's position (clip space), then attributes
     // Or the vertex shader on the GPU too (indices not empty): each triangle's three vertices'
