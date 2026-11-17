@@ -42,6 +42,11 @@ using Buffer = std::shared_ptr<const std::vector<u32>>;
 
 struct Draw {
     std::string vs, ps;  // GLSL
+    // or kept elsewhere for as long as the run (a translation kept), not copied: then these
+    const std::string* vs_kept = nullptr;
+    const std::string* ps_kept = nullptr;
+    const std::string& vs_text() const { return vs_kept ? *vs_kept : vs; }
+    const std::string& ps_text() const { return ps_kept ? *ps_kept : ps; }
     u64 vs_id = 0, ps_id = 0;  // each one's hash, if known (made once, where it is kept): else made here
     u32 attributes = 0;
     std::vector<float> vertices;  // the CPU's: each vertex's position (clip space), then attributes

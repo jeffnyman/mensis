@@ -713,7 +713,7 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
     bool gpu_vertices = !d.indices.empty();
     std::hash<std::string> h;
     // (the shaders by their hashes: made once where they are kept, if they are, as most are)
-    std::string key = std::format("{:x}:{:x}:{:x}:{:x}:{}:{}", d.vs_id ? d.vs_id : h(d.vs), h(d.gs), d.ps_id ? d.ps_id : h(d.ps), d.cull,
+    std::string key = std::format("{:x}:{:x}:{:x}:{:x}:{}:{}", d.vs_id ? d.vs_id : h(d.vs_text()), h(d.gs), d.ps_id ? d.ps_id : h(d.ps_text()), d.cull,
                                   d.attributes, gpu_vertices);
     for (const auto& t : d.targets) key += std::format(":{}.{:x}.{:x}", t.format, t.blend, t.mask);
     key += std::format(":z{}.{}.{}.{}", d.depth.format, d.depth.test, d.depth.write, d.depth.func);
@@ -722,7 +722,7 @@ VkPipeline pipeline(const Draw& d, std::string& why) {
             key += std::format(":s{}.{}.{}.{}.{}.{}.{}", f->fail, f->pass, f->zfail, f->func, f->cmask, f->wmask, f->ref);
     auto it = k.pipelines.find(key);
     if (it != k.pipelines.end()) return it->second;
-    VkShaderModule vsm = module(d.vs, shaderc_vertex_shader, why), psm = module(d.ps, shaderc_fragment_shader, why);
+    VkShaderModule vsm = module(d.vs_text(), shaderc_vertex_shader, why), psm = module(d.ps_text(), shaderc_fragment_shader, why);
     VkShaderModule gsm = d.gs.empty() ? VK_NULL_HANDLE : module(d.gs, shaderc_geometry_shader, why);
     if (!vsm || !psm || (!d.gs.empty() && !gsm)) return VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo stages[3] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
@@ -2430,7 +2430,7 @@ bool run(Draw& d, std::string& why) {
         why = g.why;
         return false;
     }
-    if (!g.int64 && (d.ps.find("uint64_t") != std::string::npos || d.vs.find("uint64_t") != std::string::npos)) {
+    if (!g.int64 && (d.ps_text().find("uint64_t") != std::string::npos || d.vs_text().find("uint64_t") != std::string::npos)) {
         why = "the GPU has no 64-bit integers";
         return false;
     }

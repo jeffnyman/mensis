@@ -46,6 +46,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 
 #include "shade.hpp"
@@ -771,24 +772,47 @@ u64 memory_stamp(u64 base, u64 n) {
 }
 
 // The highest number of the pages of [base, base + n) (in the heap, watched); ~0 if not told
+std::atomic<u64> g_os_asked{0}, g_os_ask_ns{0};  // the OS asked which pages were written: how often, the time
+std::atomic<u64> g_page_epoch{1};  // one for each draw and dispatch: the OS is asked once in each
+std::vector<u64> g_chunk_asked;  // each 2 MiB of the heap: the epoch the OS was last asked about it in
 u64 page_written(u64 base, u64 n) {
     if (!g_unwatched && n && base >= M.heap_base && base + n <= M.heap_base + HEAP_RESERVE) {
-        static thread_local std::vector<u64> pages;
+        static std::vector<u64> pages;
         std::lock_guard lock(g_pages_lock);
         u64 lo = base & ~u64(0xfff), hi = (base + n + 0xfff) & ~u64(0xfff);
-        if (platform::written_pages(lo, hi - lo, pages)) {
-            if (!g_watched) {
-                g_page_written.assign(HEAP_RESERVE >> 12, 0);
-                g_chunk_written.assign(HEAP_RESERVE >> 21, 0);
-                g_watched = true;
+        bool told = true;
+        if (g_chunk_asked.empty()) g_chunk_asked.assign(HEAP_RESERVE >> 21, 0);
+        // the pages written since last asked, of each 2 MiB of the range not asked about yet in
+        // this epoch (in one call, those next to each other)
+        u64 c0 = (lo - M.heap_base) >> 21, c1 = (hi - M.heap_base + (1u << 21) - 1) >> 21;
+        for (u64 c = c0; c < c1 && told;) {
+            if (g_chunk_asked[c] == g_page_epoch) {
+                c++;
+                continue;
             }
-            if (!pages.empty()) {
-                g_page_writes++;
-                for (u64 p : pages) {
-                    u64 i = (p - M.heap_base) >> 12;
-                    g_page_written[i] = g_chunk_written[i >> 9] = g_page_writes;
+            u64 e = c;
+            while (e < c1 && g_chunk_asked[e] != g_page_epoch) g_chunk_asked[e++] = g_page_epoch;
+            auto t0 = std::chrono::steady_clock::now();
+            told = platform::written_pages(M.heap_base + (c << 21), (e - c) << 21, pages);
+            g_os_asked++;
+            g_os_ask_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            if (told) {
+                if (!g_watched) {
+                    g_page_written.assign(HEAP_RESERVE >> 12, 0);
+                    g_chunk_written.assign(HEAP_RESERVE >> 21, 0);
+                    g_watched = true;
+                }
+                if (!pages.empty()) {
+                    g_page_writes++;
+                    for (u64 p : pages) {
+                        u64 i = (p - M.heap_base) >> 12;
+                        g_page_written[i] = g_chunk_written[i >> 9] = g_page_writes;
+                    }
                 }
             }
+            c = e;
+        }
+        if (told) {
             u32 most = 0;
             for (u64 i = (lo - M.heap_base) >> 12, end = (hi - M.heap_base) >> 12; i < end;)
                 if (!(i & 511) && i + 512 <= end) most = std::max(most, g_chunk_written[i >> 9]), i += 512;
@@ -803,9 +827,9 @@ u64 page_written(u64 base, u64 n) {
 // A shader's translation, beside its disassembly: shaders/<vs|ps>-<address>.glsl, the first
 // time it is translated in a run
 void save_glsl(const char* kind, u64 at, const std::string& text) {
-    static std::set<std::string> saved;  // under g_draw_lock
+    static std::set<std::pair<char, u64>> saved;  // under g_draw_lock
+    if (!saved.insert({kind[0], at}).second) return;
     std::string name = std::format("{}-{:x}.glsl", kind, at);
-    if (!saved.insert(name).second) return;
     auto dir = std::filesystem::path(M.out_dir) / "shaders";
     std::filesystem::create_directories(dir);
     std::ofstream(dir / name, std::ios::binary) << text;
@@ -822,15 +846,28 @@ struct Unpacked {
     std::shared_ptr<const std::vector<u32>> data;  // shared with the draws that use it, not copied
     u64 used = 0;  // when last found (g_unpack_hits + g_unpacks then)
 };
-std::unordered_map<std::string, Unpacked> g_unpacked;
+// (the key: the V#, the offset, the format, the memory's hash)
+struct UnpackedKey {
+    u32 v[4], offset, dfmt, nfmt;
+    u64 hash;
+    bool operator==(const UnpackedKey&) const = default;
+};
+struct UnpackedKeyHash {
+    size_t operator()(const UnpackedKey& k) const {
+        u64 h = k.hash;
+        for (u32 x : {k.v[0], k.v[1], k.v[2], k.v[3], k.offset, k.dfmt, k.nfmt}) h = (h ^ x) * 0x100000001b3ull;
+        return size_t(h ^ (h >> 29));
+    }
+};
+std::unordered_map<UnpackedKey, Unpacked, UnpackedKeyHash> g_unpacked;
 constexpr u64 UNPACKED_BUDGET = u64(2) << 30;
 
 // Over the budget: the least lately used go, down to half of it
 void unpacked_let_go() {
-    std::vector<std::pair<u64, const std::string*>> by_age;
+    std::vector<std::pair<u64, const UnpackedKey*>> by_age;
     for (auto& [key, e] : g_unpacked) by_age.emplace_back(e.used, &key);
-    std::sort(by_age.begin(), by_age.end());
-    std::vector<std::string> doomed;
+    std::sort(by_age.begin(), by_age.end(), [](auto& a, auto& b) { return a.first < b.first; });
+    std::vector<UnpackedKey> doomed;
     u64 bytes = g_unpacked_bytes;
     for (auto& [used, key] : by_age) {
         if (bytes <= UNPACKED_BUDGET / 2) break;
@@ -854,7 +891,7 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
             return false;
         }
         u64 base = b.v[0] | (u64(b.v[1] & 0xfff) << 32), span = (stride ? u64(stride) * records : records) + b.offset + 16;
-        std::string key;
+        std::optional<UnpackedKey> key;
         if (mem.ok(base, span)) {
             u64 h;
             {
@@ -863,8 +900,8 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
                 h = memory_stamp(base, span);
                 g_buffer_hash_bytes += g_hashed_bytes - before;
             }
-            key = std::format("{:x}.{:x}.{:x}.{:x}:{}:{}:{}:{:x}", b.v[0], b.v[1], b.v[2], b.v[3], b.offset, b.dfmt, b.nfmt, h);
-            if (auto it = g_unpacked.find(key); it != g_unpacked.end()) {
+            key = UnpackedKey{{b.v[0], b.v[1], b.v[2], b.v[3]}, b.offset, b.dfmt, b.nfmt, h};
+            if (auto it = g_unpacked.find(*key); it != g_unpacked.end()) {
                 it->second.used = g_unpack_hits + g_unpacks;
                 out.push_back(it->second.data);
                 g_unpack_hits++;
@@ -879,9 +916,9 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
         for (u32 i = 0; i < n; i++) buffer_element(b.v, b.dfmt, b.nfmt, b.offset, i, mem, &data[size_t(i) * 4]);
         if (stride == 0) std::copy_n(data.begin(), 4, data.begin() + 4);
         else buffer_element(b.v, b.dfmt, b.nfmt, b.offset, records, mem, &data[n * 4]);
-        if (!key.empty()) {
+        if (key) {
             g_unpacked_bytes += data.size() * 4;
-            g_unpacked[key] = {made, g_unpack_hits + g_unpacks};
+            g_unpacked[*key] = {made, g_unpack_hits + g_unpacks};
             if (g_unpacked_bytes > UNPACKED_BUDGET) unpacked_let_go();
         }
         out.push_back(std::move(made));
@@ -892,17 +929,35 @@ bool unpack_buffers(const std::vector<translate::Values::Buffer>& buffers, const
 // The translations kept, by the program and what else they depend on
 std::unordered_map<std::string, translate::Glsl> g_glsl;
 
+// The CPU's time preparing a draw for the GPU, by part (each from its mark to the next; a
+// part named null isn't counted: another's parts are, below it)
+std::map<std::string, u64> g_prepare_ns;
+struct PrepareParts {
+    const char* what;
+    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    explicit PrepareParts(const char* w) : what(w) {}
+    void to(const char* w) {
+        auto now = std::chrono::steady_clock::now();
+        if (what) g_prepare_ns[what] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count());
+        what = w, t = now;
+    }
+    ~PrepareParts() { to(nullptr); }
+};
+
 bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u32 attributes, const Target& t,
                   const std::vector<u32>& index, const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Memory& mem) {
+    PrepareParts part("the vertex shader: decoded (its fetch shader with it)");
     u32 users = std::min((r.sh[0x4b] >> 1) & 0x1f, 16u);
     u32 user[16];
     for (u32 k = 0; k < 16; k++) user[k] = r.sh[0x4c + k];
     translate::Program prog = translate::decode(vs, mem, user, users);
+    part.to("the vertex shader: its scalars worked out");
     translate::Values vals;
     {
         Timer timer(g_translate_ns);
         vals = translate::evaluate(prog, user, users, mem);
     }
+    part.to("the vertex shader: its GLSL found (or translated)");
     if (prog.why.empty() && !vals.why.empty()) prog.why = vals.why;
     translate::VsState st;
     st.user_count = users;
@@ -937,15 +992,24 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     float W = float(t.pitch), H = float(t.height);
     float v[8] = {2 * xs / W, 2 * xo / W - 1, 2 * ys / H, 2 * yo / H - 1, zs, zo, 0, 0};
     std::memcpy(d.viewport, v, sizeof v);
+    part.to("the vertex shader: its buffers unpacked");
     if (!unpack_buffers(vals.buffers, mem, d.vs_buffers, why)) return false;
+    part.to("the vertex shader: indices, GLSL copied, values");
     u32 offset = reg(r, 0x102, 0);  // VGT_INDX_OFFSET
+    d.indices.resize(tris_in.size() * 3);
+    u32* o = d.indices.data();
     for (const auto& tri : tris_in)
-        for (size_t k : tri) d.indices.push_back(index[k] + offset);
-    if (rects) d.gs = translate::rect_geometry_shader(attributes);
+        for (size_t k : tri) *o++ = index[k] + offset;
+    if (rects) {  // (made once for each number of attributes)
+        static std::map<u32, std::string> made;
+        auto it = made.find(attributes);
+        if (it == made.end()) it = made.emplace(attributes, translate::rect_geometry_shader(attributes)).first;
+        d.gs = it->second;
+    }
     save_glsl("vs", vs, g.text);
-    d.vs = g.text;
+    d.vs_kept = &g.text;  // (g_glsl's entries stay where they are, for the run)
     d.vs_id = g.id;
-    d.vs_values = vals.u;
+    d.vs_values = std::move(vals.u);
     d.cull = reg(r, 0x205, 0);
     return true;
 }
@@ -971,6 +1035,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
                const Vertices& out, const std::vector<Tri>& tris, const std::vector<u32>& index,
                const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Target* targets, const int clip[4],
                u32 ps_user, u32 ena, u32 addr, const Memory& mem, bool gpu_vertices_only = false) {
+    PrepareParts part("the targets and depth buffer");
     // the targets written (a channel of them, at least), all the same size
     const Target* first = nullptr;
     for (u32 k = 0; k < 8; k++) {
@@ -1007,6 +1072,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         return false;
     }
     const Target& t = *first;
+    part.to("the pixel shader: found decoded, its scalars worked out");
     // (no pixel shader: depth and stencil alone, every pixel covered passing on, as if exported)
     static const translate::Program no_program;
     auto it = ps ? g_programs.find(ps) : g_programs.end();
@@ -1032,6 +1098,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     st.user_count = users;
     st.ena = ena;
     st.addr = addr;
+    part.to("the pixel shader: its state, buffers and images sorted out");
     for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
     st.col_format = reg(r, 0x1c5, 0);
     st.db_shader = reg(r, 0x203, 0);  // DB_SHADER_CONTROL
@@ -1068,6 +1135,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         if (slot == unique.size()) unique.push_back(&im);
         st.image_slot.push_back(slot);
     }
+    part.to("the pixel shader: its GLSL found (or translated), copied");
     static translate::Glsl no_shader;
     if (no_shader.text.empty()) no_shader.text = "#version 450\nvoid main() {}\n", no_shader.id = std::hash<std::string>{}(no_shader.text) | 1;
     std::string gkey = std::format("ps:{:x}:{}", ps, st.key());
@@ -1083,10 +1151,12 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         why = "the shader has " + gl.why;
         return false;
     }
-    d.ps = gl.text;
+    d.ps_kept = &gl.text;
     d.ps_id = gl.id;
     d.attributes = gl.attributes;
+    part.to("the pixel shader: its buffers unpacked");
     if (!unpack_buffers(ps_buffers, mem, d.ps_buffers, why)) return false;
+    part.to("the targets' and depth's details");
     // each target the shader exports to (one it doesn't is left as it is, as on the CPU)
     d.targets.clear();
     for (u32 k = 0; k < 8; k++) {
@@ -1162,13 +1232,16 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         }
     }
     d.values = vals.u;
+    part.to(nullptr);  // (the vertex shader's own parts)
     bool on_gpu = gpu_vertices(d, vertex_why, r, vs, gl.attributes, t, index, tris_in, rects, mem);
+    part.to("the CPU's vertices, if the vertex shader was the CPU's");
     if (!on_gpu && gpu_vertices_only) return false;  // why empty: only the vertex shader stopped it
     if (!on_gpu) {
         d.indices.clear();
         d.vs_buffers.clear();
         d.gs.clear();
         d.vs = translate::pass_vertex_shader(gl.attributes);
+        d.vs_kept = nullptr;
         d.vs_id = 0;
     }
     // Or the CPU's vertices, in clip space for a viewport the size of the target; the
@@ -1194,6 +1267,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
                 }
             }
         }
+    part.to("the textures");
     // the textures: 8-bit RGBA in rows as it is in memory, else each texel as the CPU's
     // interpreter reads it, which is kept on the GPU under a hash of the memory it reads
     for (const translate::Values::Image* one : unique) {
@@ -1354,6 +1428,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         }
         d.textures.push_back(std::move(tx));
     }
+    part.to("the rest");
     d.width = t.pitch;
     d.height = t.height;
     u32 rows = (t.height + 7) / 8 * 8;  // as the console lays a target out, which a compute shader may write
@@ -1508,6 +1583,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     Timer timer(g_draw_ns);
     Lap lap(ST_SETUP);
     g_draws++;
+    g_page_epoch++;
     u64 vs = program(r, 0x48), ps = program(r, 0x08);
     if (!vs) return "(no vertex shader)";
     // tessellation (a hull shader) or a geometry shader on: the program in the vertex shader's
@@ -2107,6 +2183,7 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     u64 cs = program(r, 0x20c);
     if (!cs) return "(no compute shader)";
     g_dispatches++;
+    g_page_epoch++;
     vkdraw::Doing doing("preparing a dispatch");
     Memory mem;
     mem.snapshot();
@@ -2202,6 +2279,13 @@ std::vector<std::string> draw_report() {
                          double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
                          g_texture_hash_bytes >> 20, u64(g_texture_blocks), double(g_texture_blocks_ns) / 1e9,
                          u64(g_texture_copied), double(g_texture_copy_ns) / 1e9, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
+        if (!g_prepare_ns.empty()) {
+            std::vector<std::pair<u64, std::string>> by;
+            for (auto& [what, ns] : g_prepare_ns) by.push_back({ns, what});
+            std::sort(by.rbegin(), by.rend());
+            t += "\nPreparing the draws for the GPU, by part:\n\n| Part | Seconds |\n|---|---:|\n";
+            for (auto& [ns, what] : by) t += std::format("| {} | {:.2f} |\n", what, double(ns) / 1e9);
+        }
         if (!g_decoded_by.empty()) {
             std::vector<std::pair<std::pair<u64, u64>, std::string>> by;
             for (auto& [what, v] : g_decoded_by) by.push_back({v, what});
@@ -2215,6 +2299,7 @@ std::vector<std::string> draw_report() {
                          "memory changed {:.1f} s ({} MiB hashed), unpacking them {:.1f} s.\n",
                          g_unpacks, g_unpack_hits, g_unpack_clears, double(g_buffer_hash_ns) / 1e9, g_buffer_hash_bytes >> 20,
                          double(g_buffer_miss_ns) / 1e9);
+        t += std::format("The OS asked which pages were written: {} times, {:.1f} s.\n", u64(g_os_asked), double(g_os_ask_ns) / 1e9);
         t += std::format("Memory told changed or not: {} times from the pages the OS saw written (not hashed again), {} times by hashing it.\n",
                          g_stamps_watched, g_stamps_hashed);
         s.push_back(t);

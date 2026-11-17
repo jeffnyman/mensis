@@ -1120,6 +1120,27 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     of them, later runs about 3. `--gpu-check` as before (77 of 80, depth the same), the
     validation layer reporting nothing.
 
+65. **Preparing the draws for the GPU, by part; the OS asked less often which pages were
+    written.** The summary gives the time preparing a draw for the GPU by part (in
+    `prepare_gpu` and `gpu_vertices`, each from one mark to the next), and how often the OS was
+    asked which pages were written, and for how long. In a 300-second run the largest parts
+    were the vertex shaders' buffers (about 20 s) and the textures (about 20 s), and most of
+    the first was not unpacking but telling whether the buffers' memory had changed: the OS
+    (Windows' write watch) was asked about each buffer's pages, some 13 million times at
+    about 1.2 microseconds each. It is now asked about whole 2 MiB pieces, and about each
+    piece at most once in each draw or dispatch (a range in pieces asked about already in
+    it is told from what was found): about 3.5 million times, 12.3 s (one call over the
+    whole heap, tried, took 7.8 milliseconds: far too long to make once a draw). Smaller
+    things a draw did, each time: copying its shaders' GLSL (up to 180 KB) into it, now
+    pointed to where the translation is kept; a string made as each buffer's key, now a
+    small structure; the indices added one by one, the rectangles' geometry shader made
+    anew, the name of a shader's saved GLSL made, each now once. The hashing left is of
+    memory the game writes again and again (a ring of vertex buffers, constants): it does
+    change. In 300 seconds: preparing for the GPU about 62 s (about 72 before), and draws
+    1,646,457 and 1,576,230 in two runs (1,530,785 to 1,553,333 in the last three before).
+    `--gpu-check` as before (77 of 80, depth the same), the validation layer reporting
+    nothing.
+
 ## Files
 
 | Path | |

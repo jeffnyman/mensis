@@ -305,13 +305,15 @@ bool try_reserve(u64 addr, u64 size, bool watched) {
 }
 
 bool written_pages(u64 addr, u64 size, std::vector<u64>& pages) {
+    // (room for every page of it, kept from call to call: only those written are copied out)
+    static thread_local std::vector<void*> room;
     ULONG_PTR count = (size + 0xfff) / 0x1000 + 1;
-    pages.resize(count);
+    if (room.size() < count) room.resize(count);
     ULONG granularity = 0;
-    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, reinterpret_cast<void*>(addr), SIZE_T(size), reinterpret_cast<void**>(pages.data()),
-                      &count, &granularity) != 0)
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, reinterpret_cast<void*>(addr), SIZE_T(size), room.data(), &count, &granularity) != 0)
         return false;
     pages.resize(count);
+    for (ULONG_PTR i = 0; i < count; i++) pages[i] = reinterpret_cast<u64>(room[i]);
     return true;
 }
 
