@@ -123,6 +123,9 @@ bool kept(u64 address, u64 bytes, u32 bpp);
 // as it is); false if it isn't kept there as that size, or has no stencil buffer to clear
 bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil = -1, bool depth = true, u32 x0 = 0, u32 y0 = 0,
                  u32 x1 = ~0u, u32 y1 = ~0u);
+// A depth buffer's fast clear (HTILE) seen to on the GPU, the HTILE buffer and the depth buffer
+// both kept there: filled with the value if every tile is marked cleared. False if it can't be.
+bool clear_depth_by_htile(u64 htile, u64 tiles, u64 address, u32 width, u32 height, float value);
 // If that memory is kept on the GPU, a number that changes whenever anything writes it (a draw,
 // a dispatch, the CPU); else 0
 u64 version(u64 address);

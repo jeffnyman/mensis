@@ -439,6 +439,7 @@ struct Kept {
     u64 regions = 0;  // memory kept on the GPU because a compute shader stored into it
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
     u64 depth_clears = 0;  // depth buffers cleared there
+    u64 htile_checks = 0;  // depth buffers' fast clears seen to there (their HTILE buffers kept there)
     u64 arrays_kept = 0;  // compute shaders' arrays copied from kept memory there
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
     u64 wait_ns = 0, readback_ns = 0, upload_ns = 0;  // waiting for batches; reading targets back; copying uploads
@@ -1825,6 +1826,179 @@ bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil, b
     return true;
 }
 
+// A depth buffer's fast clear seen to on the GPU, its HTILE buffer kept there (a compute
+// shader's store): a compute pass counts the tiles marked cleared, then a pass over the whole
+// depth buffer writes the clear value only if that is all of them (as expand_htile() does on
+// the CPU), with no wait and nothing read back
+bool clear_depth_by_htile(u64 htile, u64 tiles, u64 address, u32 width, u32 height, float value) {
+    std::lock_guard lock(g_lock);
+    struct Inside {
+        Inside() { t_inside = true; }
+        ~Inside() { t_inside = false; }
+    } inside;
+    if (!g.ok || !tiles || tiles > (u64(1) << 26)) return false;
+    auto zt = g_resident.find(address);
+    if (zt == g_resident.end() || !zt->second.depth || zt->second.width != width || zt->second.height != height ||
+        zt->second.state == Resident::memory)
+        return false;
+    Resident& z = zt->second;
+    Resident* h = nullptr;
+    for (auto& [base, r] : g_resident)
+        if (htile >= base && htile + tiles * 4 <= base + r.bytes && (htile - base) % 4 == 0 && r.uints && r.state != Resident::memory &&
+            (r.bpp == 4 || r.bpp == 8 || r.bpp == 16))
+            h = &r;
+    if (!h) return false;
+    std::string why;
+    // the count: each tile a thread, the dword it is (in the image's texel, as uints)
+    std::string cs = std::format(R"(#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer Values {{ uint U[]; }};
+layout(set = 0, binding = 36, {}) uniform readonly uimage2D H;
+void main() {{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= U[2]) return;
+    uint o = U[0] + 4u * i, t = o / U[3], c = (o % U[3]) / 4u;
+    uvec4 v = imageLoad(H, ivec2(int(t % U[1]), int(t / U[1])));
+    uint w = c == 0u ? v.x : c == 1u ? v.y : c == 2u ? v.z : v.w;
+    if ((w & 15u) == 0u) atomicAdd(U[4], 1u);
+}}
+)",
+                                 h->bpp == 16 ? "rgba32ui" : h->bpp == 8 ? "rg32ui" : "r32ui");
+    auto ct = k.compute.find(cs);
+    VkPipeline count = ct == k.compute.end() ? VK_NULL_HANDLE : ct->second;
+    if (!count) {
+        VkShaderModule m = module(cs, shaderc_compute_shader, why);
+        if (!m) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = m;
+        ci.stage.pName = "main";
+        ci.layout = k.layout;
+        if (vkCreateComputePipelines(g.device, VK_NULL_HANDLE, 1, &ci, nullptr, &count) != VK_SUCCESS) return false;
+        k.compute[cs] = count;
+    }
+    // the fill: a triangle over the whole buffer, its depth the clear value, or nothing
+    std::string key = std::format("htile:{}", z.format);
+    auto pt = k.pipelines.find(key);
+    VkPipeline fill = pt == k.pipelines.end() ? VK_NULL_HANDLE : pt->second;
+    if (!fill) {
+        VkShaderModule vsm = module(R"(#version 450
+void main() { gl_Position = vec4(vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0 - 1.0, 0.0, 1.0); }
+)",
+                                    shaderc_vertex_shader, why);
+        VkShaderModule psm = module(R"(#version 450
+layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };
+void main() {
+    if (U[4] != U[2]) discard;
+    gl_FragDepth = uintBitsToFloat(U[5]);
+}
+)",
+                                    shaderc_fragment_shader, why);
+        if (!vsm || !psm) return false;
+        VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
+                                                     {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT, stages[0].module = vsm, stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT, stages[1].module = psm, stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = 1;
+        vp.scissorCount = 1;
+        VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        ds.dynamicStateCount = 2;
+        ds.pDynamicStates = dyn;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.lineWidth = 1;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        ri.depthAttachmentFormat = VkFormat(z.format);
+        VkPipelineDepthStencilStateCreateInfo dsi{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        dsi.depthTestEnable = VK_TRUE;
+        dsi.depthWriteEnable = VK_TRUE;
+        dsi.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+        VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        gi.pNext = &ri;
+        gi.stageCount = 2;
+        gi.pStages = stages;
+        gi.pVertexInputState = &vi;
+        gi.pInputAssemblyState = &ia;
+        gi.pViewportState = &vp;
+        gi.pRasterizationState = &rs;
+        gi.pMultisampleState = &ms;
+        gi.pColorBlendState = &bs;
+        gi.pDepthStencilState = &dsi;
+        gi.pDynamicState = &ds;
+        gi.layout = k.layout;
+        if (vkCreateGraphicsPipelines(g.device, VK_NULL_HANDLE, 1, &gi, nullptr, &fill) != VK_SUCCESS) return false;
+        k.pipelines[key] = fill;
+    }
+    // U: where the tiles start in the image (bytes), its width, the tiles, its texel's bytes,
+    // the count, the clear value
+    u32 values[8] = {u32(htile - h->base), h->width, u32(tiles), h->bpp, 0, 0, 0, 0};
+    std::memcpy(&values[5], &value, 4);
+    VkDeviceSize base;
+    VkDescriptorSet set;
+    if (!reserve_batch(sizeof values, base, set, why)) return false;
+    std::memcpy(k.upload.p + base, values, sizeof values);
+    VkDescriptorBufferInfo bi{k.upload.buffer, base, sizeof values};
+    VkDescriptorImageInfo ii{VK_NULL_HANDLE, h->uints, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    w[0].dstSet = set, w[0].dstBinding = 0, w[0].descriptorCount = 1, w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, w[0].pBufferInfo = &bi;
+    w[1].dstSet = set, w[1].dstBinding = 36, w[1].descriptorCount = 1, w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, w[1].pImageInfo = &ii;
+    vkUpdateDescriptorSets(g.device, 2, w, 0, nullptr);
+    VkCommandBuffer cmd = batch();
+    const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT, C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               X = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, F = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier(cmd, h->image.image, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, C | T, X);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, count);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, k.layout, 0, 1, &set, 0, nullptr);
+    vkCmdDispatch(cmd, u32((tiles + 63) / 64), 1, 1);
+    barrier(cmd, h->image.image, 1, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, RW, X, C);
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, X, F, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    const VkPipelineStageFlags Z = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    const VkAccessFlags ZRW = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    const VkImageLayout ZL = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    barrier(cmd, z.image.image, 1, ZL, ZL, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            ZRW, Z | T, Z, aspect(z));
+    VkRenderingAttachmentInfo zatt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    zatt.imageView = z.image.view;
+    zatt.imageLayout = ZL;
+    zatt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    zatt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo rinfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    rinfo.renderArea = {{0, 0}, {width, height}};
+    rinfo.layerCount = 1;
+    rinfo.pDepthAttachment = &zatt;
+    vkCmdBeginRendering(cmd, &rinfo);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fill);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, k.layout, 0, 1, &set, 0, nullptr);
+    VkViewport viewport{0, 0, float(width), float(height), 0, 1};
+    VkRect2D scissor{{0, 0}, {width, height}};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    if (z.state != Resident::gpu) {  // the image is (or may be) now the newer
+        guard(z, 0);
+        z.state = Resident::gpu;
+    }
+    k.htile_checks++;
+    written(z);
+    return true;
+}
+
 u64 version(u64 address) {
     std::lock_guard lock(g_lock);
     for (auto& [base, r] : g_resident)
@@ -1927,7 +2101,8 @@ std::string report() {
            (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s ({} of their arrays copied there from kept memory)", k.dispatches,
                                        double(k.dispatch_ns) / 1e9, k.arrays_kept) : "") +
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
-                       "Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes, k.batches) +
+                       "Depth buffers' fast clears seen to there: {}. Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes,
+                       k.htile_checks, k.batches) +
            std::format(". Of the time: {:.1f} s submitting batches and waiting for them, {:.1f} s reading targets back into "
                        "memory (waits included), {:.1f} s copying draws' data to upload ({} MiB of textures)",
                        double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20) +
@@ -1947,6 +2122,7 @@ bool barycentric() { return false; }
 bool flush() { return true; }
 bool kept(u64, u64, u32) { return false; }
 bool clear_depth(u64, u32, u32, float, int, bool, u32, u32, u32, u32) { return false; }
+bool clear_depth_by_htile(u64, u64, u64, u32, u32, float) { return false; }
 u64 version(u64) { return 0; }
 bool touched(u64, bool, u64) { return false; }
 bool dispatch(Dispatch&, std::string& why) {

@@ -970,6 +970,18 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     the loader got through a third of the draws. The work to do is in what reads the
     GPU's memory on the CPU (draws' vertex and index buffers, dispatches the CPU runs),
     not in sending more to the GPU.
+56. **Depth buffers' fast clears seen to on the GPU.** Labelling the parts of a draw's
+    setting up showed what read back the most: not the index or vertex buffers, but the
+    HTILE buffer of a depth buffer, which a compute shader marks cleared each frame on the
+    GPU, and which the loader read on the CPU to see whether every tile was cleared (one
+    48 KiB buffer, 2,516 times in 300 seconds, plus two smaller ones). When the HTILE buffer
+    and the depth buffer are both kept on the GPU, a compute pass there now counts the
+    tiles marked cleared, and a pass over the whole depth buffer writes the clear value
+    only if that is all of them, the same rule as on the CPU, with nothing read back.
+    Into the first scene in 300 seconds: 3,016 seen to there; the read-backs fell from
+    9,828 to 7,222, but the time spent reading back did not (31.9 s, from 30.9: those
+    buffers were small, and the large targets still come back), and the draws (327,283)
+    are within a run's spread. Validation is clean, and `--gpu-check` is as before.
 
 ## Files
 

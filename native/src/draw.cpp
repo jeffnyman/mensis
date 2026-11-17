@@ -376,6 +376,11 @@ void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
     u64& seen = g_htile_seen[h ^ db.base];
     if (seen == stamp) return;
     seen = stamp;
+    float clear = regf(r, 0x00b, 1);
+    // both kept on the GPU: seen to there, rather than the HTILE buffer read back
+    if (v && vkdraw::clear_depth_by_htile(h, tiles, db.base, db.pitch, db.height, clear)) {
+        return;
+    }
     const auto* w = reinterpret_cast<const u32*>(h);
     u64 cleared = 0;
     for (u64 i = 0; i < tiles; i++) cleared += (w[i] & 15) == 0;
@@ -384,7 +389,6 @@ void expand_htile(const GpuRegs& r, const Memory& mem, const DepthBuffer& db) {
         note("depth buffers partly cleared (HTILE): not cleared");
         return;
     }
-    float clear = regf(r, 0x00b, 1);
     u64 n = u64(db.pitch) * db.height;
     if (M.gpu && vkdraw::clear_depth(db.base, db.pitch, db.height, clear)) {  // kept on the GPU: cleared there
     } else if (db.format == 3) {
