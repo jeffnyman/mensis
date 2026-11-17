@@ -771,6 +771,7 @@ VkCommandBuffer batch() {
 // The batch to the GPU, and waited for; then what it used is free again
 // Why batches went, and the targets read back (by why, and what touched them), counted
 std::map<std::string, u64> g_batch_why, g_readback_why;
+std::map<std::string, std::pair<u64, u64>> g_readback_ns;  // and by why alone: how many, and the time they took (waits included)
 bool flush_batch(const char* why = "other") {
     if (!g_recording) return true;
     g_batch_why[why]++;
@@ -825,9 +826,15 @@ bool read_back(Resident& r, const std::string& why) {
     auto t0 = std::chrono::steady_clock::now();
     struct Done {
         std::chrono::steady_clock::time_point t0;
-        ~Done() { k.readback_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); }
+        std::pair<u64, u64>* by = nullptr;
+        ~Done() {
+            u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            k.readback_ns += ns;
+            if (by) by->first++, by->second += ns;
+        }
     } done{t0};
     if (r.state != Resident::gpu) return true;
+    done.by = &g_readback_ns[why];
     VkDeviceSize sbytes = r.sbase ? VkDeviceSize(r.width) * r.height : 0, sat = (r.bytes + 255) & ~VkDeviceSize(255);
     g_readback_why[std::format("{} ({}x{} at {:#x})", why, r.width, r.height, r.base)]++;
     if (!flush_batch("a target to read back") || !k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
@@ -1103,6 +1110,10 @@ bool draw(Draw& d, std::string& why) {
     // the depth buffer, if it goes up: always a copy's; kept memory's if the memory is the newer
     VkDeviceSize zbytes = VkDeviceSize(d.depth.width) * d.depth.height * d.depth.bpp;
     bool zupload = d.depth.format && (!kept || (zres && zres->state == Resident::memory));
+    // --gpu-check's: the depth written, back too
+    bool zback = !kept && d.depth.format && d.depth.write && d.depth.result;
+    VkDeviceSize at_zback = back_bytes;
+    if (zback) back_bytes = (back_bytes + zbytes + 255) & ~VkDeviceSize(255);
     VkDeviceSize at_depth = place(zupload ? zbytes : 0);
     VkDeviceSize sbytes = d.depth.stencil ? VkDeviceSize(d.depth.width) * d.depth.height : 0, at_stencil = place(zupload ? sbytes : 0);
     VkDeviceSize at_values = place(d.values.size() * 4);
@@ -1347,6 +1358,7 @@ bool draw(Draw& d, std::string& why) {
     }
     VkRenderingAttachmentInfo zatt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     u32 area_w = d.width, area_h = d.height;
+    VkImage zimage = VK_NULL_HANDLE;
     if (d.depth.format) {
         GpuImage* zi = nullptr;
         if (kept) {
@@ -1354,7 +1366,8 @@ bool draw(Draw& d, std::string& why) {
         } else {  // --gpu-check's copy
             zi = &k.targets[{d.depth.format, d.depth.width, d.depth.height, 100}];
             if (!zi->image && !make_image(*zi, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(d.depth.format), d.depth.width, d.depth.height,
-                                          1, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+                                          1, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
                 why = "out of GPU memory";
                 return false;
             }
@@ -1380,6 +1393,7 @@ bool draw(Draw& d, std::string& why) {
         } else {  // as the last draw or readback left it
             barrier(cmd, zi->image, 1, ZL, ZL, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, ZRW, Z | T, Z, ZA);
         }
+        zimage = zi->image;
         zatt.imageView = zi->view;
         zatt.imageLayout = ZL;
         zatt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -1423,6 +1437,17 @@ bool draw(Draw& d, std::string& why) {
             copy.imageExtent = {d.width, d.height, 1};
             vkCmdCopyImageToBuffer(cmd, target[i]->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
         }
+        if (zback) {
+            barrier(cmd, zimage, 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, T,
+                    d.depth.stencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT);
+            VkBufferImageCopy copy{};
+            copy.bufferOffset = at_zback;
+            copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            copy.imageExtent = {d.depth.width, d.depth.height, 1};
+            vkCmdCopyImageToBuffer(cmd, zimage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.readback.buffer, 1, &copy);
+        }
         VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -1437,6 +1462,7 @@ bool draw(Draw& d, std::string& why) {
         why = "the GPU didn't finish the draw";
         return false;
     }
+    if (zback) std::memcpy(d.depth.result, k.readback.p + at_zback, zbytes);
     if (zres) {
         bool swrites = d.depth.stencil_test && (d.depth.front.wmask || d.depth.back.wmask);
         Resident::State s = d.depth.write || swrites ? Resident::gpu : zupload ? Resident::same : zres->state;
@@ -2090,6 +2116,17 @@ std::string tally(const char* head, const std::map<std::string, u64>& m) {
     return t;
 }
 
+// The read-backs by why, the most time first
+std::string readback_time() {
+    std::vector<std::pair<u64, std::string>> by;
+    for (auto& [what, e] : g_readback_ns) by.push_back({e.second, what});
+    std::sort(by.rbegin(), by.rend());
+    std::string t = "\nThe time reading back, by why:\n\n| Why | Times | Seconds |\n|---|---:|---:|\n";
+    for (size_t i = 0; i < by.size() && i < 25; i++)
+        t += std::format("| {} | {} | {:.2f} |\n", by[i].second, g_readback_ns[by[i].second].first, double(by[i].first) / 1e9);
+    return t;
+}
+
 std::string report() {
     std::lock_guard lock(g_lock);
     if (!k.draws) return {};
@@ -2107,7 +2144,7 @@ std::string report() {
                        "memory (waits included), {:.1f} s copying draws' data to upload ({} MiB of textures)",
                        double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20) +
            tally(".\n\nWhy batches went to the GPU:\n\n| Why | Times |\n|---|---:|\n", g_batch_why) +
-           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why);
+           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why) + readback_time();
 }
 
 }  // namespace mensis::vkdraw

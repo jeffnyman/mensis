@@ -23,7 +23,9 @@
 // depth buffer is 32-bit floats or 16-bit unorm, in rows, as the loader keeps targets.
 //
 // A triangle reaching past the guard band, or behind the eye, is clipped first, as the hardware
-// does. Not done yet: depth exported by a shader, multisampling, mip levels past the first.
+// does. A pixel shader may give its own depth (DB_SHADER_CONTROL's Z_EXPORT_ENABLE, mrtz's x):
+// then it is tested once the shader has run. Not done yet: multisampling, mip levels past the
+// first.
 //
 // Where there is Vulkan (the Windows build, unless --cpu), each draw whose pixel shader can be
 // translated (translate.cpp) is drawn on the PC's GPU instead (vkdraw.cpp), into its render
@@ -469,9 +471,15 @@ struct PsIo : Io {
     u64 cover = 0;
     u64 written = 0;
     u64 exported = 0;  // lanes that exported anything (to any target, null included): not killed
+    // the depth the shader exported (mrtz's x), if DB_SHADER_CONTROL's Z_EXPORT_ENABLE is on,
+    // and which lanes did
+    bool z_export = false;
+    u32 zexp[LANES] = {};
+    u64 zset = 0;
     PsIo(const GpuRegs& r_, const Memory& m, const Vertices& v, const Target* t)
         : r(r_), mem(m), vs(v), targets(t) {
         col_format = reg(r, 0x1c5, 0);
+        z_export = reg(r, 0x203, 0) & 1;
         for (int c = 0; c < 4; c++) blend_color[c] = regf(r, 0x105 + u32(c), 0);
     }
 
@@ -531,6 +539,11 @@ struct PsIo : Io {
 
     void exp(u32 target, const Vec* const regs[4], bool compr, u64 lanes) override {
         exported |= lanes;
+        if (target == 8 && z_export && regs[0] && !compr) {
+            for (int l = 0; l < LANES; l++)
+                if ((lanes >> l) & 1) zexp[l] = (*regs[0])[size_t(l)];
+            zset |= lanes;
+        }
         if (target > 7) return;  // mrtz (depth), null
         const Target& t = targets[target];
         if (!t.count) return;
@@ -695,7 +708,7 @@ void save_target(u64 number, const Target& t, u32 width, u32 height, const Memor
 // ---- --gpu-check: the draw on the PC's GPU too ----
 
 std::map<u64, translate::Program> g_programs;  // decoded once each; under g_draw_lock
-u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0;
+u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0, g_check_depth_differ = 0;
 std::map<std::string, u64> g_check_skipped;
 u64 g_gpu_draws = 0, g_gpu_vertices = 0;  // drawn on the GPU
 std::map<std::string, u64> g_gpu_skipped;
@@ -1016,6 +1029,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     st.addr = addr;
     for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
     st.col_format = reg(r, 0x1c5, 0);
+    st.db_shader = reg(r, 0x203, 0);  // DB_SHADER_CONTROL
     st.barycentric = vkdraw::barycentric();
     st.targets = 0;
     for (u32 k = 0; k < 8; k++) {
@@ -1395,6 +1409,41 @@ std::string compare(u64 number, const vkdraw::Draw& d, const std::vector<std::ve
                        targets_text, most, changed);
 }
 
+// --gpu-check's depth: the GPU's against the CPU's (in memory), each pixel's depth within a
+// 16-bit step (1 in 65535)
+std::string compare_depth(const vkdraw::Draw& d, u64 cpu, const std::vector<unsigned char>& before, const std::vector<unsigned char>& gpu,
+                          const int clip[4]) {
+    u64 n = 0, differ = 0, changed = 0;
+    double most = 0;
+    u32 bpp = d.depth.bpp;
+    for (int y = clip[1]; y < clip[3] && u32(y) < d.depth.height; y++)
+        for (int x = clip[0]; x < clip[2] && u32(x) < d.depth.width; x++) {
+            size_t at = (size_t(y) * d.depth.width + size_t(x)) * bpp;
+            const auto* c = reinterpret_cast<const unsigned char*>(cpu) + at;
+            double a, b;
+            if (bpp == 2) {
+                std::uint16_t ca, gb;
+                std::memcpy(&ca, c, 2);
+                std::memcpy(&gb, &gpu[at], 2);
+                a = ca / 65535.0, b = gb / 65535.0;
+            } else {
+                float ca, gb;
+                std::memcpy(&ca, c, 4);
+                std::memcpy(&gb, &gpu[at], 4);
+                a = ca, b = gb;
+            }
+            double m = std::abs(a - b);
+            n++;
+            differ += m > 1.0 / 65535;
+            changed += std::memcmp(&before[at], &gpu[at], bpp) != 0;
+            most = std::max(most, m);
+        }
+    if (!differ) return std::format("; its depth the same in all {} pixels ({} of them changed by the draw)", n, changed);
+    g_check_depth_differ++;
+    return std::format("; its depth: {} of {} pixels differ by more than 1 in 65535 (by {:.6f} at most; {} changed by the draw)", differ, n,
+                       most, changed);
+}
+
 // The triangles a primitive type makes of n vertices
 std::vector<std::array<size_t, 3>> assemble(u32 type, size_t n, bool& rects, bool& known) {
     std::vector<std::array<size_t, 3>> t;
@@ -1501,7 +1550,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     vkdraw::Draw check;
     std::string check_why, vertex_why;
     std::vector<std::vector<unsigned char>> before, result;  // each target's
-    std::vector<unsigned char> zbefore, sbefore;  // the depth buffer's, the stencil buffer's
+    std::vector<unsigned char> zbefore, sbefore, zresult;  // the depth buffer's, the stencil buffer's; the GPU's depth
     bool checked = false;
     // the draws saved to draws/: their number and a line in the index, once drawn
     auto saved = [&](std::string what, const std::string& extra) {
@@ -1516,6 +1565,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 if (e.path().extension() == ".bmp") std::filesystem::remove(e.path());
         if (checked) {
             what += "; " + compare(number, check, before, result, targets, area);
+            if (!zresult.empty()) what += compare_depth(check, db.base, zbefore, zresult, area);
             what += vertex_why.empty() ? ", vertices too" : "; vertices from the CPU: " + vertex_why;
         } else if (M.gpu_check) {
             what += "; not on the GPU: " + check_why;
@@ -1693,6 +1743,10 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 const auto* z = reinterpret_cast<const unsigned char*>(check.depth.address);
                 zbefore.assign(z, z + size_t(check.depth.width) * check.depth.height * check.depth.bpp);
                 check.depth.target = zbefore.data();
+                if (check.depth.write) {
+                    zresult.resize(zbefore.size());
+                    check.depth.result = zresult.data();
+                }
                 check.depth.address = 0;
                 if (check.depth.stencil) {
                     const auto* s = reinterpret_cast<const unsigned char*>(check.depth.saddress);
@@ -1735,6 +1789,8 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         if (by0 >= by1) return;
         Wave w;
         PsIo io(r, mem, out, targets);
+        if (io.z_export && db.test && !masked && mode == 1)
+            note("depth exported by a pixel shader that writes colour too (the colour not held back by the depth test, on the CPU)");
         int lanes = 0;
         auto flush = [&](const Tri& t) {
             if (!lanes) return;
@@ -1774,17 +1830,19 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
             u32 zbits[LANES];
             int outcome[LANES] = {};  // 0 passed, 1 failed the depth test, 2 the stencil test
             u64 covered = io.cover;
+            auto z_at = [&](int l) {  // the triangle's depth at the pixel
+                float cx = float(io.px[l]) + 0.5f, cy = float(io.py[l]) + 0.5f;
+                float a = ((t.x[2] - t.x[1]) * (cy - t.y[1]) - (t.y[2] - t.y[1]) * (cx - t.x[1])) / t.area;
+                float b = ((t.x[0] - t.x[2]) * (cy - t.y[2]) - (t.y[0] - t.y[2]) * (cx - t.x[2])) / t.area;
+                return a * t.z[0] + b * t.z[1] + (1 - a - b) * t.z[2];
+            };
+            // the shader's own depth: tested once it has run (colour isn't held back for it)
+            bool late = io.z_export && db.test;
             if (db.any()) {
                 for (int l = 0; l < LANES; l++) {
                     if (!((covered >> l) & 1)) continue;
                     bool zpass = true;
-                    if (db.test) {
-                        float cx = float(io.px[l]) + 0.5f, cy = float(io.py[l]) + 0.5f;
-                        float a = ((t.x[2] - t.x[1]) * (cy - t.y[1]) - (t.y[2] - t.y[1]) * (cx - t.x[1])) / t.area;
-                        float b = ((t.x[0] - t.x[2]) * (cy - t.y[2]) - (t.y[0] - t.y[2]) * (cx - t.x[2])) / t.area;
-                        float z = std::clamp(a * t.z[0] + b * t.z[1] + (1 - a - b) * t.z[2], db.zmin, db.zmax);
-                        zpass = db.pass(z, io.px[l], io.py[l], zbits[l]);
-                    }
+                    if (db.test && !late) zpass = db.pass(std::clamp(z_at(l), db.zmin, db.zmax), io.px[l], io.py[l], zbits[l]);
                     bool spass = !db.stencil || db.stencil_pass(io.px[l], io.py[l], t.front);
                     outcome[l] = !spass ? 2 : !zpass ? 1 : 0;
                     if (outcome[l]) io.cover &= ~(1ull << l);
@@ -1800,8 +1858,15 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
             w.set_exec(covered);  // every pixel covered runs (whether it is killed decides the stencil's operation)
             io.tri = &t;
             io.exported = 0;
+            io.zset = 0;
             if (ps) run(w, ps, io, mem);
             else io.exported = covered;  // no shader: nothing killed, no colour
+            if (late)
+                for (int l = 0; l < LANES; l++) {
+                    if (!((io.exported & covered) >> l & 1) || outcome[l] == 2) continue;
+                    float z = (io.zset >> l) & 1 ? f(io.zexp[l]) : z_at(l);
+                    outcome[l] = db.pass(std::clamp(z, db.zmin, db.zmax), io.px[l], io.py[l], zbits[l]) ? 0 : 1;
+                }
             if (db.any())
                 for (int l = 0; l < LANES; l++) {
                     if (!((io.exported & covered) >> l & 1)) continue;
@@ -2131,8 +2196,8 @@ std::vector<std::string> draw_report() {
         std::string where = vkdraw::device();
         s.push_back(std::format("GPU check (`--gpu-check`){}: of the draws saved to draws/, {} were drawn on the GPU as well, "
                                 "{} of them the same as the CPU's in every pixel (to 1 in 255), and {} with their vertex "
-                                "shaders on the GPU too; see draws/index.txt.\n",
-                                where.empty() ? "" : ", " + where, g_checked, g_check_same, g_check_gpu_vertices));
+                                "shaders on the GPU too; of those that write depth, {} with depth differing; see draws/index.txt.\n",
+                                where.empty() ? "" : ", " + where, g_checked, g_check_same, g_check_gpu_vertices, g_check_depth_differ));
         if (!g_check_skipped.empty()) {
             s.insert(s.end(), {"Not drawn on the GPU:\n", "| Why | Draws |", "|---|---:|"});
             for (auto& [why, count] : g_check_skipped) s.push_back(std::format("| {} | {} |", why, count));

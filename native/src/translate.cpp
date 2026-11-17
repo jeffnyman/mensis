@@ -557,7 +557,8 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
 }
 
 std::string PsState::key() const {
-    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}:{:x}:{:x}", user_count, ena, addr, col_format, barycentric, add_tid, targets);
+    std::string k = std::format("{}:{:x}:{:x}:{:x}:{}:{:x}:{:x}:{:x}", user_count, ena, addr, col_format, barycentric, add_tid, targets,
+                                db_shader & 0x107);
     for (u32 c : input_cntl) k += std::format(":{:x}", c);
     for (size_t i = 0; i < image_types.size(); i++) k += std::format(":t{}{}", image_types[i], unnormalized[i] ? "u" : "");
     for (u32 c : compare) k += std::format(":c{:x}", c);
@@ -615,6 +616,7 @@ struct Writer {
     u32 buffers = 0;  // the buffers they read (fewer, if loads share them)
     std::vector<u32> image_loads, array_loads;  // a compute shader's loads: of kept memory, and of unpacked elements
     std::set<u32> raw_loads;  // which of the arrays are memory as it is
+    bool depth_out = false;  // a pixel shader's: it exports the pixel's depth
 
     // A store's value as the uvec4 written to a uint image (its texel the element as in
     // memory), from its components' registers, as the CPU's interpreter packs them
@@ -1468,12 +1470,27 @@ void Writer::export_op(const Inst& in) {
         line("if (exec_lo != 0u) exported = true;");
         return;
     }
-    if (target == 9) {  // null: the pixel done, nothing written (a pass for depth alone)
-        line("if (exec_lo != 0u) exported = true;");
+    if (target == 8) {  // mrtz: the depth (x), if DB_SHADER_CONTROL says so, else ignored
+        if (st.db_shader & 0x106) {
+            fail("stencil or coverage export");
+            return;
+        }
+        if (!(st.db_shader & 1) || !(en & 1)) {
+            line("if (exec_lo != 0u) exported = true;");
+            return;
+        }
+        if (compr) {
+            fail("compressed depth export");
+            return;
+        }
+        u32 r = w1 & 0xff;
+        vgprs.insert(r);
+        depth_out = true;
+        line(std::format("if (exec_lo != 0u) {{ gl_FragDepth = uintBitsToFloat(v{}); exported = true; }}", r));
         return;
     }
     if (target > 7) {
-        fail(target == 8 ? "depth export" : std::format("export to {}", target));
+        fail(std::format("export to {}", target));
         return;
     }
     u32 cf = (st.col_format >> (4 * target)) & 15;
@@ -1855,6 +1872,7 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
         }
     }
     s += registers(w, st.user_count, "gl_HelperInvocation ? 0u : 0xffffffffu", init);
+    if (w.depth_out) s += "    gl_FragDepth = gl_FragCoord.z;\n";  // (written on every path)
     s += w.body;
     s += "    if (!exported) discard;\n}\n";
     if (st.barycentric) s.insert(s.find('\n') + 1, "#extension GL_EXT_fragment_shader_barycentric : require\n");

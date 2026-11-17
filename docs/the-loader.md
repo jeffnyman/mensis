@@ -982,6 +982,22 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     9,828 to 7,222, but the time spent reading back did not (31.9 s, from 30.9: those
     buffers were small, and the large targets still come back), and the draws (327,283)
     are within a run's spread. Validation is clean, and `--gpu-check` is as before.
+57. **Depth exported by a pixel shader.** The read-backs are now timed by why, and the
+    summary lists them, the most time first. Into the first scene in 300 seconds, 772
+    read-backs for draws whose pixels were done on the CPU took 24.9 of the 32 seconds;
+    the dispatches the CPU runs took 4.1 (5,194 read-backs, but small ones). Of the CPU's
+    draws, nearly all the time was one pixel shader's: a depth downsample, the least of
+    four depth samples given as the pixel's depth (`exp mrtz`), a depth buffer of
+    16384x183 read back for each. With DB_SHADER_CONTROL's Z_EXPORT_ENABLE on, the
+    translation now writes that value to `gl_FragDepth`; the CPU, which used to ignore it
+    and test the triangle's depth, now tests the shader's depth once the shader has run
+    (colour is not held back by that test on the CPU: a note says so, should a shader
+    export both). `--gpu-check` now compares depth too, for draws that write it: the
+    GPU's depth read back against the CPU's, each pixel within 1 in 65535. In 300
+    seconds, the time reading back went from 32.3 s to 7.7, the pixels on the CPU from
+    29.3 s to 2.8, and the draws from 319,781 to 343,678 (a little past a run's spread).
+    In-game `--gpu-check`: 77 of 80 the same (75 of 78 before; the two new are this
+    shader's), their depth the same in every pixel; validation is clean.
 
 ## Files
 

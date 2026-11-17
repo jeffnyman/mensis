@@ -77,6 +77,7 @@ struct Draw {
         u32 format = 0, bpp = 4, width = 0, height = 0;
         u64 address = 0;
         const unsigned char* target = nullptr;
+        unsigned char* result = nullptr;  // --gpu-check's: the depth after the draw, if it writes it
         bool test = true, write = false;
         u32 func = 7;
         // with stencil (format D32_SFLOAT_S8_UINT): its 8 bits a pixel at saddress (or, for

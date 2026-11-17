@@ -75,6 +75,9 @@ struct PsState {
     // same at all three corners comes out exactly that (else as the GPU interpolates)
     bool barycentric = false;
     u32 targets = 0xff;  // the render targets drawn into: an export to another goes nowhere
+    // DB_SHADER_CONTROL: bit 0 on, the depth exported (mrtz's x) is the pixel's depth; an
+    // export of stencil values or a coverage mask (bits 1, 2, 8) isn't done
+    u32 db_shader = 0;
     std::string key() const;  // all of it, for a translation kept to be used again
 };
 
