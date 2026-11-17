@@ -1141,6 +1141,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     `--gpu-check` as before (77 of 80, depth the same), the validation layer reporting
     nothing.
 
+66. **A draw's indices read at once.** Setting a draw up is now timed by part too (the
+    summary's "Setting the draws up, by part"). Nearly all of it (39.5 of 41.5 seconds in a
+    300-second run) was reading the indices and putting the triangles together: each index
+    was read alone, its memory checked and copied by a copy of a size not known until then.
+    Now an index buffer that is all in memory is checked once and read at once (32-bit
+    indices copied as they are, 16-bit ones in one loop), and the triangles' list has its
+    room made first. Setting up took 13.1 and 14.0 seconds in two runs (about 41 before:
+    the indices 2.3 to 2.5 s, the triangles 8.7 to 9.3). The draws, though, were 1,512,952
+    and 1,636,960, about as before: the time saved went to other stages in those runs (the
+    vertex shaders of the draws done on the CPU took 42 seconds, 31 before), the draws and
+    dispatches together taking about as long as before (about 206 seconds of the 300).
+    `--gpu-check` as before (77 of 80, depth the same), the validation layer reporting
+    nothing.
+
 ## Files
 
 | Path | |

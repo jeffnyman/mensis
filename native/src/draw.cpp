@@ -931,14 +931,16 @@ std::unordered_map<std::string, translate::Glsl> g_glsl;
 
 // The CPU's time preparing a draw for the GPU, by part (each from its mark to the next; a
 // part named null isn't counted: another's parts are, below it)
-std::map<std::string, u64> g_prepare_ns;
+// (and setting a draw up, the same way)
+std::map<std::string, u64> g_prepare_ns, g_setup_ns;
 struct PrepareParts {
     const char* what;
+    std::map<std::string, u64>& into;
     std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
-    explicit PrepareParts(const char* w) : what(w) {}
+    explicit PrepareParts(const char* w, std::map<std::string, u64>& m = g_prepare_ns) : what(w), into(m) {}
     void to(const char* w) {
         auto now = std::chrono::steady_clock::now();
-        if (what) g_prepare_ns[what] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count());
+        if (what) into[what] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count());
         what = w, t = now;
     }
     ~PrepareParts() { to(nullptr); }
@@ -1559,6 +1561,7 @@ std::string compare_depth(const vkdraw::Draw& d, u64 cpu, const std::vector<unsi
 // The triangles a primitive type makes of n vertices
 std::vector<std::array<size_t, 3>> assemble(u32 type, size_t n, bool& rects, bool& known) {
     std::vector<std::array<size_t, 3>> t;
+    t.reserve(type == 5 || type == 6 ? n : type == 0x13 ? n / 2 : n / 3);
     rects = false;
     known = true;
     switch (type) {
@@ -1584,6 +1587,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     Lap lap(ST_SETUP);
     g_draws++;
     g_page_epoch++;
+    PrepareParts part("the shaders found, the stages", g_setup_ns);
     u64 vs = program(r, 0x48), ps = program(r, 0x08);
     if (!vs) return "(no vertex shader)";
     // tessellation (a hull shader) or a geometry shader on: the program in the vertex shader's
@@ -1594,23 +1598,35 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
         note(std::format("draws with {}", what));
         return std::format("({}: not drawn)", what);
     }
+    part.to("the memory's snapshot");
     Memory mem;
     mem.snapshot();
+    part.to("a clear by a draw, seen to");
     if (std::string c = clear_by_draw(r, mem); !c.empty()) return c;
+    part.to("the indices read");
     u32 type = r.uc[0x242];
     bool rects, known;
     // the vertices: through the index buffer, or numbered
     std::vector<u32> index(count);
-    for (u32 i = 0; i < count; i++) {
-        if (!indices) {
-            index[i] = i;
+    u64 from = indices + u64(first) * r.index_size;
+    if (!indices) {
+        for (u32 i = 0; i < count; i++) index[i] = i;
+    } else if ((r.index_size == 2 || r.index_size == 4) && mem.ok(from, u64(count) * r.index_size)) {  // all there: read at once
+        if (r.index_size == 4) {
+            std::memcpy(index.data(), reinterpret_cast<const void*>(from), size_t(count) * 4);
         } else {
+            const auto* p = reinterpret_cast<const std::uint16_t*>(from);
+            for (u32 i = 0; i < count; i++) index[i] = p[i];
+        }
+    } else {
+        for (u32 i = 0; i < count; i++) {
             u64 at = indices + u64(first + i) * r.index_size;
             u32 v = 0;
             if (mem.ok(at, r.index_size)) std::memcpy(&v, reinterpret_cast<const void*>(at), r.index_size);
             index[i] = v;
         }
     }
+    part.to("the triangles assembled");
     auto tris_in = assemble(type, count, rects, known);
     if (!known) {
         note(std::format("primitive type {:#x}", type));
@@ -1618,6 +1634,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     }
     // (no pixel shader: no colour, but depth and stencil as for any other draw)
     // the targets, and the viewport and scissor
+    part.to("the targets");
     Target targets[8];
     bool any = false;
     for (u32 k = 0; k < 8; k++) {
@@ -1628,10 +1645,13 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     u32 mode = (reg(r, 0x202, 0xcc0010) >> 4) & 7;
     bool masked = true;  // every channel of every target masked off (a pass for depth alone)
     for (auto& t : targets) masked = masked && (!t.count || !t.mask);
+    part.to("the depth buffer");
     DepthBuffer db = depth_buffer(r, mem);
     if ((!any || mode == 0 || masked) && !db.write && !db.stencil_writes())
         return std::format("{} vertices (no colour, depth or stencil written)", count);
+    part.to("the depth buffer's fast clear (HTILE)");
     expand_htile(r, mem, db);
+    part.to("the rest (scissors, what is saved)");
     if (mode == 0)  // colour off: depth alone
         for (auto& t : targets) t.count = 0;
     if (mode != 1 && mode != 0) {
@@ -1694,6 +1714,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     // Drawn on the GPU, vertices and all, if it can be (and it isn't a draw --gpu-check
     // compares): then the CPU's vertex shader isn't needed. If only the vertex shader can't
     // be, the CPU runs it, and the GPU is given its vertices (below).
+    part.to(nullptr);  // (set up)
     bool gpu_failed = false;  // for another reason: not tried again
     std::string vertices_why = !M.gpu ? "" : save && M.gpu_check ? "--gpu-check's draws" : "";
     if (M.gpu && !(save && M.gpu_check) && x0 < x1 && y0 < y1) {
@@ -2284,6 +2305,13 @@ std::vector<std::string> draw_report() {
             for (auto& [what, ns] : g_prepare_ns) by.push_back({ns, what});
             std::sort(by.rbegin(), by.rend());
             t += "\nPreparing the draws for the GPU, by part:\n\n| Part | Seconds |\n|---|---:|\n";
+            for (auto& [ns, what] : by) t += std::format("| {} | {:.2f} |\n", what, double(ns) / 1e9);
+        }
+        if (!g_setup_ns.empty()) {
+            std::vector<std::pair<u64, std::string>> by;
+            for (auto& [what, ns] : g_setup_ns) by.push_back({ns, what});
+            std::sort(by.rbegin(), by.rend());
+            t += "\nSetting the draws up, by part:\n\n| Part | Seconds |\n|---|---:|\n";
             for (auto& [ns, what] : by) t += std::format("| {} | {:.2f} |\n", what, double(ns) / 1e9);
         }
         if (!g_decoded_by.empty()) {
