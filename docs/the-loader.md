@@ -1064,6 +1064,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     reaches flip 50 earlier in the dialog's slide. `--gpu-check` is as before, and the
     validation layer, there, reported nothing.
 
+62. **Textures of any type sent as their texels, as they are.** A texture in a format the
+    GPU reads as it is went up that way only if it was 2D and in rows; any other (a cube, an
+    array, 1D, 3D, or micro-tiled) was decoded texel by texel on the CPU into four floats
+    each. One kind took 33.2 of the 33.6 seconds that decoding took in a 300-second run: a
+    cube array of two 16-bit floats a texel (36 faces of 256x256, or of 64x64), made anew
+    1,238 times. Now such textures' texels are copied out as they are, slice by slice, row
+    by row, their tiling undone (each texel's place in memory as the CPU reads it), and the
+    GPU reads them in their own format, the T#'s dst_sel its swizzle; they are kept there
+    like the rest. In 300 seconds 2,639 went up this way, in 1.0 second, and 16 were still
+    decoded (0.3 s). Draws: 757,805 and 711,025 in two runs, against 530,212 to 575,736 in
+    the five before (item 61's). `--gpu-check`'s compared draws include that cube array
+    (both sizes), a 1D array and micro-tiled 2D textures: 77 of 80 are the same as the CPU's,
+    as before, with depth the same, and the validation layer, there, reported nothing.
+
 ## Files
 
 | Path | |

@@ -30,7 +30,7 @@ struct Texture {
     std::vector<float> rgba;
     u32 format = 0, pitch = 0, bpp = 4, swizzle[4] = {4, 5, 6, 7};
     bool integer = false;  // rgba holds integers' bits: a texture of 32-bit uints, read nearest
-    const unsigned char* raw = nullptr;
+    const unsigned char* raw = nullptr;  // (null: held in blocks, below)
     // Or block-compressed (format a BC one): `block` bytes a 4x4 block, the blocks in rows of
     // pitch / 4 (pitch a multiple of 4), held here
     u32 block = 0;

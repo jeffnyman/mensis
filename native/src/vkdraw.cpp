@@ -1400,7 +1400,7 @@ bool draw(Draw& d, std::string& why) {
                 images[i]->used = k.draws;
                 continue;
             }
-            if ((!t.format && t.rgba.empty()) || (t.block && t.blocks.empty())) {  // let go since has_texture() said it was kept
+            if ((!t.format && t.rgba.empty()) || ((t.block || (t.format && !t.raw)) && t.blocks.empty())) {  // let go since has_texture() said it was kept
                 why = "a texture let go meanwhile";
                 return false;
             }
@@ -1475,7 +1475,7 @@ bool draw(Draw& d, std::string& why) {
         const Texture& t = d.textures[i];
         size_t bytes = texel_bytes(t);
         if (t.block) std::memcpy(up + at_texels[i], t.blocks.data(), bytes);
-        else if (t.format) std::memcpy(up + at_texels[i], t.raw, bytes);
+        else if (t.format) std::memcpy(up + at_texels[i], t.raw ? t.raw : t.blocks.data(), bytes);
         else std::memcpy(up + at_texels[i], t.rgba.data(), bytes);
         k.texture_upload_bytes += bytes;
     }

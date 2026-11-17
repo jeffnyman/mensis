@@ -138,6 +138,7 @@ std::atomic<u64> g_stage_ns[ST_COUNT];
 std::atomic<u64> g_texture_hash_ns{0}, g_texture_decode_ns{0}, g_buffer_unpack_ns{0}, g_translate_ns{0};
 std::atomic<u64> g_texture_hash_bytes{0}, g_texture_decoded{0};
 std::atomic<u64> g_texture_blocks{0}, g_texture_blocks_ns{0};  // textures sent as their compressed blocks
+std::atomic<u64> g_texture_copied{0}, g_texture_copy_ns{0};  // and as their texels, as they are in memory
 // the textures decoded texel by texel, by their format, tiling and type: how many, how long
 std::map<std::string, std::pair<u64, u64>> g_decoded_by;
 struct Lap {
@@ -1291,6 +1292,35 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
                 continue;
             }
         }
+        // in a format the GPU reads as it is (any type: 1D, a cube, an array, 3D): the texels
+        // copied out as they are, their tiling undone, slice by slice, row by row, for the GPU
+        // to read (the T#'s dst_sel as swizzle), and kept there like the rest; else decoded here
+        if (raw_format && ti.all_ok && !ti.block && tx.bpp == ti.bytes && layout(ti.dfmt).count) {
+            Timer copying(g_texture_copy_ns);
+            g_texture_copied++;
+            tx.format = raw_format;
+            tx.pitch = tx.width;
+            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            size_t row = size_t(tx.width) * tx.bpp;
+            tx.blocks.resize(row * tx.height * tx.layers);
+            unsigned char* o = tx.blocks.data();
+            for (u32 l = 0; l < tx.layers; l++) {
+                u32 slice = ti.array() || cube ? ti.base_array + l : ti.type == 10 ? l : 0;
+                for (u32 y = 0; y < tx.height; y++, o += row) {
+                    if (!micro) {  // a row's texels, one after another
+                        std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, y, slice)),
+                                    row);
+                        continue;
+                    }
+                    for (u32 x = 0; x < tx.width; x++)
+                        std::memcpy(o + size_t(x) * tx.bpp,
+                                    reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, x, y, slice)),
+                                    tx.bpp);
+                }
+            }
+            d.textures.push_back(std::move(tx));
+            continue;
+        }
         auto decode0 = std::chrono::steady_clock::now();
         struct Tally {
             std::pair<u64, u64>& to;
@@ -2152,9 +2182,10 @@ std::vector<std::string> draw_report() {
             if (g_stage_ns[k]) t += std::format("| {} | {:.1f} |\n", stage_names[k], double(g_stage_ns[k]) / 1e9);
         t += std::format("\nOf which: translating and evaluating shaders {:.1f} s; unpacking buffers {:.1f} s; telling "
                          "whether textures' memory changed {:.1f} s ({} MiB hashed); sending {} as their compressed blocks {:.1f} s; "
-                         "decoding {} texel by texel {:.1f} s.\n",
+                         "{} as their texels as they are (their tiling undone) {:.1f} s; decoding {} texel by texel {:.1f} s.\n",
                          double(g_translate_ns) / 1e9, double(g_buffer_unpack_ns) / 1e9, double(g_texture_hash_ns) / 1e9,
-                         g_texture_hash_bytes >> 20, u64(g_texture_blocks), double(g_texture_blocks_ns) / 1e9, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
+                         g_texture_hash_bytes >> 20, u64(g_texture_blocks), double(g_texture_blocks_ns) / 1e9,
+                         u64(g_texture_copied), double(g_texture_copy_ns) / 1e9, u64(g_texture_decoded), double(g_texture_decode_ns) / 1e9);
         if (!g_decoded_by.empty()) {
             std::vector<std::pair<std::pair<u64, u64>, std::string>> by;
             for (auto& [what, v] : g_decoded_by) by.push_back({v, what});
