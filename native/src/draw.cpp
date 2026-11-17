@@ -717,7 +717,12 @@ std::map<std::string, u64> g_gpu_skipped;
 // the draws whose vertex shaders the CPU ran, by why: how many, their vertices, the seconds
 std::map<std::string, std::array<u64, 3>> g_vertex_skipped;
 u64 g_gpu_dispatches = 0, g_gpu_groups = 0;  // run on the GPU
-std::map<std::string, u64> g_gpu_dispatch_skipped;
+std::map<std::string, std::array<u64, 3>> g_gpu_dispatch_skipped;  // by why: the dispatches, their groups, the CPU's time on them
+// --gpu-check: dispatches done on the GPU and then the CPU, what they stored compared (so many
+// of a shader, so many in all); by the shader's address, how many, and how many the same
+constexpr u64 DISPATCH_CHECKS = 400, CHECKS_A_SHADER = 20;
+u64 g_dispatch_checks = 0;
+std::map<u64, std::pair<u64, u64>> g_dispatch_checked;
 
 // A hash of n bytes of memory, to tell whether a texture changed
 u64 hash_memory(const unsigned char* p, u64 n) {
@@ -2072,7 +2077,9 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
 }
 
 // The dispatch on the GPU: false (and why) if it can't be
-bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory& mem, std::string& why) {
+// (`stored`: where it stores; `before`, for --gpu-check: what the memory held there)
+bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory& mem, std::string& why,
+                 std::vector<std::pair<u64, u64>>& stored, std::vector<std::vector<unsigned char>>* before) {
     auto it = g_programs.find(cs);
     if (it == g_programs.end()) it = g_programs.emplace(cs, translate::decode(cs, mem)).first;
     const translate::Program& prog = it->second;
@@ -2114,12 +2121,15 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
             why = std::format("buffer stores of format {}, number type {}, stride {}", b.dfmt, b.nfmt, (b.v[1] >> 16) & 0x3fff);
             return false;
         }
-        // memory that will be kept on the GPU, or already is (else it's the CPU's, before any work here)
+        // memory that will be kept on the GPU, or already is (else it's the CPU's, before any work
+        // here). Not part of a page: tried, and that memory, which draws and the CPU's dispatches
+        // read too, kept being let go and read back (the-loader.md, item 68)
         if (!vkdraw::kept(a.address, a.bytes, a.bpp) && ((a.address | a.bytes) & 0xfff)) {
             why = "a store into memory not kept on the GPU, not whole pages";
             return false;
         }
         d.stores.push_back(a);
+        stored.push_back({a.address, a.bytes});
         translate::CsState::Access ts{b.dfmt, b.nfmt, true, {}};
         ts.width = b.width, ts.height = b.height, ts.pitch = b.pitch;
         st.stores.push_back(ts);
@@ -2194,6 +2204,11 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
     d.store_slot = st.store_slot;
     d.load_slot = st.load_slot;
     d.groups[0] = gx, d.groups[1] = gy, d.groups[2] = gz;
+    if (before) {  // --gpu-check: the memory as it was, to be put back for the CPU
+        vkdraw::Doing doing("--gpu-check: a dispatch's stores, the memory before");
+        for (auto& [at, bytes] : stored)
+            before->emplace_back(reinterpret_cast<const unsigned char*>(at), reinterpret_cast<const unsigned char*>(at + bytes));
+    }
     return vkdraw::dispatch(d, why);
 }
 
@@ -2213,16 +2228,41 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     u32 tx = std::max(r.sh[0x207] & 0xffff, 1u), ty = std::max(r.sh[0x208] & 0xffff, 1u), tz = std::max(r.sh[0x209] & 0xffff, 1u);
     u32 threads = tx * ty * tz, nwaves = (threads + LANES - 1) / LANES;
     u64 groups = u64(gx) * gy * gz;
+    std::string cpu_why;
+    std::vector<std::pair<u64, u64>> stored;
+    std::vector<std::vector<unsigned char>> by_gpu, before;  // --gpu-check: what the GPU stored, to compare
     if (M.gpu) {
         std::string why;
-        if (gpu_compute(r, cs, gx, gy, gz, mem, why)) {
+        auto seen = g_dispatch_checked.find(cs);
+        bool check = M.gpu_check && g_dispatch_checks < DISPATCH_CHECKS && (seen == g_dispatch_checked.end() || seen->second.first < CHECKS_A_SHADER);
+        if (gpu_compute(r, cs, gx, gy, gz, mem, why, stored, check ? &before : nullptr)) {
             g_gpu_dispatches++;
             g_gpu_groups += groups;
-            return std::format("on the GPU: {} groups", groups);
+            if (!check) return std::format("on the GPU: {} groups", groups);
+            g_dispatch_checks++;
+            cpu_why = "--gpu-check's: on the GPU, then on the CPU to compare";
+            vkdraw::Doing doing("--gpu-check: a dispatch's stores, as the GPU did them");
+            // all of it first, then the memory as it was, for the CPU (two stores may be into
+            // the same memory)
+            for (auto [at, bytes] : stored)
+                by_gpu.emplace_back(reinterpret_cast<const unsigned char*>(at), reinterpret_cast<const unsigned char*>(at + bytes));
+            for (size_t i = 0; i < stored.size(); i++) std::memcpy(reinterpret_cast<void*>(stored[i].first), before[i].data(), stored[i].second);
+        } else {
+            cpu_why = std::move(why);
         }
-        g_gpu_dispatch_skipped[why]++;
     }
     vkdraw::Doing on_cpu("a dispatch on the CPU");
+    struct Tally {  // (the CPU's time on it, by why the GPU didn't do it)
+        const std::string& why;
+        u64 groups;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Tally() {
+            if (!M.gpu) return;
+            auto& v = g_gpu_dispatch_skipped[why];
+            v[0]++, v[1] += groups;
+            v[2] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        }
+    } tally{cpu_why, groups};
     std::atomic<u64> next{0};
     struct NoIo : Io {
         void exp(u32, const Vec* const[4], bool, u64) override { note("exports from a compute shader"); }
@@ -2274,6 +2314,15 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
     if (groups * nwaves > 4) pool().run(worker);
     else worker(0);
     g_groups += groups;
+    if (!by_gpu.empty()) {  // (the CPU's stores stand)
+        vkdraw::Doing doing("--gpu-check: a dispatch's stores, as the CPU did them");
+        bool same = true;
+        for (size_t i = 0; i < stored.size(); i++)
+            same = same && std::memcmp(by_gpu[i].data(), reinterpret_cast<const void*>(stored[i].first), stored[i].second) == 0;
+        auto& c = g_dispatch_checked[cs];
+        c.first++, c.second += same;
+        return std::format("on the GPU and the CPU: {} groups, {}", groups, same ? "the same" : "differing");
+    }
     return std::format("{} groups run", groups);
 }
 
@@ -2353,8 +2402,9 @@ std::vector<std::string> draw_report() {
         }
         s.push_back(std::format("Dispatches on the GPU: {}, of {} groups; the CPU ran the rest.\n", g_gpu_dispatches, g_gpu_groups));
         if (!g_gpu_dispatch_skipped.empty()) {
-            s.insert(s.end(), {"Dispatches run on the CPU instead:\n", "| Why | Dispatches |", "|---|---:|"});
-            for (auto& [why, count] : g_gpu_dispatch_skipped) s.push_back(std::format("| {} | {} |", why, count));
+            s.insert(s.end(), {"Dispatches run on the CPU instead:\n", "| Why | Dispatches | Groups | Seconds |", "|---|---:|---:|---:|"});
+            for (auto& [why, v] : g_gpu_dispatch_skipped)
+                s.push_back(std::format("| {} | {} | {} | {:.1f} |", why, v[0], v[1], double(v[2]) / 1e9));
             s.push_back("");
         }
     }
@@ -2368,6 +2418,16 @@ std::vector<std::string> draw_report() {
         if (!g_check_skipped.empty()) {
             s.insert(s.end(), {"Not drawn on the GPU:\n", "| Why | Draws |", "|---|---:|"});
             for (auto& [why, count] : g_check_skipped) s.push_back(std::format("| {} | {} |", why, count));
+            s.push_back("");
+        }
+        if (!g_dispatch_checked.empty()) {
+            u64 n = 0, same = 0;
+            for (auto& [cs, c] : g_dispatch_checked) n += c.first, same += c.second;
+            s.push_back(std::format("Dispatches done on the GPU and then on the CPU (at most {} of a shader, {} in all): {}, {} of "
+                                    "them storing the same in every byte.\n",
+                                    CHECKS_A_SHADER, DISPATCH_CHECKS, n, same));
+            s.insert(s.end(), {"| Compute shader | Dispatches | The same |", "|---|---:|---:|"});
+            for (auto& [cs, c] : g_dispatch_checked) s.push_back(std::format("| {:#x} | {} | {} |", cs, c.first, c.second));
             s.push_back("");
         }
     }

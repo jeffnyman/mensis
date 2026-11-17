@@ -1170,6 +1170,37 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     pixel, which says less about their vertices than a draw that did would. `--gpu-check`
     as before (77 of 80, depth the same), the validation layer reporting nothing.
 
+68. **The dispatches on the CPU timed by why; `--gpu-check` compares dispatches too.** The
+    summary's "Dispatches run on the CPU instead" now gives each reason's groups and the
+    CPU's time on them. In a 300-second run the most were micro-tiled 2D image stores of two
+    16-bit floats (38,893 dispatches, 29.8 s) and stores into memory not kept on the GPU and
+    not whole pages (67,566, 17.9 s). With `--gpu-check`, up to 20 dispatches of each
+    compute shader (400 in all) are now done on the GPU and then again on the CPU, from the
+    same memory (put back between them), and what they stored is compared byte for byte; the
+    summary gives each shader's count. (The memory each store wrote is all copied before any
+    is put back: a shader that stores twice into the same memory had looked as if the GPU
+    got it wrong.)
+
+    Three things were tried, measured and taken back out. Image stores of 1D, 2D, 1D and 2D
+    arrays and 3D images, in rows or micro-tiled, translated for the GPU (the address of each
+    texel worked out in the shader as the CPU works it out): right, as far as compared, but
+    those dispatches then stopped at the rule that a store into memory not kept must be whole
+    pages. Without that rule (`keep()` already lets go of any other kept memory in a store's
+    pages, so it would be correct): 700 of 700 compared dispatches the same, but the draws
+    fell to 1.0 to 1.3 million (from about 2.0), since draws and the CPU's dispatches read
+    that memory too, and it kept being let go (16,000 to 17,600 times) and read back (56
+    seconds of it while preparing draws). With the rule and the image stores: 1.4 to 1.6
+    million, the few image stores into memory already kept going to the GPU and the CPU's
+    dispatches reading that memory back each time. So the rule stays (its reason now beside
+    it): such memory goes to the GPU when the draws can read it from there.
+
+    One compute shader that already ran on the GPU disagrees with the CPU in each of its
+    dispatches compared: `0x255403800` (a constant from a buffer, stored to each texel of a
+    960x540 image of four 16-bit floats, tile mode 14), where the GPU stored 0 and the CPU
+    left the memory as it was (all ones). Which one is right isn't known yet. In 300
+    seconds, as before: 1,990,111 and 1,989,301 draws. `--gpu-check` as before (77 of 80,
+    depth the same), the validation layer reporting nothing.
+
 ## Files
 
 | Path | |
