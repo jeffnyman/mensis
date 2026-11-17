@@ -1012,6 +1012,19 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     from 39.8 s to 1.8 (the buffers from 944 GB to 25), and the draws from 347,971 to
     411,696. With and without the pool, the frames saved at flips 1,700 to 1,800 are the
     same in every pixel; validation is clean, and `--gpu-check` is as before.
+59. **Kept targets read as textures: copied again only when written.** The GPU was waiting
+    about 41 seconds at the ends of the game's command buffers. Not waiting there (letting
+    the batch run on until something needs it) only moved the wait into the read-backs
+    (from 7.8 s to 39.6), with no more draws: the GPU's work itself took that long. The
+    likeliest part of it: each draw that samples memory kept on the GPU (a render target, a
+    depth buffer) first copies it into an image of its own, the whole of it, and some
+    through the scratch buffer, twice; 540,839 times in 300 seconds. Each copy now
+    remembers the version of the memory it was made from (a new one with each write: a
+    draw, a dispatch's store, a clear, the CPU), and is made again only when that has
+    changed. In 300 seconds: 967,717 reads, 11,665 copied again, 956,052 (98.8%) not;
+    waiting for the GPU went from about 49 s (batches and read-backs) to 31, and the draws
+    from 411,696 to 516,276. All 36 frames saved are the same in every pixel as before;
+    validation is clean, and `--gpu-check` is as before.
 
 ## Files
 

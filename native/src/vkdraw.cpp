@@ -366,6 +366,7 @@ struct GpuImage {
     u32 layers = 1;
     VkDeviceSize bytes = 0;
     u64 used = 0;  // the draw that last used it
+    u64 version = 0;  // a copy of kept memory's: the version it was copied from
     void destroy() {
         if (view) vkDestroyImageView(g.device, view, nullptr);
         if (image) vkDestroyImage(g.device, image, nullptr), vkFreeMemory(g.device, memory, nullptr);
@@ -439,6 +440,7 @@ struct Kept {
     u64 regions = 0;  // memory kept on the GPU because a compute shader stored into it
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
     u64 depth_clears = 0;  // depth buffers cleared there
+    u64 target_textures_same = 0;  // kept memory read as a texture, its copy still the same
     u64 htile_checks = 0;  // depth buffers' fast clears seen to there (their HTILE buffers kept there)
     u64 arrays_kept = 0;  // compute shaders' arrays copied from kept memory there
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
@@ -1437,6 +1439,13 @@ bool draw(Draw& d, std::string& why) {
         if (!r) continue;
         GpuImage& im = *images[i];
         const Texture& t = d.textures[i];
+        // (copied already, and the memory not written since: as it is)
+        if (!r->version) r->version = ++g_writes;
+        if (im.version == r->version) {
+            k.target_textures_same++;
+            continue;
+        }
+        im.version = r->version;
         barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
         barrier(cmd, r->image.image, 1, rest(*r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(*r), VK_ACCESS_TRANSFER_READ_BIT,
@@ -2289,9 +2298,11 @@ std::string report() {
     if (!k.draws) return {};
     return std::format("{} draws on the GPU took {:.1f} s, uploads included; {} pipelines; {} textures uploaded, {} kept at "
                        "the end ({} MiB), {} let go. Render targets kept there: {} at the end; taken up from memory {} times, "
-                       "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times",
+                       "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times "
+                       "(copied again {} of them; the copy still the same {})",
                        k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
-                       k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go, k.target_textures) +
+                       k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go,
+                       k.target_textures + k.target_textures_same, k.target_textures, k.target_textures_same) +
            (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s ({} of their arrays copied there from kept memory)", k.dispatches,
                                        double(k.dispatch_ns) / 1e9, k.arrays_kept) : "") +
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
