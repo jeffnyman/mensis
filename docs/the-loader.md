@@ -1042,6 +1042,28 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     frames saved are the same in every pixel as before; `--gpu-check` is as before, and
     the validation layer, there, reported nothing.
 
+61. **A command buffer's batch sent without waiting; a read-back in one wait.** At the end of
+    each of the game's command buffers, the batch went to the GPU and the loader waited for
+    it, though nothing needed it yet. It now goes without waiting, and the next batch is
+    recorded while the GPU works, with a second command buffer, fence, upload buffer and
+    descriptor pool, swapped in (the timestamps have a half of the query pool each). Before
+    the next batch goes, the one before is waited for, so at most one is unwaited; anything
+    that needs what it drew (memory touched, a read-back, `--gpu-check`) waits for both, and
+    no texture a batch still on the GPU uses is let go. A read-back also no longer sends the
+    batch, waits, and then sends and waits for the copy: the copy goes at the end of the
+    batch, and the two are waited for at once. In 300 seconds, batches went from about
+    31,500 to about 21,500 and the time waiting for them from 29.8 seconds to 25.6 (the
+    averages of runs taken in turn, two of the build before and three of this one). Draws
+    were 550,445 on average (530,212 to 575,736) against 542,333 before (534,912 and
+    549,753), which is within how much one run differs from the next. Most of the waiting
+    left is reading kept memory back (about 11,000 times, 17 to 21 seconds), mostly for
+    compute dispatches done on the CPU and for hashing memory. The frames saved differ from
+    an earlier run's, but only in animations the game drives by its clock (a dialog's slide
+    in, a glow's pulse, and later which loading tip is shown): the same build's runs differ
+    from each other from about flip 1300 on, and this build, faster to its first flips,
+    reaches flip 50 earlier in the dialog's slide. `--gpu-check` is as before, and the
+    validation layer, there, reported nothing.
+
 ## Files
 
 | Path | |

@@ -438,7 +438,7 @@ struct Kept {
     std::map<std::string, VkPipeline> compute;  // by source
     u64 draws = 0, texture_uploads = 0, evicted = 0, dispatches = 0;
     u64 target_uploads = 0, readbacks = 0, writes = 0, let_go = 0, target_textures = 0;
-    u64 batches = 0;  // command buffers submitted (each waited for)
+    u64 batches = 0;  // command buffers submitted (each waited for, if not then before the next)
     u64 regions = 0;  // memory kept on the GPU because a compute shader stored into it
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
     u64 depth_clears = 0;  // depth buffers cleared there
@@ -451,6 +451,24 @@ struct Kept {
     u64 buffer_upload_ns = 0, buffer_upload_bytes = 0;  // of which: the draws' buffers (vertices, indices, loads)
 };
 Kept k;
+
+// The batch before, while it may still be on the GPU (busy): what was its, to be finished once
+// it is done; else, those for the next batch (see "the batch", below)
+struct Spare {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkDescriptorPool dpool = VK_NULL_HANDLE;
+    HostBuffer upload;
+    std::vector<GpuImage> doomed;
+    std::vector<VkImageView> doomed_views;
+    std::vector<const char*> what;
+    u64 first_draw = 0;
+    u32 queries = 0;
+    bool busy = false;
+} g_spare;
+u64 g_first_draw = 0;  // the batch's first draw
+u32 g_queries = 0;  // its timestamps' first, in the query pool
+constexpr u32 TIMESTAMPS = 32768;  // a batch's at most (past that, the rest go uncounted)
 
 // A render target in the game's memory, kept on the GPU: the pages it is in (lo to hi), and
 // which is the newer, the GPU's picture or the memory (or neither)
@@ -651,14 +669,19 @@ bool prepare_kept() {
     dpi.maxSets = SETS;
     dpi.poolSizeCount = 3;
     dpi.pPoolSizes = sizes;
-    if (vkCreateDescriptorPool(g.device, &dpi, nullptr, &k.dpool) != VK_SUCCESS) return fail("vkCreateDescriptorPool failed");
+    if (vkCreateDescriptorPool(g.device, &dpi, nullptr, &k.dpool) != VK_SUCCESS ||
+        vkCreateDescriptorPool(g.device, &dpi, nullptr, &g_spare.dpool) != VK_SUCCESS)
+        return fail("vkCreateDescriptorPool failed");
     VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cai.commandPool = g.pool;
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
     vkAllocateCommandBuffers(g.device, &cai, &k.cmd);
+    vkAllocateCommandBuffers(g.device, &cai, &g_spare.cmd);
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     vkCreateFence(g.device, &fci, nullptr, &k.fence);
+    vkCreateFence(g.device, &fci, nullptr, &g_spare.fence);
+    g_spare.queries = TIMESTAMPS;
     k.ready = true;
     return true;
 }
@@ -824,15 +847,16 @@ VkDeviceSize texel_bytes(const Texture& t) {
     return t.format ? VkDeviceSize(t.pitch) * t.height * t.layers * t.bpp : t.rgba.size() * 4;
 }
 
-// Textures not used lately go when there are more than the budget
-void evict() {
+// Textures not used lately go when there are more than the budget (not those used by draws
+// from `from` on: in a batch not yet done)
+void evict(u64 from) {
     if (k.texture_bytes <= texture_budget()) return;
     std::vector<std::pair<u64, std::string>> by_age;
     for (auto& [key, im] : k.textures) by_age.emplace_back(im.used, key);
     std::sort(by_age.begin(), by_age.end());
     for (auto& [used, key] : by_age) {
         if (k.texture_bytes <= texture_budget() / 2) break;
-        if (used >= k.draws) continue;  // the draw being recorded uses it
+        if (used >= from) continue;
         GpuImage& im = k.textures[key];
         k.texture_bytes -= im.bytes;
         im.destroy();
@@ -845,10 +869,16 @@ void evict() {
 //
 // Draws and dispatches are recorded into one command buffer, which goes to the GPU, to be
 // waited for, only when something needs what it did: a target read back into memory (or let
-// go), --gpu-check's copies, the end of a command buffer of the game's (flush(), from the
-// command processor), or a full batch. Until then, what each draw uploads stays in the upload
-// buffer (a draw's place in it is its own), each has a descriptor set of its own, and images
-// that go (a texture used once, textures let go to stay in the budget) go once it is done.
+// go), --gpu-check's copies, or a full batch. Until then, what each draw uploads stays in the
+// upload buffer (a draw's place in it is its own), each has a descriptor set of its own, and
+// images that go (a texture used once, textures let go to stay in the budget) go once it is
+// done.
+//
+// At the end of a command buffer of the game's (flush(), from the command processor), the
+// batch goes without waiting: the next is recorded while the GPU does it, with the spare's
+// command buffer, fence, upload buffer and descriptor pool (the two swapped). Nothing needs
+// what it did yet: whatever reads it (the memory touched, a read-back) waits for it then.
+// Before the next goes, it is waited for (so at most one is on the GPU unwaited).
 
 bool g_recording = false;
 VkDeviceSize g_arena = 0;  // the upload buffer's bytes the batch has used
@@ -866,7 +896,6 @@ struct Timing {
     std::vector<const char*> what;  // the batch's timestamps (the first: its start)
     std::map<std::string, u64> ns;
 } g_time;
-constexpr u32 TIMESTAMPS = 32768;  // a batch's at most (past that, the rest go uncounted)
 
 bool timing_ready() {
     if (g_time.pool) return true;
@@ -885,7 +914,7 @@ bool timing_ready() {
     g_time.mask = bits >= 64 ? ~0ull : (1ull << bits) - 1;
     VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    qi.queryCount = TIMESTAMPS;
+    qi.queryCount = 2 * TIMESTAMPS;  // (the batch's, and the spare's)
     if (vkCreateQueryPool(g.device, &qi, nullptr, &g_time.pool) != VK_SUCCESS) g_time.pool = VK_NULL_HANDLE;
     return g_time.pool != VK_NULL_HANDLE;
 }
@@ -893,7 +922,7 @@ bool timing_ready() {
 // The GPU's work recorded since the last mark: `what` (outside a render pass's draws)
 void mark(VkCommandBuffer cmd, const char* what) {
     if (!g_time.pool || g_time.what.empty() || g_time.what.size() >= TIMESTAMPS) return;
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_time.pool, u32(g_time.what.size()));
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_time.pool, g_queries + u32(g_time.what.size()));
     g_time.what.push_back(what);
 }
 
@@ -904,22 +933,61 @@ VkCommandBuffer batch() {
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(k.cmd, &begin);
         g_recording = true;
+        g_first_draw = k.draws;
         g_time.what.clear();
         if (timing_ready()) {
-            vkCmdResetQueryPool(k.cmd, g_time.pool, 0, TIMESTAMPS);
-            vkCmdWriteTimestamp(k.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_time.pool, 0);
+            vkCmdResetQueryPool(k.cmd, g_time.pool, g_queries, TIMESTAMPS);
+            vkCmdWriteTimestamp(k.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_time.pool, g_queries);
             g_time.what.push_back("start");
         }
     }
     return k.cmd;
 }
 
-// The batch to the GPU, and waited for; then what it used is free again
+// A batch done: its timestamps counted, its descriptor sets and the images it was the last to
+// use let go
+void finished(std::vector<const char*>& what, u32 queries, VkDescriptorPool dpool, std::vector<GpuImage>& doomed,
+              std::vector<VkImageView>& doomed_views) {
+    if (what.size() > 1) {
+        std::vector<u64> ts(what.size());
+        if (vkGetQueryPoolResults(g.device, g_time.pool, queries, u32(ts.size()), ts.size() * 8, ts.data(), 8, VK_QUERY_RESULT_64_BIT) ==
+            VK_SUCCESS)
+            for (size_t i = 1; i < ts.size(); i++) {
+                u64 d = (ts[i] - ts[i - 1]) & g_time.mask;
+                if (d > g_time.mask / 2) d = 0;  // (one that finished before the one before it)
+                g_time.ns[what[i]] += u64(double(d) * g_time.period);
+            }
+    }
+    what.clear();
+    vkResetDescriptorPool(g.device, dpool, 0);
+    for (auto& im : doomed) im.destroy();
+    doomed.clear();
+    for (VkImageView v : doomed_views) vkDestroyImageView(g.device, v, nullptr);
+    doomed_views.clear();
+}
+
+// The batch before, if not yet waited for: waited for, and finished
+bool wait_spare() {
+    if (!g_spare.busy) return true;
+    bool ok = vkWaitForFences(g.device, 1, &g_spare.fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS;
+    g_spare.busy = false;
+    finished(g_spare.what, g_spare.queries, g_spare.dpool, g_spare.doomed, g_spare.doomed_views);
+    return ok;
+}
+
+// The batch to the GPU, and (`wait`) waited for, with the one before; then what they used is
+// free again. Else it goes on without waiting (the one before waited for)
 // Why batches went, and the targets read back (by why, and what touched them), counted
 std::map<std::string, u64> g_batch_why, g_readback_why;
 std::map<std::string, std::pair<u64, u64>> g_readback_ns;  // and by why alone: how many, and the time they took (waits included)
-bool flush_batch(const char* why = "other") {
-    if (!g_recording) return true;
+bool flush_batch(const char* why = "other", bool wait = true) {
+    auto t0 = std::chrono::steady_clock::now();
+    auto waited = [&] { k.wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); };
+    if (!g_recording) {
+        bool ok = !wait || wait_spare();
+        waited();
+        return ok;
+    }
     g_batch_why[why]++;
     vkEndCommandBuffer(k.cmd);
     g_recording = false;
@@ -927,29 +995,27 @@ bool flush_batch(const char* why = "other") {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &k.cmd;
     vkResetFences(g.device, 1, &k.fence);
-    auto t0 = std::chrono::steady_clock::now();
-    bool ok = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS &&
-              vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS;
-    k.wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-    if (ok && g_time.what.size() > 1) {
-        std::vector<u64> ts(g_time.what.size());
-        if (vkGetQueryPoolResults(g.device, g_time.pool, 0, u32(ts.size()), ts.size() * 8, ts.data(), 8, VK_QUERY_RESULT_64_BIT) ==
-            VK_SUCCESS)
-            for (size_t i = 1; i < ts.size(); i++) {
-                u64 d = (ts[i] - ts[i - 1]) & g_time.mask;
-                if (d > g_time.mask / 2) d = 0;  // (one that finished before the one before it)
-                g_time.ns[g_time.what[i]] += u64(double(d) * g_time.period);
-            }
+    bool ok = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS;
+    ok = wait_spare() && ok;
+    if (wait || !ok) {
+        ok = ok && vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS;
+        finished(g_time.what, g_queries, k.dpool, g_doomed, g_doomed_views);
+    } else {  // this batch now the spare's, still on the GPU; the spare's (done) for the next
+        std::swap(k.cmd, g_spare.cmd);
+        std::swap(k.fence, g_spare.fence);
+        std::swap(k.dpool, g_spare.dpool);
+        std::swap(k.upload, g_spare.upload);
+        std::swap(g_doomed, g_spare.doomed);
+        std::swap(g_doomed_views, g_spare.doomed_views);
+        std::swap(g_time.what, g_spare.what);
+        std::swap(g_first_draw, g_spare.first_draw);
+        std::swap(g_queries, g_spare.queries);
+        g_spare.busy = true;
     }
-    g_time.what.clear();
+    waited();
     g_arena = 0;
     g_sets = 0;
-    vkResetDescriptorPool(g.device, k.dpool, 0);
-    for (auto& im : g_doomed) im.destroy();
-    g_doomed.clear();
-    for (VkImageView v : g_doomed_views) vkDestroyImageView(g.device, v, nullptr);
-    g_doomed_views.clear();
-    evict();
+    evict(g_spare.busy ? g_spare.first_draw : k.draws);  // (k.draws: the draw being recorded, if one is)
     k.batches++;
     return ok;
 }
@@ -994,7 +1060,9 @@ bool read_back(Resident& r, const std::string& why) {
     done.by = &g_readback_ns[why];
     VkDeviceSize sbytes = r.sbase ? VkDeviceSize(r.width) * r.height : 0, sat = (r.bytes + 255) & ~VkDeviceSize(255);
     g_readback_why[std::format("{} ({}x{} at {:#x})", why, r.width, r.height, r.base)]++;
-    if (!flush_batch("a target to read back") || !k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
+    // the copy back at the end of the batch (after what it drew there), the two waited for at once
+    // (the read-back buffer isn't in use: only a waited-for batch uses it)
+    if (!k.readback.reserve(sat + sbytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return false;
     VkCommandBuffer cmd = batch();
     const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
     barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT, rest_stage(r), T,
@@ -2284,7 +2352,7 @@ bool flush() {
         Inside() { t_inside = true; }
         ~Inside() { t_inside = false; }
     } inside;
-    return flush_batch("a command buffer of the game's done");
+    return flush_batch("a command buffer of the game's done", false);
 }
 
 bool touched(u64 addr, bool write, u64 rip) {
@@ -2391,7 +2459,7 @@ std::string report() {
            (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s ({} of their arrays copied there from kept memory)", k.dispatches,
                                        double(k.dispatch_ns) / 1e9, k.arrays_kept) : "") +
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
-                       "Depth buffers' fast clears seen to there: {}. Sent to the GPU in {} batches, each waited for", k.regions, k.reshapes,
+                       "Depth buffers' fast clears seen to there: {}. Sent to the GPU in {} batches (each waited for, then or before the next)", k.regions, k.reshapes,
                        k.htile_checks, k.batches) +
            std::format(". The draws' larger buffers kept there ({} MiB for them): {} sent ({} MiB), {} found there, {} let go",
                        g_pool.size >> 20, g_pool.sent, g_pool.sent_bytes >> 20, g_pool.found, g_pool.let_go) +
