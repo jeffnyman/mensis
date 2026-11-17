@@ -1078,6 +1078,29 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     (both sizes), a 1D array and micro-tiled 2D textures: 77 of 80 are the same as the CPU's,
     as before, with depth the same, and the validation layer, there, reported nothing.
 
+63. **The shaders' scalar arithmetic worked out ahead; branches followed where they are
+    known.** Before a shader goes to the GPU, its scalar registers are worked out from the
+    draw's user data, to find the buffers and images it reads and the scalar loads' values.
+    Any scalar arithmetic (SOP2) left its result unknown, and two registers with it even when
+    it wrote one; so an address made by an add, or the high half beside a shift's result, was
+    unknown, and a load from it sent the vertex shader to the CPU (33,013 draws, 103.6 million
+    vertices, 22.8 seconds in a 300-second run) and 11,871 dispatches with it. Now the
+    arithmetic and bit operations are worked out as the CPU does them (`shade.cpp`'s `sop2`)
+    where their operands are known, SCC with them; so are the scalar compares, and a branch on
+    a known SCC is followed: the code it always jumps past is still gone through (each load
+    keeping its place in U, those it can't work out given nothing), but what it does is
+    forgotten at the label after it. Two branches to one label now both count there (only the
+    first did). The summary gives a new table: the draws on the GPU whose vertex shaders the
+    CPU ran, by why, with their vertices and the time. No vertex shader goes to the CPU for a
+    scalar load any more, nor any dispatch; in 300 seconds, the vertex shaders on the CPU
+    took 13.5 and 14.9 seconds in two runs (33 to 34 before), dispatches on the GPU were
+    about 37,500 (31,700), and draws 859,002 and 833,409 (757,805 and 711,025). `--gpu-check`
+    as before (77 of 80); and with `--save-ps` and `--save-from` set to the pixel shaders of
+    the draws whose vertex shaders had gone to the CPU, 80 of those were compared, their
+    vertex shaders on the GPU: 77 the same in every pixel, three with one pixel differing at
+    a triangle's edge (and its depth by 0.00007), the GPU's vertex arithmetic rounding
+    otherwise than the CPU's; the validation layer reported nothing.
+
 ## Files
 
 | Path | |

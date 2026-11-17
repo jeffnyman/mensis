@@ -713,6 +713,8 @@ u64 g_checked = 0, g_check_same = 0, g_check_gpu_vertices = 0, g_check_depth_dif
 std::map<std::string, u64> g_check_skipped;
 u64 g_gpu_draws = 0, g_gpu_vertices = 0;  // drawn on the GPU
 std::map<std::string, u64> g_gpu_skipped;
+// the draws whose vertex shaders the CPU ran, by why: how many, their vertices, the seconds
+std::map<std::string, std::array<u64, 3>> g_vertex_skipped;
 u64 g_gpu_dispatches = 0, g_gpu_groups = 0;  // run on the GPU
 std::map<std::string, u64> g_gpu_dispatch_skipped;
 
@@ -1612,6 +1614,7 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
     // compares): then the CPU's vertex shader isn't needed. If only the vertex shader can't
     // be, the CPU runs it, and the GPU is given its vertices (below).
     bool gpu_failed = false;  // for another reason: not tried again
+    std::string vertices_why = !M.gpu ? "" : save && M.gpu_check ? "--gpu-check's draws" : "";
     if (M.gpu && !(save && M.gpu_check) && x0 < x1 && y0 < y1) {
         vkdraw::Draw gd;
         std::string why, vwhy;
@@ -1627,11 +1630,14 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
             gpu_failed = true;
         } else if (why.size()) {
             gpu_failed = true;
+        } else {
+            vertices_why = vwhy.empty() ? "(no reason given)" : vwhy;
         }
         if (gpu_failed) g_gpu_skipped[why]++;
     }
     // the vertex shader, 64 vertices a wave; a rectangle's fourth corner is added after
     lap.to(ST_CPU_VERTICES);
+    auto vs0 = std::chrono::steady_clock::now();
     Vertices out;
     out.params = ((reg(r, 0x1b1, 0) >> 1) & 0x1f) + 1;
     size_t n = count + (rects ? count / 3 : 0);
@@ -1665,6 +1671,11 @@ std::string gpu_draw(const GpuRegs& r, u32 count, u64 indices, u32 first) {
                 out.param[extra * out.params * 4 + p] = at(k + 1) + at(k + 2) - at(k);
             }
         }
+    if (!vertices_why.empty()) {
+        auto& v = g_vertex_skipped[vertices_why];
+        v[0]++, v[1] += count;
+        v[2] += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vs0).count());
+    }
     lap.to(ST_CPU_TRIANGLES);
     u32 cull = reg(r, 0x205, 0);
     std::vector<Tri> tris;
@@ -2213,6 +2224,13 @@ std::vector<std::string> draw_report() {
         if (!g_gpu_skipped.empty()) {
             s.insert(s.end(), {"Drawn on the CPU instead:\n", "| Why | Draws |", "|---|---:|"});
             for (auto& [why, count] : g_gpu_skipped) s.push_back(std::format("| {} | {} |", why, count));
+            s.push_back("");
+        }
+        if (!g_vertex_skipped.empty()) {
+            s.insert(s.end(), {"Drawn on the GPU, the vertex shader run on the CPU:\n", "| Why | Draws | Vertices | Seconds |",
+                               "|---|---:|---:|---:|"});
+            for (auto& [why, v] : g_vertex_skipped)
+                s.push_back(std::format("| {} | {} | {} | {:.1f} |", why, v[0], v[1], double(v[2]) / 1e9));
             s.push_back("");
         }
         s.push_back(std::format("Dispatches on the GPU: {}, of {} groups; the CPU ran the rest.\n", g_gpu_dispatches, g_gpu_groups));

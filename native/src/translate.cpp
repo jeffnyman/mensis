@@ -335,6 +335,16 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
     // a branch's label, and the registers as they were at the branch: at the label, any the
     // code skipped may have changed aren't known
     std::map<u64, std::pair<std::array<u32, 128>, std::array<bool, 128>>> labels;
+    // and SCC (the scalar condition), where it is known: so far only as the scalar arithmetic
+    // below sets it, for the instructions after that read it (an add's carry, a select)
+    bool scc = false, scc_known = false;
+    std::map<u64, std::pair<bool, bool>> label_scc;
+    auto get64 = [&](u32 code, u32 lit, bool& ok) -> u64 {
+        if (code < 128) return u64(get(code, lit, ok)) | (u64(get(code + 1, lit, ok)) << 32);
+        if (code >= 240 && code <= 247) ok = false;  // (a double's inline constants: not here)
+        u32 lo = get(code, lit, ok);
+        return u64(lo) | (code >= 193 && code <= 208 ? 0xffffffffull << 32 : 0);
+    };
     // at a loop's head, what the loop writes isn't known: it changes from pass to pass
     std::map<u64, u64> loops = find_loops(p);
     // the dynamic loads' windows: where its first dword goes in U, the address, how many
@@ -344,28 +354,56 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
         u32 n;
     };
     std::vector<Window> windows;
+    // past a branch always taken (its condition known), or the program's end: code not reached
+    // from here, until a label a branch before reaches. It is still gone through (so that each
+    // load keeps its place in U), but what it does to the registers is forgotten there
+    bool dead = false;
     for (const Inst& in : p.code) {
         u32 w0 = in.w0;
+        if (auto it = labels.find(in.at); it != labels.end()) {
+            auto [was, was_known] = label_scc[in.at];
+            if (dead) {  // reached only by the branches to it: as they had them
+                std::copy_n(it->second.first.begin(), 128, s);
+                std::copy_n(it->second.second.begin(), 128, known);
+                scc = was, scc_known = was_known;
+                dead = false;
+            } else {
+                for (u32 k = 0; k < 128; k++)
+                    if (s[k] != it->second.first[k] || known[k] != it->second.second[k]) known[k] = false;
+                if (!was_known || was != scc) scc_known = false;
+            }
+            labels.erase(it);
+            label_scc.erase(in.at);
+        }
         if (auto lp = loops.find(in.at); lp != loops.end()) {
             std::vector<u32> written;
             for (const Inst& x : p.code)
                 if (x.at >= lp->first && x.at <= lp->second) sgpr_writes(x, written);
             for (u32 c : written) forget(c, 1);
+            scc_known = false;
         }
-        if (auto it = labels.find(in.at); it != labels.end()) {
-            for (u32 k = 0; k < 128; k++)
-                if (s[k] != it->second.first[k] || known[k] != it->second.second[k]) known[k] = false;
-            labels.erase(it);
-        }
-        if (in.enc == SOPP) {
+        if (in.enc == SOPP && !dead) {
             u32 op = (w0 >> 16) & 0x7f;
             if (op == 2 || (op >= 4 && op <= 7)) {
                 u64 to = in.at + 4 + u64(std::int64_t(std::int16_t(w0 & 0xffff)) * 4);
-                if (!labels.count(to)) {
-                    auto& snap = labels[to];
-                    std::copy_n(s, 128, snap.first.begin());
-                    std::copy_n(known, 128, snap.second.begin());
+                // s_branch always; s_cbranch_scc0/1 as SCC is, if it is known
+                bool sure = op == 2 || ((op == 4 || op == 5) && scc_known), taken = op == 2 || (op == 4 ? !scc : op == 5 && scc);
+                if (!sure || taken) {
+                    auto [snap, fresh] = labels.try_emplace(to);
+                    if (fresh) {
+                        std::copy_n(s, 128, snap->second.first.begin());
+                        std::copy_n(known, 128, snap->second.second.begin());
+                        label_scc[to] = {scc, scc_known};
+                    } else {  // another branch there: what the two have differently isn't known
+                        for (u32 k = 0; k < 128; k++)
+                            if (!known[k] || s[k] != snap->second.first[k]) snap->second.second[k] = false;
+                        auto& ls = label_scc[to];
+                        if (!scc_known || scc != ls.first) ls.second = false;
+                    }
                 }
+                if (sure && taken && to > in.at) dead = true;
+            } else if (op == 1) {  // s_endpgm
+                dead = true;
             }
         }
         switch (in.enc) {
@@ -381,6 +419,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                 } else {
                     forget(dst, 2);
                     if (op >= 36 && op <= 43) forget(126, 2);
+                    scc_known = false;
                 }
                 break;
             }
@@ -391,9 +430,103 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                 } else if (op != 3 && !(op >= 4 && op <= 14)) {
                     forget(dst, 1);
                 }
+                scc_known = false;
                 break;
             }
-            case SOP2: forget((w0 >> 16) & 0x7f, 2); break;
+            case SOPC: {  // a compare: SCC, if its operands are known
+                u32 op = (w0 >> 16) & 0x7f;
+                bool ok = op <= 15;
+                u32 a = get(w0 & 0xff, in.lit, ok), b = get((w0 >> 8) & 0xff, in.lit, ok);
+                std::int32_t ia = std::int32_t(a), ib = std::int32_t(b);
+                switch (op) {
+                    case 0: scc = ia == ib; break;
+                    case 1: scc = ia != ib; break;
+                    case 2: scc = ia > ib; break;
+                    case 3: scc = ia >= ib; break;
+                    case 4: scc = ia < ib; break;
+                    case 5: scc = ia <= ib; break;
+                    case 6: scc = a == b; break;
+                    case 7: scc = a != b; break;
+                    case 8: scc = a > b; break;
+                    case 9: scc = a >= b; break;
+                    case 10: scc = a < b; break;
+                    case 11: scc = a <= b; break;
+                    case 12: scc = !((a >> (b & 31)) & 1); break;
+                    case 13: scc = (a >> (b & 31)) & 1; break;
+                    default: ok = false;
+                }
+                scc_known = ok;
+                break;
+            }
+            case SOP2: {  // worked out where its operands are known, as the CPU does them (shade.cpp's sop2)
+                u32 op = (w0 >> 23) & 0x7f, dst = (w0 >> 16) & 0x7f, s0 = w0 & 0xff, s1 = (w0 >> 8) & 0xff;
+                bool wide = (op >= 11 && op <= 29 && (op & 1)) || op == 31 || op == 33 || op == 35;
+                bool ok = true, sets = op <= 9 || (op >= 14 && op <= 35) || op == 39 || op == 40;
+                bool reads = op == 4 || op == 5 || op == 10 || op == 11;
+                if (reads && !scc_known) ok = false;
+                u64 r = 0;
+                bool c = scc;
+                if (wide) {
+                    u64 a = get64(s0, in.lit, ok), b = get64(s1, in.lit, ok);
+                    switch (op) {
+                        case 11: r = scc ? a : b; break;
+                        case 15: r = a & b; break;
+                        case 17: r = a | b; break;
+                        case 19: r = a ^ b; break;
+                        case 21: r = a & ~b; break;
+                        case 23: r = a | ~b; break;
+                        case 31: r = a << (b & 63); break;
+                        case 33: r = a >> (b & 63); break;
+                        case 35: r = u64(std::int64_t(a) >> (b & 63)); break;
+                        default: ok = false;
+                    }
+                    if (op != 11) c = r != 0;
+                } else {
+                    u32 a = get(s0, in.lit, ok), b = get(s1, in.lit, ok), x = 0;
+                    switch (op) {
+                        case 0: { u64 t = u64(a) + b; x = u32(t); c = t >> 32; break; }
+                        case 1: x = a - b; c = b > a; break;
+                        case 2: x = a + b; c = ((~(a ^ b)) & (a ^ x)) >> 31; break;
+                        case 3: x = a - b; c = ((a ^ b) & (a ^ x)) >> 31; break;
+                        case 4: { u64 t = u64(a) + b + scc; x = u32(t); c = t >> 32; break; }
+                        case 5: { u64 t = u64(b) + scc; x = u32(a - t); c = t > a; break; }
+                        case 6: c = std::int32_t(a) < std::int32_t(b); x = c ? a : b; break;
+                        case 7: c = a < b; x = c ? a : b; break;
+                        case 8: c = std::int32_t(a) > std::int32_t(b); x = c ? a : b; break;
+                        case 9: c = a > b; x = c ? a : b; break;
+                        case 10: x = scc ? a : b; break;
+                        case 14: x = a & b; c = x != 0; break;
+                        case 16: x = a | b; c = x != 0; break;
+                        case 18: x = a ^ b; c = x != 0; break;
+                        case 20: x = a & ~b; c = x != 0; break;
+                        case 22: x = a | ~b; c = x != 0; break;
+                        case 30: x = a << (b & 31); c = x != 0; break;
+                        case 32: x = a >> (b & 31); c = x != 0; break;
+                        case 34: x = u32(std::int32_t(a) >> (b & 31)); c = x != 0; break;
+                        case 36: x = ((1u << (a & 31)) - 1) << (b & 31); break;
+                        case 38: x = a * b; break;
+                        case 39: {
+                            u32 off = b & 31, width = (b >> 16) & 0x7f;
+                            x = width ? (a >> off) & (width >= 32 ? ~0u : (1u << width) - 1) : 0;
+                            c = x != 0;
+                            break;
+                        }
+                        default: ok = false;
+                    }
+                    r = x;
+                }
+                u32 n = wide ? 2 : 1;
+                if (ok) {
+                    for (u32 k = 0; k < n; k++)
+                        if (dst + k < 128) s[dst + k] = u32(r >> (32 * k)), known[dst + k] = true;
+                    if (sets) scc = c, scc_known = true;
+                } else {
+                    // (s_bfm_b64, s_bfe_*64 and the rest not worked out here: two registers)
+                    forget(dst, wide || op == 37 || op == 41 || op == 42 ? 2 : 1);
+                    if (sets || op >= 41) scc_known = false;
+                }
+                break;
+            }
             case SMRD: {
                 u32 op = (w0 >> 22) & 0x1f, dst = (w0 >> 15) & 0x7f, base = ((w0 >> 9) & 0x3f) * 2;
                 bool imm = (w0 >> 8) & 1;
@@ -410,6 +543,12 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                     // first one's index in the buffer, how many
                     u32 desc[4];
                     for (u32 k = 0; k < 4; k++) desc[k] = get(base + k, 0, ok);
+                    if (!ok && dead) {
+                        windows.push_back({v.u.size(), 0, 0});
+                        v.u.insert(v.u.end(), {0, 0, 0});
+                        forget(dst, count);
+                        break;
+                    }
                     if (!ok) {
                         v.why = "a scalar load through a buffer descriptor the shader works out";
                         return v;
@@ -423,6 +562,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                     } else {
                         u64 bytes = stride ? u64(desc[2]) * stride : desc[2];
                         n = u32(std::min<u64>(bytes / 4, 1u << 20));
+                        if (n > 16384 && dead) n = 0;
                         if (n > 16384) {
                             v.why = "a scalar load, by an offset the shader works out, from a buffer of more than 64 KiB";
                             return v;
@@ -449,6 +589,11 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                 } else {
                     at = ((s[base] | (u64(s[base + 1]) << 32)) & ~3ull) + offset;
                     ok = ok && known[base] && known[base + 1];
+                }
+                if (!ok && dead) {
+                    v.u.insert(v.u.end(), count, 0u);
+                    forget(dst, count);
+                    break;
                 }
                 if (!ok) {
                     v.why = "a scalar load from an address the shader works out";
