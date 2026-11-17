@@ -965,8 +965,8 @@ bool gpu_vertices(vkdraw::Draw& d, std::string& why, const GpuRegs& r, u64 vs, u
     st.user_count = users;
     st.attributes = attributes;
     for (u32 k = 0; k < 32; k++) st.input_cntl[k] = reg(r, 0x191 + k, k);
-    for (size_t k = 0; k < vals.buffers.size() && k < 32; k++)
-        if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1u << k;
+    for (size_t k = 0; k < vals.buffers.size() && k < 64; k++)
+        if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1ull << k;
     // the program, as decoded (its fetch shader's code included), and the state: translated once
     u64 code_hash = 0x9e3779b97f4a7c15ull;
     for (const auto& in : prog.code) code_hash = (code_hash ^ in.w0 ^ (u64(in.w1) << 32) ^ (u64(in.lit) << 16)) * 0x100000001b3ull;
@@ -1120,8 +1120,8 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
         if (slot == ps_buffers.size()) ps_buffers.push_back(b);
         st.buffer_slot.push_back(slot);
     }
-    for (size_t k = 0; k < vals.buffers.size() && k < 32; k++)
-        if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1u << k;
+    for (size_t k = 0; k < vals.buffers.size() && k < 64; k++)
+        if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1ull << k;
     // each image instruction's descriptors; those that read the same texture the same way share it
     std::vector<const translate::Values::Image*> unique;
     for (auto& im : vals.images) {

@@ -1155,6 +1155,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     `--gpu-check` as before (77 of 80, depth the same), the validation layer reporting
     nothing.
 
+67. **A vertex shader's buffers on the GPU: up to 63, not 31.** The draws done wholly on the
+    CPU were mostly those whose vertex shaders read more than 31 buffers (1,292 in a
+    300-second run): 41, as it turned out, for three shader pairs, with thousands of
+    triangles each. They took most of the 31 to 42 seconds that vertex shaders on the CPU
+    took. A vertex shader may now have 63 buffers (bindings 17 to 31, and 72 to 119), and
+    the descriptors' flag for a buffer indexed by lane is kept for 64 of them (it was for 32:
+    the 33rd's on would have been lost, and looked for with a shift past a 32-bit word's
+    end). In 300 seconds: the
+    vertex shaders on the CPU took 0.1 to 0.2 seconds, and draws were 2,085,358 and
+    1,975,261 in two runs (1,512,952 and 1,636,960 before). With `--save-ps` set to those
+    draws' pixel shaders, `--gpu-check` compared 8 of them (the rest weren't reached in its
+    400 seconds): the same as the CPU's in every pixel, but in those frames neither drew any
+    pixel, which says less about their vertices than a draw that did would. `--gpu-check`
+    as before (77 of 80, depth the same), the validation layer reporting nothing.
+
 ## Files
 
 | Path | |

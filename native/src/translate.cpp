@@ -1536,6 +1536,10 @@ void Writer::buffer_op(const Inst& in) {
         fail("buffer loads other than by index");
         return;
     }
+    if (buffer >= 64) {  // (the descriptors' flags are kept for 64)
+        fail("more than 64 buffer loads");
+        return;
+    }
     if ((st.add_tid >> buffer) & 1) {
         fail("buffers indexed by lane");
         return;

@@ -529,7 +529,7 @@ VkAccessFlags rest_access(const Resident& r) {
 }
 thread_local bool t_inside = false;  // this thread holds g_lock
 
-constexpr u32 IMAGES = 31, BUFFERS = 31, PS_BUFFERS = 16;  // a pixel shader's textures (1-15, 40-55), buffers (56-71); a vertex shader's buffers (17-31, 72-87)
+constexpr u32 IMAGES = 31, BUFFERS = 63, PS_BUFFERS = 16;  // a pixel shader's textures (1-15, 40-55), buffers (56-71); a vertex shader's buffers (17-31, 72-119)
 constexpr u32 STORES = 4, LOADS = 4;  // a compute shader's storage images: stores (32-35), loads (36-39)
 constexpr u32 SETS = 2048;  // descriptor sets in a batch (one a draw or dispatch)
 constexpr VkDeviceSize ARENA = VkDeviceSize(256) << 20;  // the upload buffer's least size
@@ -1293,7 +1293,7 @@ bool draw(Draw& d, std::string& why) {
     bool gpu_vertices = !d.indices.empty();
     if (d.textures.size() > IMAGES || d.vs_buffers.size() > BUFFERS || d.ps_buffers.size() > PS_BUFFERS) {
         why = d.textures.size() > IMAGES ? "more than 31 images"
-              : d.vs_buffers.size() > BUFFERS ? "more than 31 vertex shader buffers" : "more than 16 pixel shader buffers";
+              : d.vs_buffers.size() > BUFFERS ? "more than 63 vertex shader buffers" : "more than 16 pixel shader buffers";
         return false;
     }
     size_t nt = d.targets.size();
