@@ -121,7 +121,9 @@ On Windows, the draws are drawn on the PC's GPU (all of them, so far), and the g
 its own 30 frames a second to its title screen, which comes within 30 seconds (`--seconds
 30`). `--cpu` draws them on the CPU instead, as the Linux build does, and slower: the title
 screen then comes within 70 seconds (`--seconds 75`). `--gpu-check` draws each draw saved to
-`draws/` on both, and compares the two (below, and `draws/index.txt`). `--no-draw` leaves the
+`draws/` on both, and compares the two (below, and `draws/index.txt`), with the drawing's Vulkan
+validation layer on, if it is installed (it is off otherwise: it costs the most of the time
+the GPU's drawing takes). `--no-draw` leaves the
 drawing out, and the game runs at its own 30 frames a second, to a black screen. The two
 builds run the same code: up to the point where the game's threads started running, they
 made the same calls, from the same places, with the same results.
@@ -1025,6 +1027,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     waiting for the GPU went from about 49 s (batches and read-backs) to 31, and the draws
     from 411,696 to 516,276. All 36 frames saved are the same in every pixel as before;
     validation is clean, and `--gpu-check` is as before.
+60. **The GPU's time, measured; the validation layer only for `--gpu-check`.** Each batch
+    now has timestamps, one after each part of each draw and dispatch, and the summary
+    gives the GPU's time by what it was doing. It showed the GPU busy for 15 seconds of a
+    300-second run, while the loader waited more than 200 seconds for it: the waiting was
+    not the GPU's work. It was the validation layer, which was on in every run where it is
+    installed, and which checks each submission (and every call that records one) on the
+    CPU; with the timestamps' queries to check as well, the run got through only 300,605
+    draws. The drawing's validation layer is now on for `--gpu-check`'s runs alone (where
+    the summary reports what it found, and the timestamps are left out); the window's own
+    use of Vulkan keeps it as before. In 300 seconds: 571,291 draws (516,276 before), the
+    GPU busy for 16.3 s, the drawing first in it (6 s), then the targets', textures' and
+    depth's uploads (3.4 s); waiting for batches 23.2 s and for read-backs 16.1. The 36
+    frames saved are the same in every pixel as before; `--gpu-check` is as before, and
+    the validation layer, there, reported nothing.
 
 ## Files
 

@@ -93,7 +93,9 @@ bool init() {
     vkEnumerateInstanceLayerProperties(&n, nullptr);
     std::vector<VkLayerProperties> layers(n);
     vkEnumerateInstanceLayerProperties(&n, layers.data());
-    for (auto& l : layers) g.validation |= std::strcmp(l.layerName, layer) == 0;
+    // the validation layer, if it is installed, for --gpu-check's runs (it checks every call
+    // the loader makes, on the CPU: elsewhere it would cost the most of the GPU's time)
+    for (auto& l : layers) g.validation |= M.gpu_check && std::strcmp(l.layerName, layer) == 0;
     const char* ext = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     VkDebugUtilsMessengerCreateInfoEXT mi{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
     mi.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
@@ -854,6 +856,47 @@ u32 g_sets = 0;  // its descriptor sets
 std::vector<GpuImage> g_doomed;  // images to go once the batch is done
 std::vector<VkImageView> g_doomed_views;  // and views
 
+// The GPU's time, measured: a timestamp after each part of each draw and dispatch, the time
+// from the one before it counted to that part (by what it is), once the batch is done
+struct Timing {
+    VkQueryPool pool = VK_NULL_HANDLE;
+    bool tried = false;
+    double period = 1;  // nanoseconds a tick
+    u64 mask = ~0ull;  // the bits a timestamp has
+    std::vector<const char*> what;  // the batch's timestamps (the first: its start)
+    std::map<std::string, u64> ns;
+} g_time;
+constexpr u32 TIMESTAMPS = 32768;  // a batch's at most (past that, the rest go uncounted)
+
+bool timing_ready() {
+    if (g_time.pool) return true;
+    if (g_time.tried) return false;
+    g_time.tried = true;
+    if (g.validation) return false;  // (with it, the timestamps would cost more than they tell)
+    u32 qn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g.gpu, &qn, nullptr);
+    std::vector<VkQueueFamilyProperties> qs(qn);
+    vkGetPhysicalDeviceQueueFamilyProperties(g.gpu, &qn, qs.data());
+    u32 bits = g.family < qn ? qs[g.family].timestampValidBits : 0;
+    if (!bits) return false;
+    VkPhysicalDeviceProperties pr;
+    vkGetPhysicalDeviceProperties(g.gpu, &pr);
+    g_time.period = pr.limits.timestampPeriod;
+    g_time.mask = bits >= 64 ? ~0ull : (1ull << bits) - 1;
+    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = TIMESTAMPS;
+    if (vkCreateQueryPool(g.device, &qi, nullptr, &g_time.pool) != VK_SUCCESS) g_time.pool = VK_NULL_HANDLE;
+    return g_time.pool != VK_NULL_HANDLE;
+}
+
+// The GPU's work recorded since the last mark: `what` (outside a render pass's draws)
+void mark(VkCommandBuffer cmd, const char* what) {
+    if (!g_time.pool || g_time.what.empty() || g_time.what.size() >= TIMESTAMPS) return;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_time.pool, u32(g_time.what.size()));
+    g_time.what.push_back(what);
+}
+
 VkCommandBuffer batch() {
     if (!g_recording) {
         vkResetCommandBuffer(k.cmd, 0);
@@ -861,6 +904,12 @@ VkCommandBuffer batch() {
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(k.cmd, &begin);
         g_recording = true;
+        g_time.what.clear();
+        if (timing_ready()) {
+            vkCmdResetQueryPool(k.cmd, g_time.pool, 0, TIMESTAMPS);
+            vkCmdWriteTimestamp(k.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_time.pool, 0);
+            g_time.what.push_back("start");
+        }
     }
     return k.cmd;
 }
@@ -882,6 +931,17 @@ bool flush_batch(const char* why = "other") {
     bool ok = vkQueueSubmit(g.queue, 1, &si, k.fence) == VK_SUCCESS &&
               vkWaitForFences(g.device, 1, &k.fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS;
     k.wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    if (ok && g_time.what.size() > 1) {
+        std::vector<u64> ts(g_time.what.size());
+        if (vkGetQueryPoolResults(g.device, g_time.pool, 0, u32(ts.size()), ts.size() * 8, ts.data(), 8, VK_QUERY_RESULT_64_BIT) ==
+            VK_SUCCESS)
+            for (size_t i = 1; i < ts.size(); i++) {
+                u64 d = (ts[i] - ts[i - 1]) & g_time.mask;
+                if (d > g_time.mask / 2) d = 0;  // (one that finished before the one before it)
+                g_time.ns[g_time.what[i]] += u64(double(d) * g_time.period);
+            }
+    }
+    g_time.what.clear();
     g_arena = 0;
     g_sets = 0;
     vkResetDescriptorPool(g.device, k.dpool, 0);
@@ -957,6 +1017,7 @@ bool read_back(Resident& r, const std::string& why) {
     hb.buffer = k.readback.buffer;
     hb.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
+    mark(cmd, "reading kept memory back");
     if (!flush_batch("reading a target back")) return false;
     guard(r, 2);
     std::memcpy(reinterpret_cast<void*>(r.base), k.readback.p, r.bytes);
@@ -1082,6 +1143,7 @@ bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why) {
         vkCmdCopyBufferToImage(cmd, k.scratch.buffer, n.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
         barrier(cmd, n.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest(n), VK_ACCESS_TRANSFER_WRITE_BIT, rest_access(n), T, rest_stage(n),
                 aspect(n));
+        mark(cmd, "kept memory given another shape");
     }
     // the old image goes once the batch is done
     g_doomed.push_back(r.image);
@@ -1428,6 +1490,7 @@ bool draw(Draw& d, std::string& why) {
             mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(cmd, T, S, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            mark(cmd, "draws: buffers into the pool");
         }
         unsent.sent = true;
     }
@@ -1482,6 +1545,7 @@ bool draw(Draw& d, std::string& why) {
         barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT, T, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         k.target_textures++;
+        mark(cmd, "draws: kept memory copied, to read as a texture");
     }
     std::vector<VkRenderingAttachmentInfo> atts(nt, {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO});
     for (size_t i = 0; i < nt; i++) {
@@ -1567,6 +1631,7 @@ bool draw(Draw& d, std::string& why) {
         area_w = nt ? std::min(area_w, d.depth.width) : d.depth.width;
         area_h = nt ? std::min(area_h, d.depth.height) : d.depth.height;
     }
+    mark(cmd, "draws: targets, textures and depth uploaded");
     VkRenderingInfo rinfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
     rinfo.renderArea = {{0, 0}, {area_w, area_h}};
     rinfo.layerCount = 1;
@@ -1592,6 +1657,7 @@ bool draw(Draw& d, std::string& why) {
         vkCmdDraw(cmd, u32(d.vertices.size() / ((1 + d.attributes) * 4)), 1, 0, 0);
     }
     vkCmdEndRendering(cmd);
+    mark(cmd, "draws: drawing");
     if (!kept) {  // --gpu-check's copies come back now
         for (size_t i = 0; i < nt; i++) {
             if (!target[i]) continue;
@@ -1624,6 +1690,7 @@ bool draw(Draw& d, std::string& why) {
     }
     for (auto& im : unkept)
         if (im.image) g_doomed.push_back(im);  // once the batch is done
+    if (!kept) mark(cmd, "--gpu-check's copies back");
     if (!kept && !flush_batch("--gpu-check")) {
         why = "the GPU didn't finish the draw";
         return false;
@@ -1910,6 +1977,7 @@ bool dispatch(Dispatch& d, std::string& why) {
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(cmd, T, X, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        mark(cmd, "dispatches: arrays copied from kept memory");
     }
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                         SRW = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -1929,11 +1997,13 @@ bool dispatch(Dispatch& d, std::string& why) {
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, SRW, C | T, X);
         }
     }
+    mark(cmd, "dispatches: memory uploaded");
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, k.layout, 0, 1, &set, 0, nullptr);
     vkCmdDispatch(cmd, d.groups[0], d.groups[1], d.groups[2]);
     for (Resident* r : used)
         barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, RW, X, C);
+    mark(cmd, "dispatches: dispatching");
     // the memory: older than what was written; the same as what was only taken up and read
     std::set<Resident*> stored(into.begin(), into.end());
     for (Resident* r : stored) written(*r);
@@ -2009,6 +2079,7 @@ bool clear_depth(u64 address, u32 width, u32 height, float value, int stencil, b
     }
     barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_WRITE_BIT, rest_access(r), T, rest_stage(r),
             aspect(r));
+    mark(cmd, "depth buffers cleared");
     if (r.state != Resident::gpu) {  // the image is now the newer
         guard(r, 0);
         r.state = Resident::gpu;
@@ -2182,6 +2253,7 @@ void main() {
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
+    mark(cmd, "depth buffers' fast clears (HTILE)");
     if (z.state != Resident::gpu) {  // the image is (or may be) now the newer
         guard(z, 0);
         z.state = Resident::gpu;
@@ -2267,7 +2339,7 @@ std::string device() {
     std::lock_guard lock(g_lock);
     if (!g.ok) return g.tried ? "Vulkan couldn't be used: " + g.why : "";
     std::string s = "on the " + g.name;
-    if (!g.validation) return s + " (the validation layer isn't installed)";
+    if (!g.validation) return s + (M.gpu_check ? " (the validation layer isn't installed)" : "");
     if (u64 n = g_messages.load()) return s + std::format(" (the validation layer reported {} problems, the first: {})", n, g_first_message);
     return s + " (the validation layer reported no problems)";
 }
@@ -2279,6 +2351,19 @@ std::string tally(const char* head, const std::map<std::string, u64>& m) {
     std::sort(by.rbegin(), by.rend());
     std::string t = head;
     for (size_t i = 0; i < by.size() && i < 25; i++) t += std::format("| {} | {} |\n", by[i].second, by[i].first);
+    return t;
+}
+
+// The GPU's time, by what it was doing, the most first
+std::string gpu_time() {
+    if (g_time.ns.empty()) return {};
+    std::vector<std::pair<u64, std::string>> by;
+    u64 all = 0;
+    for (auto& [what, ns] : g_time.ns) by.push_back({ns, what}), all += ns;
+    std::sort(by.rbegin(), by.rend());
+    std::string t = std::format("\nThe GPU's time (from timestamps), {:.1f} s in all, by what it was doing:\n\n| What | Seconds |\n|---|---:|\n",
+                                double(all) / 1e9);
+    for (auto& [ns, what] : by) t += std::format("| {} | {:.2f} |\n", what, double(ns) / 1e9);
     return t;
 }
 
@@ -2316,7 +2401,7 @@ std::string report() {
                        double(k.wait_ns) / 1e9, double(k.readback_ns) / 1e9, double(k.upload_ns) / 1e9, k.texture_upload_bytes >> 20,
                        double(k.buffer_upload_ns) / 1e9, k.buffer_upload_bytes >> 20) +
            tally(".\n\nWhy batches went to the GPU:\n\n| Why | Times |\n|---|---:|\n", g_batch_why) +
-           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why) + readback_time();
+           tally("\nTargets read back into memory:\n\n| Why (target) | Times |\n|---|---:|\n", g_readback_why) + readback_time() + gpu_time();
 }
 
 }  // namespace mensis::vkdraw
