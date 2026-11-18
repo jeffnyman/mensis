@@ -35,6 +35,14 @@ struct Texture {
     // pitch / 4 (pitch a multiple of 4), held here
     u32 block = 0;
     std::vector<unsigned char> blocks;
+    // And some of its layers (format set, in rows) in memory kept on the GPU: copied from
+    // there, not from blocks (their place in memory; kept_pitch texels to a row there)
+    struct KeptLayer {
+        u32 layer;
+        u64 address;
+    };
+    std::vector<KeptLayer> kept_layers;
+    u32 kept_pitch = 0;
 };
 
 // A buffer's elements (a uvec4 each), shared with the kept ones it came from
@@ -136,6 +144,10 @@ bool clear_depth_by_htile(u64 htile, u64 tiles, u64 address, u32 width, u32 heig
 // If that memory is kept on the GPU, a number that changes whenever anything writes it (a draw,
 // a dispatch, the CPU); else 0
 u64 version(u64 address);
+// If [address, address + bytes) is all in one piece of memory kept on the GPU, `bpp` bytes a
+// texel (not a depth buffer), and the memory isn't the newer (the CPU writing it would be seen:
+// its pages are guarded), that number; else 0
+u64 steady_version(u64 address, u64 bytes, u32 bpp);
 
 bool has_texture(const std::string& key);
 // Whether textures can be sent as their compressed blocks (BC1-7, textureCompressionBC)

@@ -1365,6 +1365,61 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             d.textures.push_back(std::move(tx));
             continue;
         }
+        // in rows, some of its layers in memory kept on the GPU (a cube's faces drawn there,
+        // say): those layers copied from there, by their version; the rest hashed and copied
+        // from memory, as below. (So the memory kept isn't read back, to be hashed or copied.)
+        if (raw_format && ti.all_ok && !ti.block && tx.bpp == ti.bytes && tx.bpp % 4 == 0 && !micro && ti.type != 10 &&
+            layout(ti.dfmt).count) {
+            u64 end = ti.base + ti.size;
+            std::vector<u64> from(tx.layers), stamp(tx.layers);
+            bool any = false;
+            {
+                Timer hashing(g_texture_hash_ns);
+                for (u32 l = 0; l < tx.layers; l++) {
+                    u32 slice = ti.array() || cube ? ti.base_array + l : 0;
+                    u64 a0 = element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, 0, slice);
+                    u64 bytes = (u64(tx.height - 1) * ti.epitch + tx.width) * tx.bpp;
+                    from[l] = a0;
+                    if (u64 v = a0 ? vkdraw::steady_version(a0, bytes, tx.bpp) : 0) {
+                        stamp[l] = v << 1 | 1, any = true;
+                    } else if (a0) {
+                        u64 before = g_hashed_bytes;
+                        u64 a1 = std::min(end, element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, 0, slice + 1));
+                        stamp[l] = memory_stamp(a0, std::max(a1, a0 + bytes) - a0) << 1;
+                        g_texture_hash_bytes += g_hashed_bytes - before;
+                    }
+                }
+            }
+            if (any) {
+                u64 h = 0x9e3779b97f4a7c15ull;
+                for (u64 x : stamp) h = (h ^ x) * 0x100000001b3ull;
+                tx.key = std::format("layers:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
+                                     im.t[5], im.t[6], im.t[7], h);
+                if (!vkdraw::has_texture(tx.key)) {
+                    Timer copying(g_texture_copy_ns);
+                    g_texture_copied++;
+                    tx.format = raw_format;
+                    tx.pitch = tx.width;
+                    tx.kept_pitch = ti.epitch;
+                    for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+                    size_t row = size_t(tx.width) * tx.bpp;
+                    tx.blocks.resize(row * tx.height * tx.layers);
+                    for (u32 l = 0; l < tx.layers; l++) {
+                        if (stamp[l] & 1) {
+                            tx.kept_layers.push_back({l, from[l]});
+                            continue;
+                        }
+                        unsigned char* o = tx.blocks.data() + row * tx.height * l;
+                        u32 slice = ti.array() || cube ? ti.base_array + l : 0;
+                        for (u32 y = 0; y < tx.height; y++, o += row)
+                            std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, y, slice)),
+                                        row);
+                    }
+                }
+                d.textures.push_back(std::move(tx));
+                continue;
+            }
+        }
         if (ti.all_ok) {
             u64 h = 0;
             if (layout(ti.dfmt).count) {

@@ -452,6 +452,7 @@ struct Kept {
     u64 reshapes = 0;  // kept memory given another shape (on the GPU)
     u64 depth_clears = 0;  // depth buffers cleared there
     u64 target_textures_same = 0;  // kept memory read as a texture, its copy still the same
+    u64 layers_from_kept = 0;  // textures' layers copied from kept memory there
     u64 htile_checks = 0;  // depth buffers' fast clears seen to there (their HTILE buffers kept there)
     u64 arrays_kept = 0;  // compute shaders' arrays copied from kept memory there
     u64 ns = 0, dispatch_ns = 0;  // the time the draws and dispatches took, uploads included
@@ -1132,6 +1133,18 @@ void read_back_pages(u64 lo, u64 hi, const char* why) {
 bool make_kept_image(Resident& r, std::string& why);
 bool reshape(Resident& r, u32 format, u32 width, u32 rows, std::string& why);
 
+// The memory kept on the GPU that holds a texture's layer, in rows of `pitch` texels, as it is
+// there (the newer, or the same as the memory); else none
+Resident* layer_kept(u64 address, u32 pitch, u32 width, u32 height, u32 bpp) {
+    u64 bytes = (u64(height - 1) * pitch + width) * bpp;
+    for (auto& [base, r] : g_resident)
+        if (address >= base && address + bytes <= base + r.bytes && r.bpp == bpp && (address - base) % bpp == 0 && !r.depth &&
+            !r.sbase && r.state != Resident::memory)
+            return &r;
+    return nullptr;
+}
+
+
 Resident* keep(u64 address, u32 format, u32 width, u32 rows, u32 bpp, std::string& why, u64 sbase = 0) {
     u64 bytes = u64(width) * rows * bpp;
     u64 lo = address & ~u64(0xfff), hi = (address + bytes + 0xfff) & ~u64(0xfff);
@@ -1341,6 +1354,19 @@ bool draw(Draw& d, std::string& why) {
         }
         read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff), "a texture in its pages, not of it");
     }
+    // textures' layers in kept memory: each from its image, through the scratch buffer
+    std::vector<std::vector<Resident*>> kept_from(d.textures.size());
+    for (size_t i = 0; i < d.textures.size(); i++)
+        for (const auto& kl : d.textures[i].kept_layers) {
+            const Texture& t = d.textures[i];
+            Resident* r = layer_kept(kl.address, t.kept_pitch, t.width, t.height, t.bpp);
+            if (!r) {
+                why = "a texture's layer in kept memory let go meanwhile";
+                return false;
+            }
+            kept_from[i].push_back(r);
+            scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
+        }
     if (scratch_needed > k.scratch.size && (!flush_batch("the scratch buffer") || !k.scratch.reserve(scratch_needed))) {  // (not in use, to be made bigger)
         why = "out of GPU memory";
         return false;
@@ -1686,6 +1712,40 @@ bool draw(Draw& d, std::string& why) {
         c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, im.layers};
         c.imageExtent = {t.width, t.height, t.type == 10 ? t.layers : 1};
         vkCmdCopyBufferToImage(cmd, k.upload.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+        if (!kept_from[i].empty()) {  // its layers in kept memory, over what went up for them
+            barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, T, T);
+            for (size_t j = 0; j < kept_from[i].size(); j++) {
+                Resident& r = *kept_from[i][j];
+                const Texture::KeptLayer& kl = t.kept_layers[j];
+                VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                bb.buffer = k.scratch.buffer;
+                bb.size = VK_WHOLE_SIZE;
+                bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;  // (an earlier copy done with it)
+                bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT,
+                        rest_stage(r), T, aspect(r));
+                VkBufferImageCopy whole{};
+                whole.imageSubresource = {aspect(r), 0, 0, 1};
+                whole.imageExtent = {r.width, r.height, 1};
+                vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &whole);
+                barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(r), T,
+                        rest_stage(r), aspect(r));
+                bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                VkBufferImageCopy one{};
+                one.bufferOffset = kl.address - r.base;
+                one.bufferRowLength = t.kept_pitch;
+                one.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, kl.layer, 1};
+                one.imageExtent = {t.width, t.height, 1};
+                vkCmdCopyBufferToImage(cmd, k.scratch.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &one);
+                k.layers_from_kept++;
+            }
+            mark(cmd, "draws: textures' layers copied from kept memory");
+        }
         barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, T,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
@@ -2367,6 +2427,15 @@ void main() {
     return true;
 }
 
+u64 steady_version(u64 address, u64 bytes, u32 bpp) {
+    std::lock_guard lock(g_lock);
+    for (auto& [base, r] : g_resident)
+        if (address >= base && address + bytes <= base + r.bytes && r.bpp == bpp && (address - base) % bpp == 0 && !r.depth &&
+            !r.sbase)
+            return r.state == Resident::memory ? 0 : r.version ? r.version : (r.version = ++g_writes);
+    return 0;
+}
+
 u64 version(u64 address) {
     std::lock_guard lock(g_lock);
     for (auto& [base, r] : g_resident)
@@ -2501,10 +2570,10 @@ std::string report() {
     return std::format("{} draws on the GPU took {:.1f} s, uploads included; {} pipelines; {} textures uploaded, {} kept at "
                        "the end ({} MiB), {} let go. Render targets kept there: {} at the end; taken up from memory {} times, "
                        "read back into it {} times (when touched), written there {} times, {} let go; read as textures {} times "
-                       "(copied again {} of them; the copy still the same {})",
+                       "(copied again {} of them; the copy still the same {}; textures' layers copied from there {})",
                        k.draws, double(k.ns) / 1e9, k.pipelines.size(), k.texture_uploads, k.textures.size(),
                        k.texture_bytes >> 20, k.evicted, g_resident.size(), k.target_uploads, k.readbacks, k.writes, k.let_go,
-                       k.target_textures + k.target_textures_same, k.target_textures, k.target_textures_same) +
+                       k.target_textures + k.target_textures_same, k.target_textures, k.target_textures_same, k.layers_from_kept) +
            (k.dispatches ? std::format(". {} compute dispatches there took {:.1f} s ({} of their arrays copied there from kept memory)", k.dispatches,
                                        double(k.dispatch_ns) / 1e9, k.arrays_kept) : "") +
            std::format(". Kept there because compute shaders stored into it: {} pieces of memory; given another shape there {} times. "
@@ -2535,6 +2604,7 @@ bool kept(u64, u64, u32) { return false; }
 bool clear_depth(u64, u32, u32, float, int, bool, u32, u32, u32, u32) { return false; }
 bool clear_depth_by_htile(u64, u64, u64, u32, u32, float) { return false; }
 u64 version(u64) { return 0; }
+u64 steady_version(u64, u64, u32) { return 0; }
 bool touched(u64, bool, u64) { return false; }
 bool dispatch(Dispatch&, std::string& why) {
     why = "no Vulkan in this build (the Windows build has it)";

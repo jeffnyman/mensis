@@ -1238,6 +1238,25 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     before. `--gpu-check` as before (77 of 80, depth the same; all 100 dispatches the same),
     the validation layer reporting nothing.
 
+71. **A texture's layers in kept memory copied there.** The first of item 70's three. The
+    cube arrays (36 faces of two 16-bit floats, in rows) had some faces in memory kept on
+    the GPU (from 6 to 28 of the 36) and the rest in memory as it is; the whole was hashed
+    and copied out of memory, which brought the kept faces back. Now a texture in rows
+    (not micro-tiled, not 3D, in a format the GPU reads as it is) with any layer in kept
+    memory (wholly in one piece of it, of the texture's texel size, not a depth buffer, and
+    not the memory's newer) is kept under the T# and, for each layer, that memory's version
+    or a hash of the layer's own memory; the other layers are copied from memory as before,
+    and the kept ones on the GPU, each from its image through the scratch buffer (vkdraw's
+    `layer_kept`, `steady_version`; the summary counts the layers). In 300 seconds: 80,226
+    layers copied there; the read-backs to hash memory 1,118 and 1,120 in two runs (3.8 to
+    4.0 s; 7,367, 9.8 s, before), the textures' bytes hashed 6.0 GB (47 before), and all
+    the time reading back 21.8 and 24.0 s (25.8 to 28.5). The time telling whether textures'
+    memory changed is about as before (17 s): each layer is now told apart by itself, 36
+    calls where there was one. Draws were 1,928,824 and 1,983,532, as before. With
+    `--gpu-check`, three of the draws compared read such a cube array (6 of 36 layers kept,
+    256x256; 18 and 24 of 36, 64x64): 77 of 80 the same as the CPU's, as before, depth the
+    same, the validation layer reporting nothing; all 100 dispatches compared the same.
+
 ## Files
 
 | Path | |
