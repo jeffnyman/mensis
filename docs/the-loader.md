@@ -1270,6 +1270,21 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     finely between the GPU and the CPU; what would end item 70's chain is the draws reading
     such memory from the GPU (as buffers and textures there), so that it needn't come back.
 
+73. **Tried, and not kept: a store into part of a page done on the GPU and copied back at
+    once.** The draws read memory kept on the GPU for only about 4 seconds of a 300-second
+    run now (item 71), so item 72's last line would gain little; the dispatches with image
+    stores still cost about 30 seconds on the CPU and 13 more reading back what they read.
+    So their stores into part of a page were done into an image of the dispatch's own (the
+    memory taken up into it first), copied back into the memory at once, the batch waited
+    for; the memory is never kept, and nothing is let go (5 times in the run). That much
+    worked: 33,819 such stores. But behind the image stores, those shaders sample images too,
+    which a compute shader on the GPU doesn't yet: 31,435 dispatches then stopped there and
+    stayed on the CPU (23 s), reading back as before; and each copy back waits for the GPU,
+    so the waits for batches went from 33 to 67 seconds. Draws fell to 1,665,361 (about 1.98
+    million). Taken back out. For those dispatches, images sampled in compute shaders come
+    first; and their stores would want to go back into the memory without a wait each (with
+    the next batch's, say, before anything reads the memory).
+
 ## Files
 
 | Path | |
