@@ -254,7 +254,9 @@ void pack(u32 dfmt, u32 nfmt, const u32 in[4], unsigned char* p) {
 }
 
 Image::Image(const u32* t) {
-    base = (u64(t[0]) | (u64(t[1] & 0xff) << 32)) << 8;
+    // 44 bits of address, as a V#'s: the game sets bits above them (0x40 in the top byte,
+    // say), where nothing is, and the memory is at the address without them
+    base = ((u64(t[0]) | (u64(t[1] & 0xff) << 32)) << 8) & ((u64(1) << 44) - 1);
     dfmt = (t[1] >> 20) & 0x3f;
     nfmt = (t[1] >> 26) & 0xf;
     width = (t[2] & 0x3fff) + 1;

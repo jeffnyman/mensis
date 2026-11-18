@@ -634,7 +634,7 @@ Values evaluate(const Program& p, const u32* user, u32 user_count, const shade::
                         v.why = "an image descriptor the shader works out";
                         return v;
                     }
-                    u64 base = (u64(t[0]) | (u64(t[1] & 0xff) << 32)) << 8;
+                    u64 base = ((u64(t[0]) | (u64(t[1] & 0xff) << 32)) << 8) & ((u64(1) << 44) - 1);  // (44 bits, as shade.cpp's Image)
                     u32 dfmt = (t[1] >> 20) & 0x3f, nfmt = (t[1] >> 26) & 0xf, tiling = (t[3] >> 20) & 0x1f, type = (t[3] >> 28) & 0xf;
                     u32 width = (t[2] & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1, pitch = std::max(((t[4] >> 13) & 0x3fff) + 1, width);
                     bool micro = tiling == 5 || tiling == 9 || tiling == 13 || tiling == 19;

@@ -1201,6 +1201,20 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     seconds, as before: 1,990,111 and 1,989,301 draws. `--gpu-check` as before (77 of 80,
     depth the same), the validation layer reporting nothing.
 
+69. **An image's address: 44 bits, as a buffer's.** The disagreement item 68 found was the
+    CPU's. That shader's T# has 0x40 in the top byte of its address (bits 40 to 47), and
+    the CPU took the address with it: 0x40025dcc0000, where nothing is, so each of its
+    stores was found outside memory and left out. The GPU's way took 44 bits, as for a
+    V# (whose 4 bits above them are something else), and stored at 0x25dcc0000, where the
+    image is. The CPU's images (`shade.cpp`'s `Image`, used for textures as well as image
+    stores) now take 44 bits too, and the translator's image stores say so where they
+    work it out. In the runs here no texture had such bits (none was found not all in
+    memory, before or after); so draws on the GPU are as they were, and the change is to
+    what the CPU does with such an image (with `--cpu`, or where the GPU can't). With
+    `--gpu-check`, all 100 dispatches compared are now the same, that shader's 20 among
+    them; draws compared as before (77 of 80, depth the same), the validation layer
+    reporting nothing. In 300 seconds: 2,038,355 draws.
+
 ## Files
 
 | Path | |
