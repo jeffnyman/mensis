@@ -1308,6 +1308,23 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     dispatches: stores into part of a page that go back into the memory without a wait
     each; micro-tiled stores with them.
 
+75. **Tried, and not kept: stores into part of a page landing with their batch.** Item 74's
+    next line. With micro-tiled stores and item 73's stores into part of a page let through
+    again, each such store's image was copied into a buffer the CPU can read, to go into the
+    memory (land) once its batch was done anyway, not at once; its pages guarded meanwhile,
+    so that whatever touched them first (the game, the loader's own code, or the next draw
+    or dispatch taking the memory up) waited for the batch and landed them all. (A fault on
+    such a page by a second thread, after the first had landed it, is tried again rather
+    than taken for a crash.) It ran, and `--gpu-check` found all 180 dispatches it compared
+    the same as the CPU. But of 59,993 such stores in 300 seconds, 50,322 were wanted before
+    their batch was done: mostly by draws hashing their textures' memory to tell whether it
+    changed, and by the next dispatch storing into the same pages; and for nearly all of
+    them it was the stored bytes themselves that were read, not others beside them in their
+    pages. These stores are the textures the frame's draws read next. Draws were 1,622,385
+    (about 1.61 million for item 74's copy back at once; 2.02 million without either). Taken
+    back out. What would help is those draws reading the textures from the GPU: the stored
+    image laid out as the micro-tiled texture there (on the GPU), not from memory.
+
 ## Files
 
 | Path | |
