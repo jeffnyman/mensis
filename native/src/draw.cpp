@@ -2251,7 +2251,10 @@ std::string gpu_dispatch(const GpuRegs& r, u32 gx, u32 gy, u32 gz) {
             cpu_why = std::move(why);
         }
     }
-    vkdraw::Doing on_cpu("a dispatch on the CPU");
+    // (named by why it is the CPU's, for the read-backs it brings: each name kept for the run)
+    static std::set<std::string> on_cpu_names;
+    vkdraw::Doing on_cpu(cpu_why.empty() ? "a dispatch on the CPU"
+                                         : on_cpu_names.insert(std::format("a dispatch on the CPU ({})", cpu_why)).first->c_str());
     struct Tally {  // (the CPU's time on it, by why the GPU didn't do it)
         const std::string& why;
         u64 groups;

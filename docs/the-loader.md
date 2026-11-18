@@ -1215,6 +1215,29 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     them; draws compared as before (77 of 80, depth the same), the validation layer
     reporting nothing. In 300 seconds: 2,038,355 draws.
 
+70. **The read-backs a dispatch on the CPU brings, by why it is the CPU's.** A read-back's
+    reason, when a dispatch on the CPU touched the memory, now says why the dispatch was the
+    CPU's. In a 300-second run, nearly all of those (35,584 of about 36,000, 13.4 seconds)
+    are brought by the dispatches whose micro-tiled 2D image stores keep them on the CPU,
+    and with the "hashing memory" ones (7,367, 9.8 s) they make one chain, each step of it
+    once a frame or so:
+
+    - dispatches on the GPU store into memory kept there: pieces of 16384x4 texels, and a
+      256x256 image of two 16-bit floats at 0x255080000 (a face of item 62's cube array);
+    - the dispatches with the image stores (shaders 0x2d1b00300 and 0x2d1b00900) read
+      that memory, so it is read back, and store into a texture's mips (two 16-bit floats,
+      micro-tiled: 256x256 at 0x2f39eaf00, then 128x128, 64x64, 32x32; most begin part way
+      into a page, so they would stop at item 68's rule even with image stores done);
+    - draws read the cube array and those mips as textures, which a micro-tiled texture, or
+      a cube, is made from on the CPU (item 62), so the memory kept is read back again.
+
+    To end it the three must move together: the image stores done on the GPU; a texture
+    made on the GPU from memory kept there, when it is micro-tiled or a cube (its texels
+    put in order there, rather than on the CPU); and a texture's mips that share pages kept
+    together, rather than each letting the others go. In 300 seconds: 2,020,288 draws, as
+    before. `--gpu-check` as before (77 of 80, depth the same; all 100 dispatches the same),
+    the validation layer reporting nothing.
+
 ## Files
 
 | Path | |
