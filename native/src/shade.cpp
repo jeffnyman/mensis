@@ -450,7 +450,7 @@ void texel(const Image& t, const Memory& mem, int x, int y, u32 slice, u32 o[4])
     if (!at || (!t.all_ok && !mem.ok(at, t.bytes))) return;
     const auto* p = reinterpret_cast<const unsigned char*>(at);
     if (t.dfmt == 10 && t.nfmt == 0) {  // 8-bit RGBA, the usual
-        for (int k = 0; k < 4; k++) o[k] = u(float(p[k]) * (1.0f / 255.0f));
+        for (int k = 0; k < 4; k++) o[k] = u(float(p[k]) / 255.0f);  // (the nearest float to k / 255, as the GPU gives)
         return;
     }
     if (t.nfmt == 7 && (t.dfmt == 4 || t.dfmt == 11 || t.dfmt == 14)) {  // 32-bit floats: as they are

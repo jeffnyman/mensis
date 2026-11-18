@@ -1038,6 +1038,247 @@ u32 vk_format(u32 format, u32 nfmt, u32 swap, u32& bpp) {
 }
 // (a texture of 32-bit floats too: a depth buffer, read as one)
 
+// Each image instruction's descriptors, into the translation's state; those that read the
+// same texture the same way share it: the textures, one each
+std::vector<const translate::Values::Image*> sort_images(const std::vector<translate::Values::Image>& images, translate::PsState& st) {
+    std::vector<const translate::Values::Image*> unique;
+    for (auto& im : images) {
+        u32 type = im.t[3] >> 28;
+        st.image_types.push_back(type < 8 ? 9 : type);  // 0 (a null descriptor, all 0s): read as 2D, as the CPU does
+        st.unnormalized.push_back((im.s[0] >> 15) & 1);
+        u32 nfmt = (im.t[1] >> 26) & 0xf;
+        st.integer.push_back(nfmt == 4 || nfmt == 5);
+        st.compare.push_back(im.compare ? ((im.s[0] >> 12) & 7) | (((im.s[2] >> 20) & 3) ? 8u : 0u) | (nfmt == 0 ? 16u : 0u) : 0u);
+        u32 slot = 0;
+        while (slot < unique.size() && (std::memcmp(unique[slot]->t, im.t, sizeof im.t) || std::memcmp(unique[slot]->s, im.s, sizeof im.s)))
+            slot++;
+        if (slot == unique.size()) unique.push_back(&im);
+        st.image_slot.push_back(slot);
+    }
+    return unique;
+}
+
+// The textures a draw's or a dispatch's shader reads, from their descriptors
+bool textures_for(const std::vector<const translate::Values::Image*>& unique, const Memory& mem, std::vector<vkdraw::Texture>& out,
+                  std::string& why) {
+    // the textures: 8-bit RGBA in rows as it is in memory, else each texel as the CPU's
+    // interpreter reads it, which is kept on the GPU under a hash of the memory it reads
+    for (const translate::Values::Image* one : unique) {
+        const auto& im = *one;
+        Image ti(im.t);
+        ti.prepare(mem);
+        vkdraw::Texture tx;
+        tx.type = ti.type < 8 ? 9 : ti.type;
+        tx.width = ti.width;
+        tx.height = ti.type == 8 || ti.type == 12 ? 1 : ti.height;
+        // a cube's faces: the slices from base_array to last_array, as the CPU reads them
+        bool cube = ti.type == 11;
+        tx.layers = ti.array() ? ti.last_array - ti.base_array + 1 : cube ? std::max(ti.last_array, ti.base_array) - ti.base_array + 1
+                    : ti.type == 10 ? ti.depth : 1;
+        tx.integer = ti.nfmt == 4 || ti.nfmt == 5;
+        if (ti.type < 8) {  // not an image (a null descriptor, or one not set): it reads 0, as on the CPU
+            tx.type = 9;
+            tx.width = tx.height = tx.layers = 1;
+            std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
+            tx.key = tx.integer ? "zero:integer" : "zero";
+            if (!vkdraw::has_texture(tx.key)) tx.rgba.assign(4, 0.0f);
+            out.push_back(std::move(tx));
+            continue;
+        }
+        // a format the CPU can't read (an unused descriptor's, say) reads the same everywhere:
+        // one texel of it does
+        if (!layout(ti.dfmt).count) tx.width = tx.height = tx.layers = 1;
+        if (u64(tx.width) * tx.height * tx.layers > (1u << 24)) {
+            why = "textures of over 16 million texels";
+            return false;
+        }
+        std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
+        bool micro = ti.tiling == 5 || ti.tiling == 9 || ti.tiling == 13 || ti.tiling == 19;
+        u32 raw_format = ti.dfmt == 10 && (ti.nfmt == 0 || ti.nfmt == 9) ? (ti.nfmt == 9 ? 43 : 37)  // R8G8B8A8_UNORM, _SRGB
+                         : vk_format(ti.dfmt, ti.nfmt, 0, tx.bpp);
+        if (ti.dfmt == 10) tx.bpp = 4;
+        if (ti.type == 9 && raw_format && !micro && ti.all_ok) {
+            tx.format = raw_format;
+            tx.pitch = ti.epitch;
+            tx.raw = reinterpret_cast<const unsigned char*>(ti.base);
+            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            // kept on the GPU from draw to draw too, under the T# and a hash of its memory;
+            // not memory kept there (a target's, read as a texture), which the GPU copies,
+            // and which hashing it here would only bring back
+            u64 bytes = u64(tx.pitch) * tx.height * tx.bpp;
+            if (!vkdraw::version(ti.base) && !vkdraw::version(ti.base + bytes - 1)) {
+                Timer hashing(g_texture_hash_ns);
+                u64 before = g_hashed_bytes;
+                u64 h = memory_stamp(ti.base, bytes);
+                g_texture_hash_bytes += g_hashed_bytes - before;
+                tx.key = std::format("raw:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
+                                     im.t[5], im.t[6], im.t[7], h);
+            }
+            out.push_back(std::move(tx));
+            continue;
+        }
+        // block-compressed, 2D (BC1-5, BC7, as the CPU decodes them): the blocks, their tiling
+        // undone, in rows, for the GPU to decode; kept there like the rest
+        u32 bc = !ti.block || ti.type != 9 || !ti.all_ok || !vkdraw::compressed() ? 0
+                 : ti.nfmt == 0 ? (ti.dfmt == 35 ? 133 : ti.dfmt == 36 ? 135 : ti.dfmt == 37 ? 137 : ti.dfmt == 38 ? 139
+                                   : ti.dfmt == 39 ? 141 : ti.dfmt == 41 ? 145 : 0)  // VK_FORMAT_BCn_..._UNORM_BLOCK
+                 : ti.nfmt == 9 ? (ti.dfmt == 35 ? 134 : ti.dfmt == 36 ? 136 : ti.dfmt == 37 ? 138 : ti.dfmt == 41 ? 146 : 0)  // _SRGB_BLOCK
+                                : 0;
+        if (bc) {
+            tx.format = bc;
+            tx.block = ti.bytes;
+            u32 across = (ti.width + 3) / 4, down = (ti.height + 3) / 4;
+            tx.pitch = across * 4;
+            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            {
+                Timer hashing(g_texture_hash_ns);
+                u64 before = g_hashed_bytes;
+                u64 h = memory_stamp(ti.base, ti.size);
+                g_texture_hash_bytes += g_hashed_bytes - before;
+                tx.key = std::format("bc:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
+                                     im.t[5], im.t[6], im.t[7], h);
+            }
+            if (!vkdraw::has_texture(tx.key)) {
+                Timer sending(g_texture_blocks_ns);
+                g_texture_blocks++;
+                tx.blocks.resize(size_t(across) * down * ti.bytes);
+                unsigned char* o = tx.blocks.data();
+                for (u32 y = 0; y < down; y++)
+                    for (u32 x = 0; x < across; x++, o += ti.bytes)
+                        std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, x, y, 0)),
+                                    ti.bytes);
+            }
+            out.push_back(std::move(tx));
+            continue;
+        }
+        // in rows, some of its layers in memory kept on the GPU (a cube's faces drawn there,
+        // say): those layers copied from there, by their version; the rest hashed and copied
+        // from memory, as below. (So the memory kept isn't read back, to be hashed or copied.)
+        if (raw_format && ti.all_ok && !ti.block && tx.bpp == ti.bytes && tx.bpp % 4 == 0 && !micro && ti.type != 10 &&
+            layout(ti.dfmt).count) {
+            u64 end = ti.base + ti.size;
+            std::vector<u64> from(tx.layers), stamp(tx.layers);
+            bool any = false;
+            {
+                Timer hashing(g_texture_hash_ns);
+                for (u32 l = 0; l < tx.layers; l++) {
+                    u32 slice = ti.array() || cube ? ti.base_array + l : 0;
+                    u64 a0 = element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, 0, slice);
+                    u64 bytes = (u64(tx.height - 1) * ti.epitch + tx.width) * tx.bpp;
+                    from[l] = a0;
+                    if (u64 v = a0 ? vkdraw::steady_version(a0, bytes, tx.bpp) : 0) {
+                        stamp[l] = v << 1 | 1, any = true;
+                    } else if (a0) {
+                        u64 before = g_hashed_bytes;
+                        u64 a1 = std::min(end, element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, 0, slice + 1));
+                        stamp[l] = memory_stamp(a0, std::max(a1, a0 + bytes) - a0) << 1;
+                        g_texture_hash_bytes += g_hashed_bytes - before;
+                    }
+                }
+            }
+            if (any) {
+                u64 h = 0x9e3779b97f4a7c15ull;
+                for (u64 x : stamp) h = (h ^ x) * 0x100000001b3ull;
+                tx.key = std::format("layers:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
+                                     im.t[5], im.t[6], im.t[7], h);
+                if (!vkdraw::has_texture(tx.key)) {
+                    Timer copying(g_texture_copy_ns);
+                    g_texture_copied++;
+                    tx.format = raw_format;
+                    tx.pitch = tx.width;
+                    tx.kept_pitch = ti.epitch;
+                    for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+                    size_t row = size_t(tx.width) * tx.bpp;
+                    tx.blocks.resize(row * tx.height * tx.layers);
+                    for (u32 l = 0; l < tx.layers; l++) {
+                        if (stamp[l] & 1) {
+                            tx.kept_layers.push_back({l, from[l]});
+                            continue;
+                        }
+                        unsigned char* o = tx.blocks.data() + row * tx.height * l;
+                        u32 slice = ti.array() || cube ? ti.base_array + l : 0;
+                        for (u32 y = 0; y < tx.height; y++, o += row)
+                            std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, y, slice)),
+                                        row);
+                    }
+                }
+                out.push_back(std::move(tx));
+                continue;
+            }
+        }
+        if (ti.all_ok) {
+            u64 h = 0;
+            if (layout(ti.dfmt).count) {
+                Timer hashing(g_texture_hash_ns);
+                u64 before = g_hashed_bytes;
+                h = memory_stamp(ti.base, ti.size);
+                g_texture_hash_bytes += g_hashed_bytes - before;
+            }
+            tx.key = std::format("{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4], im.t[5],
+                                 im.t[6], im.t[7], h);
+            if (vkdraw::has_texture(tx.key)) {
+                out.push_back(std::move(tx));
+                continue;
+            }
+        }
+        // in a format the GPU reads as it is (any type: 1D, a cube, an array, 3D): the texels
+        // copied out as they are, their tiling undone, slice by slice, row by row, for the GPU
+        // to read (the T#'s dst_sel as swizzle), and kept there like the rest; else decoded here
+        if (raw_format && ti.all_ok && !ti.block && tx.bpp == ti.bytes && layout(ti.dfmt).count) {
+            Timer copying(g_texture_copy_ns);
+            g_texture_copied++;
+            tx.format = raw_format;
+            tx.pitch = tx.width;
+            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
+            size_t row = size_t(tx.width) * tx.bpp;
+            tx.blocks.resize(row * tx.height * tx.layers);
+            unsigned char* o = tx.blocks.data();
+            for (u32 l = 0; l < tx.layers; l++) {
+                u32 slice = ti.array() || cube ? ti.base_array + l : ti.type == 10 ? l : 0;
+                for (u32 y = 0; y < tx.height; y++, o += row) {
+                    if (!micro) {  // a row's texels, one after another
+                        std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, y, slice)),
+                                    row);
+                        continue;
+                    }
+                    for (u32 x = 0; x < tx.width; x++)
+                        std::memcpy(o + size_t(x) * tx.bpp,
+                                    reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, x, y, slice)),
+                                    tx.bpp);
+                }
+            }
+            out.push_back(std::move(tx));
+            continue;
+        }
+        auto decode0 = std::chrono::steady_clock::now();
+        struct Tally {
+            std::pair<u64, u64>& to;
+            std::chrono::steady_clock::time_point t0;
+            ~Tally() {
+                u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+                to.first++, to.second += ns;
+                g_texture_decode_ns += ns;
+            }
+        } tally{g_decoded_by[std::format("format {}, number type {}, tile mode {}, type {}{}", ti.dfmt, ti.nfmt, ti.tiling, ti.type,
+                                         ti.all_ok ? "" : " (not all in memory)")],
+                decode0};
+        g_texture_decoded++;
+        tx.rgba.resize(size_t(tx.width) * tx.height * tx.layers * 4);
+        float* o = tx.rgba.data();
+        for (u32 l = 0; l < tx.layers; l++) {
+            u32 slice = ti.array() || cube ? ti.base_array + l : ti.type == 10 ? l : 0;
+            for (u32 y = 0; y < tx.height; y++)
+                for (u32 x = 0; x < tx.width; x++, o += 4) {
+                    u32 v[4];
+                    texel_rgba(ti, mem, int(x), int(y), slice, v);
+                    std::memcpy(o, v, 16);
+                }
+        }
+        out.push_back(std::move(tx));
+    }
+    return true;
+}
+
 bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, const GpuRegs& r, u64 vs, u64 ps,
                const Vertices& out, const std::vector<Tri>& tris, const std::vector<u32>& index,
                const std::vector<std::array<size_t, 3>>& tris_in, bool rects, const Target* targets, const int clip[4],
@@ -1127,21 +1368,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
     }
     for (size_t k = 0; k < vals.buffers.size() && k < 64; k++)
         if ((vals.buffers[k].v[3] >> 23) & 1) st.add_tid |= 1ull << k;
-    // each image instruction's descriptors; those that read the same texture the same way share it
-    std::vector<const translate::Values::Image*> unique;
-    for (auto& im : vals.images) {
-        u32 type = im.t[3] >> 28;
-        st.image_types.push_back(type < 8 ? 9 : type);  // 0 (a null descriptor, all 0s): read as 2D, as the CPU does
-        st.unnormalized.push_back((im.s[0] >> 15) & 1);
-        u32 nfmt = (im.t[1] >> 26) & 0xf;
-        st.integer.push_back(nfmt == 4 || nfmt == 5);
-        st.compare.push_back(im.compare ? ((im.s[0] >> 12) & 7) | (((im.s[2] >> 20) & 3) ? 8u : 0u) | (nfmt == 0 ? 16u : 0u) : 0u);
-        u32 slot = 0;
-        while (slot < unique.size() && (std::memcmp(unique[slot]->t, im.t, sizeof im.t) || std::memcmp(unique[slot]->s, im.s, sizeof im.s)))
-            slot++;
-        if (slot == unique.size()) unique.push_back(&im);
-        st.image_slot.push_back(slot);
-    }
+    std::vector<const translate::Values::Image*> unique = sort_images(vals.images, st);
     part.to("the pixel shader: its GLSL found (or translated), copied");
     static translate::Glsl no_shader;
     if (no_shader.text.empty()) no_shader.text = "#version 450\nvoid main() {}\n", no_shader.id = std::hash<std::string>{}(no_shader.text) | 1;
@@ -1275,221 +1502,7 @@ bool prepare_gpu(vkdraw::Draw& d, std::string& why, std::string& vertex_why, con
             }
         }
     part.to("the textures");
-    // the textures: 8-bit RGBA in rows as it is in memory, else each texel as the CPU's
-    // interpreter reads it, which is kept on the GPU under a hash of the memory it reads
-    for (const translate::Values::Image* one : unique) {
-        const auto& im = *one;
-        Image ti(im.t);
-        ti.prepare(mem);
-        vkdraw::Texture tx;
-        tx.type = ti.type < 8 ? 9 : ti.type;
-        tx.width = ti.width;
-        tx.height = ti.type == 8 || ti.type == 12 ? 1 : ti.height;
-        // a cube's faces: the slices from base_array to last_array, as the CPU reads them
-        bool cube = ti.type == 11;
-        tx.layers = ti.array() ? ti.last_array - ti.base_array + 1 : cube ? std::max(ti.last_array, ti.base_array) - ti.base_array + 1
-                    : ti.type == 10 ? ti.depth : 1;
-        tx.integer = ti.nfmt == 4 || ti.nfmt == 5;
-        if (ti.type < 8) {  // not an image (a null descriptor, or one not set): it reads 0, as on the CPU
-            tx.type = 9;
-            tx.width = tx.height = tx.layers = 1;
-            std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
-            tx.key = tx.integer ? "zero:integer" : "zero";
-            if (!vkdraw::has_texture(tx.key)) tx.rgba.assign(4, 0.0f);
-            d.textures.push_back(std::move(tx));
-            continue;
-        }
-        // a format the CPU can't read (an unused descriptor's, say) reads the same everywhere:
-        // one texel of it does
-        if (!layout(ti.dfmt).count) tx.width = tx.height = tx.layers = 1;
-        if (u64(tx.width) * tx.height * tx.layers > (1u << 24)) {
-            why = "textures of over 16 million texels";
-            return false;
-        }
-        std::memcpy(tx.sampler, im.s, sizeof tx.sampler);
-        bool micro = ti.tiling == 5 || ti.tiling == 9 || ti.tiling == 13 || ti.tiling == 19;
-        u32 raw_format = ti.dfmt == 10 && (ti.nfmt == 0 || ti.nfmt == 9) ? (ti.nfmt == 9 ? 43 : 37)  // R8G8B8A8_UNORM, _SRGB
-                         : vk_format(ti.dfmt, ti.nfmt, 0, tx.bpp);
-        if (ti.dfmt == 10) tx.bpp = 4;
-        if (ti.type == 9 && raw_format && !micro && ti.all_ok) {
-            tx.format = raw_format;
-            tx.pitch = ti.epitch;
-            tx.raw = reinterpret_cast<const unsigned char*>(ti.base);
-            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
-            // kept on the GPU from draw to draw too, under the T# and a hash of its memory;
-            // not memory kept there (a target's, read as a texture), which the GPU copies,
-            // and which hashing it here would only bring back
-            u64 bytes = u64(tx.pitch) * tx.height * tx.bpp;
-            if (!vkdraw::version(ti.base) && !vkdraw::version(ti.base + bytes - 1)) {
-                Timer hashing(g_texture_hash_ns);
-                u64 before = g_hashed_bytes;
-                u64 h = memory_stamp(ti.base, bytes);
-                g_texture_hash_bytes += g_hashed_bytes - before;
-                tx.key = std::format("raw:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
-                                     im.t[5], im.t[6], im.t[7], h);
-            }
-            d.textures.push_back(std::move(tx));
-            continue;
-        }
-        // block-compressed, 2D (BC1-5, BC7, as the CPU decodes them): the blocks, their tiling
-        // undone, in rows, for the GPU to decode; kept there like the rest
-        u32 bc = !ti.block || ti.type != 9 || !ti.all_ok || !vkdraw::compressed() ? 0
-                 : ti.nfmt == 0 ? (ti.dfmt == 35 ? 133 : ti.dfmt == 36 ? 135 : ti.dfmt == 37 ? 137 : ti.dfmt == 38 ? 139
-                                   : ti.dfmt == 39 ? 141 : ti.dfmt == 41 ? 145 : 0)  // VK_FORMAT_BCn_..._UNORM_BLOCK
-                 : ti.nfmt == 9 ? (ti.dfmt == 35 ? 134 : ti.dfmt == 36 ? 136 : ti.dfmt == 37 ? 138 : ti.dfmt == 41 ? 146 : 0)  // _SRGB_BLOCK
-                                : 0;
-        if (bc) {
-            tx.format = bc;
-            tx.block = ti.bytes;
-            u32 across = (ti.width + 3) / 4, down = (ti.height + 3) / 4;
-            tx.pitch = across * 4;
-            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
-            {
-                Timer hashing(g_texture_hash_ns);
-                u64 before = g_hashed_bytes;
-                u64 h = memory_stamp(ti.base, ti.size);
-                g_texture_hash_bytes += g_hashed_bytes - before;
-                tx.key = std::format("bc:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
-                                     im.t[5], im.t[6], im.t[7], h);
-            }
-            if (!vkdraw::has_texture(tx.key)) {
-                Timer sending(g_texture_blocks_ns);
-                g_texture_blocks++;
-                tx.blocks.resize(size_t(across) * down * ti.bytes);
-                unsigned char* o = tx.blocks.data();
-                for (u32 y = 0; y < down; y++)
-                    for (u32 x = 0; x < across; x++, o += ti.bytes)
-                        std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, x, y, 0)),
-                                    ti.bytes);
-            }
-            d.textures.push_back(std::move(tx));
-            continue;
-        }
-        // in rows, some of its layers in memory kept on the GPU (a cube's faces drawn there,
-        // say): those layers copied from there, by their version; the rest hashed and copied
-        // from memory, as below. (So the memory kept isn't read back, to be hashed or copied.)
-        if (raw_format && ti.all_ok && !ti.block && tx.bpp == ti.bytes && tx.bpp % 4 == 0 && !micro && ti.type != 10 &&
-            layout(ti.dfmt).count) {
-            u64 end = ti.base + ti.size;
-            std::vector<u64> from(tx.layers), stamp(tx.layers);
-            bool any = false;
-            {
-                Timer hashing(g_texture_hash_ns);
-                for (u32 l = 0; l < tx.layers; l++) {
-                    u32 slice = ti.array() || cube ? ti.base_array + l : 0;
-                    u64 a0 = element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, 0, slice);
-                    u64 bytes = (u64(tx.height - 1) * ti.epitch + tx.width) * tx.bpp;
-                    from[l] = a0;
-                    if (u64 v = a0 ? vkdraw::steady_version(a0, bytes, tx.bpp) : 0) {
-                        stamp[l] = v << 1 | 1, any = true;
-                    } else if (a0) {
-                        u64 before = g_hashed_bytes;
-                        u64 a1 = std::min(end, element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, 0, slice + 1));
-                        stamp[l] = memory_stamp(a0, std::max(a1, a0 + bytes) - a0) << 1;
-                        g_texture_hash_bytes += g_hashed_bytes - before;
-                    }
-                }
-            }
-            if (any) {
-                u64 h = 0x9e3779b97f4a7c15ull;
-                for (u64 x : stamp) h = (h ^ x) * 0x100000001b3ull;
-                tx.key = std::format("layers:{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4],
-                                     im.t[5], im.t[6], im.t[7], h);
-                if (!vkdraw::has_texture(tx.key)) {
-                    Timer copying(g_texture_copy_ns);
-                    g_texture_copied++;
-                    tx.format = raw_format;
-                    tx.pitch = tx.width;
-                    tx.kept_pitch = ti.epitch;
-                    for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
-                    size_t row = size_t(tx.width) * tx.bpp;
-                    tx.blocks.resize(row * tx.height * tx.layers);
-                    for (u32 l = 0; l < tx.layers; l++) {
-                        if (stamp[l] & 1) {
-                            tx.kept_layers.push_back({l, from[l]});
-                            continue;
-                        }
-                        unsigned char* o = tx.blocks.data() + row * tx.height * l;
-                        u32 slice = ti.array() || cube ? ti.base_array + l : 0;
-                        for (u32 y = 0; y < tx.height; y++, o += row)
-                            std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, y, slice)),
-                                        row);
-                    }
-                }
-                d.textures.push_back(std::move(tx));
-                continue;
-            }
-        }
-        if (ti.all_ok) {
-            u64 h = 0;
-            if (layout(ti.dfmt).count) {
-                Timer hashing(g_texture_hash_ns);
-                u64 before = g_hashed_bytes;
-                h = memory_stamp(ti.base, ti.size);
-                g_texture_hash_bytes += g_hashed_bytes - before;
-            }
-            tx.key = std::format("{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}.{:x}:{:x}", im.t[0], im.t[1], im.t[2], im.t[3], im.t[4], im.t[5],
-                                 im.t[6], im.t[7], h);
-            if (vkdraw::has_texture(tx.key)) {
-                d.textures.push_back(std::move(tx));
-                continue;
-            }
-        }
-        // in a format the GPU reads as it is (any type: 1D, a cube, an array, 3D): the texels
-        // copied out as they are, their tiling undone, slice by slice, row by row, for the GPU
-        // to read (the T#'s dst_sel as swizzle), and kept there like the rest; else decoded here
-        if (raw_format && ti.all_ok && !ti.block && tx.bpp == ti.bytes && layout(ti.dfmt).count) {
-            Timer copying(g_texture_copy_ns);
-            g_texture_copied++;
-            tx.format = raw_format;
-            tx.pitch = tx.width;
-            for (int c = 0; c < 4; c++) tx.swizzle[c] = ti.sel[c];
-            size_t row = size_t(tx.width) * tx.bpp;
-            tx.blocks.resize(row * tx.height * tx.layers);
-            unsigned char* o = tx.blocks.data();
-            for (u32 l = 0; l < tx.layers; l++) {
-                u32 slice = ti.array() || cube ? ti.base_array + l : ti.type == 10 ? l : 0;
-                for (u32 y = 0; y < tx.height; y++, o += row) {
-                    if (!micro) {  // a row's texels, one after another
-                        std::memcpy(o, reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, 0, y, slice)),
-                                    row);
-                        continue;
-                    }
-                    for (u32 x = 0; x < tx.width; x++)
-                        std::memcpy(o + size_t(x) * tx.bpp,
-                                    reinterpret_cast<const void*>(element_address(ti.base, ti.tiling, ti.bytes, ti.epitch, ti.eheight, x, y, slice)),
-                                    tx.bpp);
-                }
-            }
-            d.textures.push_back(std::move(tx));
-            continue;
-        }
-        auto decode0 = std::chrono::steady_clock::now();
-        struct Tally {
-            std::pair<u64, u64>& to;
-            std::chrono::steady_clock::time_point t0;
-            ~Tally() {
-                u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-                to.first++, to.second += ns;
-                g_texture_decode_ns += ns;
-            }
-        } tally{g_decoded_by[std::format("format {}, number type {}, tile mode {}, type {}{}", ti.dfmt, ti.nfmt, ti.tiling, ti.type,
-                                         ti.all_ok ? "" : " (not all in memory)")],
-                decode0};
-        g_texture_decoded++;
-        tx.rgba.resize(size_t(tx.width) * tx.height * tx.layers * 4);
-        float* o = tx.rgba.data();
-        for (u32 l = 0; l < tx.layers; l++) {
-            u32 slice = ti.array() || cube ? ti.base_array + l : ti.type == 10 ? l : 0;
-            for (u32 y = 0; y < tx.height; y++)
-                for (u32 x = 0; x < tx.width; x++, o += 4) {
-                    u32 v[4];
-                    texel_rgba(ti, mem, int(x), int(y), slice, v);
-                    std::memcpy(o, v, 16);
-                }
-        }
-        d.textures.push_back(std::move(tx));
-    }
+    if (!textures_for(unique, mem, d.textures, why)) return false;
     part.to("the rest");
     d.width = t.pitch;
     d.height = t.height;
@@ -2242,8 +2255,15 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
     vals.u.resize(st.load_slot + 3 * st.loads.size());
     for (auto& [i, v] : raw_slots) std::copy(v.begin(), v.end(), vals.u.begin() + st.load_slot + 3 * i);
     // translated once for the program and all of this
-    std::string gkey = std::format("cs:{:x}:{}:{:x}:{}.{}.{}:{}:{}", cs, users, rsrc2, st.threads[0], st.threads[1], st.threads[2],
-                                   st.store_slot, st.load_slot);
+    // the textures it reads, as a draw's; sampled at level 0, so the same filter near and far
+    std::vector<const translate::Values::Image*> unique = sort_images(vals.images, st.sampled);
+    for (const auto* im : unique)
+        if (((im->s[2] >> 20) & 3) != ((im->s[2] >> 22) & 3)) {
+            why = "images sampled in a compute shader, filtered one way near and another far";
+            return false;
+        }
+    std::string gkey = std::format("cs:{:x}:{}:{:x}:{}.{}.{}:{}:{}:{}", cs, users, rsrc2, st.threads[0], st.threads[1], st.threads[2],
+                                   st.store_slot, st.load_slot, st.sampled.key());
     for (auto& a : st.stores) gkey += std::format(":s{}.{}.{}x{}p{}", a.dfmt, a.nfmt, a.width, a.height, a.pitch);
     for (auto& a : st.loads) gkey += std::format(":l{}.{}.{}{}.{}{}{}{}", a.dfmt, a.nfmt, a.image, a.raw, a.sel[0], a.sel[1], a.sel[2], a.sel[3]);
     auto git = g_glsl.find(gkey);
@@ -2254,6 +2274,7 @@ bool gpu_compute(const GpuRegs& r, u64 cs, u32 gx, u32 gy, u32 gz, const Memory&
         return false;
     }
     save_glsl("cs", cs, gl.text);
+    if (!textures_for(unique, mem, d.textures, why)) return false;
     d.cs = gl.text;
     d.values = vals.u;
     d.store_slot = st.store_slot;

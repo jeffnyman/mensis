@@ -1297,6 +1297,263 @@ struct Parts {
     ~Parts() { to(nullptr); }
 };
 
+// A draw's or a dispatch's textures: found in kept memory, made, uploaded, given descriptors,
+// copied and uploaded in its commands (for its shaders' stages)
+struct Textures {
+    std::vector<Texture>& ts;
+    VkPipelineStageFlags stages;
+    const char* kept_mark;
+    const char* layers_mark;
+    std::vector<Resident*> from_target;
+    std::vector<bool> direct;
+    std::vector<VkDeviceSize> offset;
+    std::vector<std::vector<Resident*>> kept_from;
+    std::vector<GpuImage*> images;
+    std::vector<VkDeviceSize> at_texels;
+    std::vector<GpuImage> unkept;
+    std::vector<VkDescriptorImageInfo> iinfo;
+    ~Textures() { doom(); }
+    // (the images made for this alone: let go once the batch is done)
+    void doom() {
+        for (auto& im : unkept)
+            if (im.image) g_doomed.push_back(im);
+        unkept.clear();
+    }
+
+    // a texture read as it is in memory: copied on the GPU from kept memory there (of the same
+    // size of texel): straight from its image if it is that image laid out the same way, else
+    // through a buffer, the image's texels in order, the texture's rows picked out of them (a
+    // depth buffer's depth, read as a texture, or a texture in memory a compute shader wrote);
+    // else whatever is kept there goes back into memory first
+    bool find(VkDeviceSize& scratch_needed, std::string& why) {
+        from_target.assign(ts.size(), nullptr);
+        direct.assign(ts.size(), false);
+        offset.assign(ts.size(), 0);
+        for (size_t i = 0; i < ts.size(); i++) {
+            const Texture& t = ts[i];
+            if (!t.raw) continue;
+            u64 at = u64(t.raw), end = at + u64(t.pitch) * t.height * t.layers * t.bpp;
+            Resident* r = nullptr;
+            for (auto& [base, kr] : g_resident)
+                if (at >= base && end <= base + kr.bytes && kr.bpp == t.bpp && (at - base) % t.bpp == 0) r = &kr;
+            if (r && r->state != Resident::memory && t.type == 9 && t.layers == 1) {
+                from_target[i] = r;
+                offset[i] = at - r->base;
+                direct[i] = !r->depth && at == r->base && t.pitch == r->width && t.width <= r->width && t.height <= r->height;
+                if (!direct[i]) scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
+                continue;
+            }
+            read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff), "a texture in its pages, not of it");
+        }
+        // textures' layers in kept memory: each from its image, through the scratch buffer
+        kept_from.assign(ts.size(), {});
+        for (size_t i = 0; i < ts.size(); i++)
+            for (const auto& kl : ts[i].kept_layers) {
+                const Texture& t = ts[i];
+                Resident* r = layer_kept(kl.address, t.kept_pitch, t.width, t.height, t.bpp);
+                if (!r) {
+                    why = "a texture's layer in kept memory let go meanwhile";
+                    return false;
+                }
+                kept_from[i].push_back(r);
+                scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
+            }
+        return true;
+    }
+
+    template <class Place>
+    bool make(Place& place, std::string& why) {
+        // the textures not kept yet, made and uploaded
+        images.assign(ts.size(), nullptr);
+        at_texels.assign(ts.size(), ~VkDeviceSize(0));
+        unkept.assign(ts.size(), GpuImage{});
+        for (size_t i = 0; i < ts.size(); i++) {
+            Texture& t = ts[i];
+            if (Resident* r = from_target[i]) {  // an image kept for it, by its format, size, swizzle and place
+                u32 sw = t.swizzle[0] | t.swizzle[1] << 3 | t.swizzle[2] << 6 | t.swizzle[3] << 9;
+                GpuImage& im = r->copies[{t.format, t.width, t.height, sw, offset[i] | (u64(t.pitch) << 40) | (u64(direct[i]) << 63)}];
+                VkComponentMapping map{swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
+                if (!im.image && !make_image(im, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(t.format), t.width, t.height, 1, 1,
+                                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
+                    why = "out of GPU memory";
+                    return false;
+                }
+                images[i] = &im;
+                continue;
+            }
+            if (!t.key.empty()) {
+                auto it = k.textures.find(t.key);
+                if (it != k.textures.end()) {
+                    images[i] = &it->second;
+                    images[i]->used = k.draws;
+                    continue;
+                }
+                if ((!t.format && t.rgba.empty()) || ((t.block || (t.format && !t.raw)) && t.blocks.empty())) {  // let go since has_texture() said it was kept
+                    why = "a texture let go meanwhile";
+                    return false;
+                }
+            }
+            bool three = t.type == 10;
+            u32 layers = three ? 1 : t.layers;
+            VkFormat f = t.format ? VkFormat(t.format) : t.integer ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
+            VkComponentMapping map{};
+            if (t.format) map = {swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
+            GpuImage& im = t.key.empty() ? unkept[i] : k.textures[t.key];
+            if (!make_image(im, three ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
+                            three ? VK_IMAGE_VIEW_TYPE_3D : t.type == 11 || t.type == 12 || t.type == 13 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, f,
+                            t.width, t.height, three ? t.layers : 1, layers, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
+                if (!t.key.empty()) k.textures.erase(t.key);
+                why = "out of GPU memory";
+                return false;
+            }
+            im.used = k.draws;
+            if (!t.key.empty()) k.texture_bytes += im.bytes;
+            images[i] = &im;
+            at_texels[i] = place(texel_bytes(t));
+            k.texture_uploads++;
+        }
+        return true;
+    }
+
+    void copy_up(VkDeviceSize base) {
+        for (auto& a : at_texels)
+            if (a != ~VkDeviceSize(0)) a += base;
+        for (size_t i = 0; i < ts.size(); i++) {
+            if (at_texels[i] == ~VkDeviceSize(0)) continue;
+            const Texture& t = ts[i];
+            size_t bytes = texel_bytes(t);
+            if (t.block) std::memcpy(k.upload.p + at_texels[i], t.blocks.data(), bytes);
+            else if (t.format) std::memcpy(k.upload.p + at_texels[i], t.raw ? t.raw : t.blocks.data(), bytes);
+            else std::memcpy(k.upload.p + at_texels[i], t.rgba.data(), bytes);
+            k.texture_upload_bytes += bytes;
+        }
+    }
+
+    void descriptors(VkDescriptorSet set, std::vector<VkWriteDescriptorSet>& writes) {
+        iinfo.clear();
+        iinfo.reserve(ts.size());
+        for (u32 i = 0; i < ts.size(); i++) {
+            iinfo.push_back({sampler(ts[i].sampler, ts[i].integer), images[i]->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = set;
+            w.dstBinding = image_binding(i);
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.pImageInfo = &iinfo.back();
+            writes.push_back(w);
+        }
+    }
+
+    void record_kept(VkCommandBuffer cmd) {
+        const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        // the textures that are kept targets, copied first (before this draw changes its own)
+        for (size_t i = 0; i < ts.size(); i++) {
+            Resident* r = from_target[i];
+            if (!r) continue;
+            GpuImage& im = *images[i];
+            const Texture& t = ts[i];
+            // (copied already, and the memory not written since: as it is)
+            if (!r->version) r->version = ++g_writes;
+            if (im.version == r->version) {
+                k.target_textures_same++;
+                continue;
+            }
+            im.version = r->version;
+            barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
+            barrier(cmd, r->image.image, 1, rest(*r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(*r), VK_ACCESS_TRANSFER_READ_BIT,
+                    rest_stage(*r), T, aspect(*r));
+            if (direct[i]) {
+                VkImageCopy ic{};
+                ic.srcSubresource = ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                ic.extent = {t.width, t.height, 1};
+                vkCmdCopyImage(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
+            } else {  // through the scratch buffer: the image's texels in order, then the texture's rows from them
+                VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                bb.buffer = k.scratch.buffer;
+                bb.size = VK_WHOLE_SIZE;
+                bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                VkBufferImageCopy c{};
+                c.imageSubresource = {r->depth ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT) : VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT), 0, 0, 1};
+                c.imageExtent = {r->width, r->height, 1};
+                vkCmdCopyImageToBuffer(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &c);
+                bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                VkBufferImageCopy c2{};
+                c2.bufferOffset = offset[i];
+                c2.bufferRowLength = t.pitch;
+                c2.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                c2.imageExtent = {t.width, t.height, 1};
+                vkCmdCopyBufferToImage(cmd, k.scratch.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c2);
+            }
+            barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(*r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(*r), T,
+                    rest_stage(*r), aspect(*r));
+            barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT, T, stages);
+            k.target_textures++;
+            mark(cmd, kept_mark);
+        }
+    }
+
+    void record_uploads(VkCommandBuffer cmd) {
+        const VkPipelineStageFlags T = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        for (size_t i = 0; i < ts.size(); i++) {
+            if (at_texels[i] == ~VkDeviceSize(0)) continue;
+            const Texture& t = ts[i];
+            GpuImage& im = *images[i];
+            barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
+            VkBufferImageCopy c{};
+            c.bufferOffset = at_texels[i];
+            c.bufferRowLength = t.format ? t.pitch : 0;
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, im.layers};
+            c.imageExtent = {t.width, t.height, t.type == 10 ? t.layers : 1};
+            vkCmdCopyBufferToImage(cmd, k.upload.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+            if (!kept_from[i].empty()) {  // its layers in kept memory, over what went up for them
+                barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, T, T);
+                for (size_t j = 0; j < kept_from[i].size(); j++) {
+                    Resident& r = *kept_from[i][j];
+                    const Texture::KeptLayer& kl = t.kept_layers[j];
+                    VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                    bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    bb.buffer = k.scratch.buffer;
+                    bb.size = VK_WHOLE_SIZE;
+                    bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;  // (an earlier copy done with it)
+                    bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                    barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT,
+                            rest_stage(r), T, aspect(r));
+                    VkBufferImageCopy whole{};
+                    whole.imageSubresource = {aspect(r), 0, 0, 1};
+                    whole.imageExtent = {r.width, r.height, 1};
+                    vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &whole);
+                    barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(r), T,
+                            rest_stage(r), aspect(r));
+                    bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
+                    VkBufferImageCopy one{};
+                    one.bufferOffset = kl.address - r.base;
+                    one.bufferRowLength = t.kept_pitch;
+                    one.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, kl.layer, 1};
+                    one.imageExtent = {t.width, t.height, 1};
+                    vkCmdCopyBufferToImage(cmd, k.scratch.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &one);
+                    k.layers_from_kept++;
+                }
+                mark(cmd, layers_mark);
+            }
+            barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, T,
+                    stages);
+        }
+    }
+};
+
 bool draw(Draw& d, std::string& why) {
     Parts part("the pipeline, found");
     if (!prepare_kept()) {
@@ -1329,44 +1586,10 @@ bool draw(Draw& d, std::string& why) {
         for (size_t i = 0; i < nt; i++)
             if (d.targets[i].format && !(res[i] = resident(d, d.targets[i], why))) return false;
     part.to("textures in kept memory, found (or read back)");
-    // a texture read as it is in memory: copied on the GPU from kept memory there (of the same
-    // size of texel): straight from its image if it is that image laid out the same way, else
-    // through a buffer, the image's texels in order, the texture's rows picked out of them (a
-    // depth buffer's depth, read as a texture, or a texture in memory a compute shader wrote);
-    // else whatever is kept there goes back into memory first
-    std::vector<Resident*> from_target(d.textures.size(), nullptr);
-    std::vector<bool> direct(d.textures.size(), false);
-    std::vector<VkDeviceSize> offset(d.textures.size(), 0);
+    Textures tex{d.textures, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                 "draws: kept memory copied, to read as a texture", "draws: textures' layers copied from kept memory"};
     VkDeviceSize scratch_needed = 0;
-    for (size_t i = 0; i < d.textures.size(); i++) {
-        const Texture& t = d.textures[i];
-        if (!t.raw) continue;
-        u64 at = u64(t.raw), end = at + u64(t.pitch) * t.height * t.layers * t.bpp;
-        Resident* r = nullptr;
-        for (auto& [base, kr] : g_resident)
-            if (at >= base && end <= base + kr.bytes && kr.bpp == t.bpp && (at - base) % t.bpp == 0) r = &kr;
-        if (r && r->state != Resident::memory && t.type == 9 && t.layers == 1) {
-            from_target[i] = r;
-            offset[i] = at - r->base;
-            direct[i] = !r->depth && at == r->base && t.pitch == r->width && t.width <= r->width && t.height <= r->height;
-            if (!direct[i]) scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
-            continue;
-        }
-        read_back_pages(at & ~u64(0xfff), (end + 0xfff) & ~u64(0xfff), "a texture in its pages, not of it");
-    }
-    // textures' layers in kept memory: each from its image, through the scratch buffer
-    std::vector<std::vector<Resident*>> kept_from(d.textures.size());
-    for (size_t i = 0; i < d.textures.size(); i++)
-        for (const auto& kl : d.textures[i].kept_layers) {
-            const Texture& t = d.textures[i];
-            Resident* r = layer_kept(kl.address, t.kept_pitch, t.width, t.height, t.bpp);
-            if (!r) {
-                why = "a texture's layer in kept memory let go meanwhile";
-                return false;
-            }
-            kept_from[i].push_back(r);
-            scratch_needed = std::max<VkDeviceSize>(scratch_needed, r->bytes);
-        }
+    if (!tex.find(scratch_needed, why)) return false;
     if (scratch_needed > k.scratch.size && (!flush_batch("the scratch buffer") || !k.scratch.reserve(scratch_needed))) {  // (not in use, to be made bigger)
         why = "out of GPU memory";
         return false;
@@ -1433,55 +1656,7 @@ bool draw(Draw& d, std::string& why) {
     for (size_t i = 0; i < d.vs_buffers.size(); i++) at_buffers.push_back(place_buffer(d.vs_buffers[i], vs_pool[i]));
     std::vector<VkDeviceSize> at_ps_buffers;
     for (size_t i = 0; i < d.ps_buffers.size(); i++) at_ps_buffers.push_back(place_buffer(d.ps_buffers[i], ps_pool[i]));
-    // the textures not kept yet, made and uploaded
-    std::vector<GpuImage*> images(d.textures.size());
-    std::vector<VkDeviceSize> at_texels(d.textures.size(), ~VkDeviceSize(0));
-    std::vector<GpuImage> unkept(d.textures.size());
-    for (size_t i = 0; i < d.textures.size(); i++) {
-        Texture& t = d.textures[i];
-        if (Resident* r = from_target[i]) {  // an image kept for it, by its format, size, swizzle and place
-            u32 sw = t.swizzle[0] | t.swizzle[1] << 3 | t.swizzle[2] << 6 | t.swizzle[3] << 9;
-            GpuImage& im = r->copies[{t.format, t.width, t.height, sw, offset[i] | (u64(t.pitch) << 40) | (u64(direct[i]) << 63)}];
-            VkComponentMapping map{swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
-            if (!im.image && !make_image(im, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VkFormat(t.format), t.width, t.height, 1, 1,
-                                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
-                why = "out of GPU memory";
-                return false;
-            }
-            images[i] = &im;
-            continue;
-        }
-        if (!t.key.empty()) {
-            auto it = k.textures.find(t.key);
-            if (it != k.textures.end()) {
-                images[i] = &it->second;
-                images[i]->used = k.draws;
-                continue;
-            }
-            if ((!t.format && t.rgba.empty()) || ((t.block || (t.format && !t.raw)) && t.blocks.empty())) {  // let go since has_texture() said it was kept
-                why = "a texture let go meanwhile";
-                return false;
-            }
-        }
-        bool three = t.type == 10;
-        u32 layers = three ? 1 : t.layers;
-        VkFormat f = t.format ? VkFormat(t.format) : t.integer ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
-        VkComponentMapping map{};
-        if (t.format) map = {swizzle(t.swizzle[0]), swizzle(t.swizzle[1]), swizzle(t.swizzle[2]), swizzle(t.swizzle[3])};
-        GpuImage& im = t.key.empty() ? unkept[i] : k.textures[t.key];
-        if (!make_image(im, three ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
-                        three ? VK_IMAGE_VIEW_TYPE_3D : t.type == 11 || t.type == 12 || t.type == 13 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, f,
-                        t.width, t.height, three ? t.layers : 1, layers, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, map)) {
-            if (!t.key.empty()) k.textures.erase(t.key);
-            why = "out of GPU memory";
-            return false;
-        }
-        im.used = k.draws;
-        if (!t.key.empty()) k.texture_bytes += im.bytes;
-        images[i] = &im;
-        at_texels[i] = place(texel_bytes(t));
-        k.texture_uploads++;
-    }
+    if (!tex.make(place, why)) return false;
     part.to("its place in the batch (the batch sent first, if full)");
     // its place in the batch: the offsets above are from its start
     VkDeviceSize base;
@@ -1501,8 +1676,6 @@ bool draw(Draw& d, std::string& why) {
     at_stencil += base;
     for (auto& a : at_buffers) a += base;
     for (auto& a : at_ps_buffers) a += base;
-    for (auto& a : at_texels)
-        if (a != ~VkDeviceSize(0)) a += base;
     at_values += base, at_vertices += base, at_indices += base, at_vs_values += base;
     unsigned char* up = k.upload.p;
     for (size_t i = 0; i < nt; i++)
@@ -1530,15 +1703,7 @@ bool draw(Draw& d, std::string& why) {
         }
     auto buffers1 = std::chrono::steady_clock::now();
     k.buffer_upload_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(buffers1 - copy0).count());
-    for (size_t i = 0; i < d.textures.size(); i++) {
-        if (at_texels[i] == ~VkDeviceSize(0)) continue;
-        const Texture& t = d.textures[i];
-        size_t bytes = texel_bytes(t);
-        if (t.block) std::memcpy(up + at_texels[i], t.blocks.data(), bytes);
-        else if (t.format) std::memcpy(up + at_texels[i], t.raw ? t.raw : t.blocks.data(), bytes);
-        else std::memcpy(up + at_texels[i], t.rgba.data(), bytes);
-        k.texture_upload_bytes += bytes;
-    }
+    tex.copy_up(base);
     k.upload_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy0).count());
 
     part.to("the descriptors");
@@ -1562,7 +1727,6 @@ bool draw(Draw& d, std::string& why) {
     std::vector<VkDescriptorBufferInfo> binfo;
     std::vector<VkDescriptorImageInfo> iinfo;
     binfo.reserve(2 + d.vs_buffers.size() + d.ps_buffers.size());
-    iinfo.reserve(d.textures.size());
     std::vector<VkWriteDescriptorSet> writes;
     auto write_buffer = [&](u32 binding, VkDeviceSize offset, VkDeviceSize bytes, VkBuffer buffer = VK_NULL_HANDLE) {
         binfo.push_back({buffer ? buffer : k.upload.buffer, offset, std::max<VkDeviceSize>(bytes, 16)});
@@ -1580,16 +1744,7 @@ bool draw(Draw& d, std::string& why) {
         else write_buffer(binding, offset, b->size() * 4);
     };
     write_buffer(0, at_values, d.values.size() * 4);
-    for (u32 i = 0; i < d.textures.size(); i++) {
-        iinfo.push_back({sampler(d.textures[i].sampler, d.textures[i].integer), images[i]->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
-        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = set;
-        w.dstBinding = image_binding(i);
-        w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = &iinfo.back();
-        writes.push_back(w);
-    }
+    tex.descriptors(set, writes);
     if (gpu_vertices) {
         write_buffer(16, at_vs_values, d.vs_values.size() * 4);
         for (u32 i = 0; i < d.vs_buffers.size(); i++)
@@ -1626,57 +1781,7 @@ bool draw(Draw& d, std::string& why) {
     }
     const VkPipelineStageFlags C = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    // the textures that are kept targets, copied first (before this draw changes its own)
-    for (size_t i = 0; i < d.textures.size(); i++) {
-        Resident* r = from_target[i];
-        if (!r) continue;
-        GpuImage& im = *images[i];
-        const Texture& t = d.textures[i];
-        // (copied already, and the memory not written since: as it is)
-        if (!r->version) r->version = ++g_writes;
-        if (im.version == r->version) {
-            k.target_textures_same++;
-            continue;
-        }
-        im.version = r->version;
-        barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
-        barrier(cmd, r->image.image, 1, rest(*r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(*r), VK_ACCESS_TRANSFER_READ_BIT,
-                rest_stage(*r), T, aspect(*r));
-        if (direct[i]) {
-            VkImageCopy ic{};
-            ic.srcSubresource = ic.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            ic.extent = {t.width, t.height, 1};
-            vkCmdCopyImage(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
-        } else {  // through the scratch buffer: the image's texels in order, then the texture's rows from them
-            VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-            bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bb.buffer = k.scratch.buffer;
-            bb.size = VK_WHOLE_SIZE;
-            bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
-            VkBufferImageCopy c{};
-            c.imageSubresource = {r->depth ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT) : VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT), 0, 0, 1};
-            c.imageExtent = {r->width, r->height, 1};
-            vkCmdCopyImageToBuffer(cmd, r->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &c);
-            bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
-            VkBufferImageCopy c2{};
-            c2.bufferOffset = offset[i];
-            c2.bufferRowLength = t.pitch;
-            c2.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            c2.imageExtent = {t.width, t.height, 1};
-            vkCmdCopyBufferToImage(cmd, k.scratch.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c2);
-        }
-        barrier(cmd, r->image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(*r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(*r), T,
-                rest_stage(*r), aspect(*r));
-        barrier(cmd, im.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT, T, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
-        k.target_textures++;
-        mark(cmd, "draws: kept memory copied, to read as a texture");
-    }
+    tex.record_kept(cmd);
     std::vector<VkRenderingAttachmentInfo> atts(nt, {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO});
     for (size_t i = 0; i < nt; i++) {
         if (!target[i]) continue;  // nothing here: an attachment with no image
@@ -1700,56 +1805,7 @@ bool draw(Draw& d, std::string& why) {
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         atts[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     }
-    for (size_t i = 0; i < d.textures.size(); i++) {
-        if (at_texels[i] == ~VkDeviceSize(0)) continue;
-        const Texture& t = d.textures[i];
-        GpuImage& im = *images[i];
-        barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, T);
-        VkBufferImageCopy c{};
-        c.bufferOffset = at_texels[i];
-        c.bufferRowLength = t.format ? t.pitch : 0;
-        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, im.layers};
-        c.imageExtent = {t.width, t.height, t.type == 10 ? t.layers : 1};
-        vkCmdCopyBufferToImage(cmd, k.upload.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-        if (!kept_from[i].empty()) {  // its layers in kept memory, over what went up for them
-            barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, T, T);
-            for (size_t j = 0; j < kept_from[i].size(); j++) {
-                Resident& r = *kept_from[i][j];
-                const Texture::KeptLayer& kl = t.kept_layers[j];
-                VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-                bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bb.buffer = k.scratch.buffer;
-                bb.size = VK_WHOLE_SIZE;
-                bb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;  // (an earlier copy done with it)
-                bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
-                barrier(cmd, r.image.image, 1, rest(r), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest_access(r), VK_ACCESS_TRANSFER_READ_BIT,
-                        rest_stage(r), T, aspect(r));
-                VkBufferImageCopy whole{};
-                whole.imageSubresource = {aspect(r), 0, 0, 1};
-                whole.imageExtent = {r.width, r.height, 1};
-                vkCmdCopyImageToBuffer(cmd, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, k.scratch.buffer, 1, &whole);
-                barrier(cmd, r.image.image, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rest(r), VK_ACCESS_TRANSFER_READ_BIT, rest_access(r), T,
-                        rest_stage(r), aspect(r));
-                bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                vkCmdPipelineBarrier(cmd, T, T, 0, 0, nullptr, 1, &bb, 0, nullptr);
-                VkBufferImageCopy one{};
-                one.bufferOffset = kl.address - r.base;
-                one.bufferRowLength = t.kept_pitch;
-                one.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, kl.layer, 1};
-                one.imageExtent = {t.width, t.height, 1};
-                vkCmdCopyBufferToImage(cmd, k.scratch.buffer, im.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &one);
-                k.layers_from_kept++;
-            }
-            mark(cmd, "draws: textures' layers copied from kept memory");
-        }
-        barrier(cmd, im.image, im.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, T,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
-    }
+    tex.record_uploads(cmd);
     VkRenderingAttachmentInfo zatt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     u32 area_w = d.width, area_h = d.height;
     VkImage zimage = VK_NULL_HANDLE;
@@ -1852,8 +1908,7 @@ bool draw(Draw& d, std::string& why) {
         hb.size = VK_WHOLE_SIZE;
         vkCmdPipelineBarrier(cmd, T, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0, nullptr);
     }
-    for (auto& im : unkept)
-        if (im.image) g_doomed.push_back(im);  // once the batch is done
+    tex.doom();
     if (!kept) mark(cmd, "--gpu-check's copies back");
     if (!kept && !flush_batch("--gpu-check")) {
         why = "the GPU didn't finish the draw";
@@ -1914,8 +1969,8 @@ bool dispatch(Dispatch& d, std::string& why) {
         why = g.why;
         return false;
     }
-    if (d.stores.size() > STORES || d.loads.size() > LOADS || d.arrays.size() > PS_BUFFERS) {
-        why = "more than 4 stores, 4 loads of kept memory or 16 other loads";
+    if (d.stores.size() > STORES || d.loads.size() > LOADS || d.arrays.size() > PS_BUFFERS || d.textures.size() > IMAGES) {
+        why = "more than 4 stores, 4 loads of kept memory, 16 other loads or 31 images";
         return false;
     }
     if (d.cs.find("uint64_t") != std::string::npos && !g.int64) {
@@ -1975,6 +2030,15 @@ bool dispatch(Dispatch& d, std::string& why) {
             why = "a store into memory let go";
             return false;
         }
+    // the textures: as a draw's (whatever they share pages with read back, not let go)
+    Textures tex{d.textures, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, "dispatches: kept memory copied, to read as a texture",
+                 "dispatches: textures' layers copied from kept memory"};
+    VkDeviceSize scratch_needed = 0;
+    if (!tex.find(scratch_needed, why)) return false;
+    if (scratch_needed > k.scratch.size && (!flush_batch("the scratch buffer") || !k.scratch.reserve(scratch_needed))) {
+        why = "out of GPU memory";
+        return false;
+    }
     // their places in U: the first element, the width, the elements
     auto place = [&](u32 slot, const Dispatch::Access& a, const Resident& r) {
         if (d.values.size() < slot + 3) d.values.resize(slot + 3);
@@ -2059,6 +2123,7 @@ bool dispatch(Dispatch& d, std::string& why) {
     std::map<Resident*, VkDeviceSize> at_upload;
     for (Resident* r : used)
         if (r->state == Resident::memory) at_upload[r] = reserve(r->bytes);
+    if (!tex.make(reserve, why)) return false;
     VkDeviceSize base;
     VkDescriptorSet set;
     if (!reserve_batch(at, base, set, why)) return false;
@@ -2066,6 +2131,7 @@ bool dispatch(Dispatch& d, std::string& why) {
     std::memcpy(up + at_values, d.values.data(), d.values.size() * 4);
     for (size_t i = 0; i < d.arrays.size(); i++) std::memcpy(up + at_arrays[i], d.arrays[i].data(), d.arrays[i].size() * 4);
     for (auto& [r, a] : at_upload) std::memcpy(up + a, reinterpret_cast<const void*>(r->base), r->bytes);
+    tex.copy_up(base);
 
     std::vector<VkDescriptorBufferInfo> bi;
     bi.reserve(1 + d.arrays.size());
@@ -2096,6 +2162,7 @@ bool dispatch(Dispatch& d, std::string& why) {
     for (size_t i = 0; i < d.stores.size(); i++) write_image(32 + u32(i), into[i]);
     for (size_t i = 0; i < d.loads.size(); i++) write_image(36 + u32(i), from[i]);
     for (size_t i = 0; i < d.arrays.size(); i++) write_buffer(56 + u32(i), at_arrays[i], d.arrays[i].size() * 4);
+    tex.descriptors(set, writes);
     vkUpdateDescriptorSets(g.device, u32(writes.size()), writes.data(), 0, nullptr);
 
     VkCommandBuffer cmd = batch();
@@ -2143,6 +2210,8 @@ bool dispatch(Dispatch& d, std::string& why) {
         vkCmdPipelineBarrier(cmd, T, X, 0, 1, &mb, 0, nullptr, 0, nullptr);
         mark(cmd, "dispatches: arrays copied from kept memory");
     }
+    tex.record_kept(cmd);
+    tex.record_uploads(cmd);
     const VkAccessFlags RW = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                         SRW = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     for (Resident* r : used) {  // from as draws leave it (or from memory), for the shader to read and write

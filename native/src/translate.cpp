@@ -1484,7 +1484,7 @@ void Writer::image_op(const Inst& in) {
                              image, func));
             result = std::format("vec4(mix(mix(p{0}.w, p{0}.z, w{0}.x), mix(p{0}.x, p{0}.y, w{0}.x), w{0}.y))", image);
         } else if (m == 4) result = std::format("textureLod({}, {}, {})", t, c, lod);
-        else if (m == 7) result = std::format("textureLod({}, {}, 0.0)", t, c);
+        else if (m == 7 || cs) result = std::format("textureLod({}, {}, 0.0)", t, c);  // (a compute shader's: no derivatives)
         else if (!bias.empty()) result = std::format("texture({}, {}, {})", t, c, bias);
         else result = std::format("texture({}, {})", t, c);
         (void)sample_suffix;
@@ -1964,6 +1964,22 @@ std::string rect_geometry_shader(u32 attributes) {
     return s;
 }
 
+// The textures the image instructions read: one each (bindings 1-15, then 40 on)
+std::string samplers(const Writer& w, const PsState& st) {
+    std::string s;
+    std::set<u32> declared;
+    for (u32 k = 0; k < w.image; k++) {
+        u32 slot = st.image_slot.empty() ? k : st.image_slot[k];
+        if (!declared.insert(slot).second) continue;
+        u32 type = st.image_types[k];
+        const char* sampler = type == 10 ? "sampler3D" : type == 11 || type == 12 || type == 13 ? "sampler2DArray" : "sampler2D";
+        bool integer = k < st.integer.size() && st.integer[k];
+        s += std::format("layout(set = 0, binding = {}) uniform {}{} t{};\n", slot < 15 ? slot + 1 : 40 + (slot - 15), integer ? "u" : "",
+                         sampler, slot);
+    }
+    return s;
+}
+
 Glsl pixel_shader(const Program& p, const PsState& st) {
     Glsl g;
     if (!p.why.empty()) {
@@ -1977,16 +1993,7 @@ Glsl pixel_shader(const Program& p, const PsState& st) {
     }
     std::string s = "#version 450\n";
     s += "layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };\n";
-    std::set<u32> declared;
-    for (u32 k = 0; k < w.image; k++) {
-        u32 slot = st.image_slot.empty() ? k : st.image_slot[k];
-        if (!declared.insert(slot).second) continue;
-        u32 type = st.image_types[k];
-        const char* sampler = type == 10 ? "sampler3D" : type == 11 || type == 12 || type == 13 ? "sampler2DArray" : "sampler2D";
-        bool integer = k < st.integer.size() && st.integer[k];
-        s += std::format("layout(set = 0, binding = {}) uniform {}{} t{};\n", slot < 15 ? slot + 1 : 40 + (slot - 15), integer ? "u" : "",
-                         sampler, slot);
-    }
+    s += samplers(w, st);
     for (u32 k = 0; k < w.buffers; k++)
         s += std::format("layout(set = 0, binding = {}, std430) readonly buffer Buffer{} {{ uvec4 B{}[]; }};\n", 56 + k, k, k);
     for (u32 a = 0; a < w.attrs; a++)
@@ -2051,21 +2058,17 @@ Glsl compute_shader(const Program& p, const CsState& cs) {
         g.why = p.why;
         return g;
     }
-    PsState none;
-    Writer w(none);
+    Writer w(cs.sampled);
     w.cs = &cs;
     if (!translate_body(w, p)) {
         g.why = w.why;
-        return g;
-    }
-    if (w.image) {
-        g.why = "images in a compute shader";
         return g;
     }
     std::string s = "#version 450\n";
     s += std::format("layout(local_size_x = {}, local_size_y = {}, local_size_z = {}) in;\n", cs.threads[0], cs.threads[1],
                      cs.threads[2]);
     s += "layout(set = 0, binding = 0, std430) readonly buffer Values { uint U[]; };\n";
+    s += samplers(w, cs.sampled);
     // each image's view as the element's size: 4 bytes r32ui, 8 rg32ui, 16 rgba32ui
     auto view = [](const CsState::Access& a) {
         u32 b = element_bytes(a.dfmt, a.nfmt);

@@ -1285,6 +1285,29 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     first; and their stores would want to go back into the memory without a wait each (with
     the next batch's, say, before anything reads the memory).
 
+74. **Images sampled in compute shaders.** Item 73's first need. A compute shader's image
+    instructions now read textures as a pixel shader's do: the textures are found, made and
+    uploaded by the same code as a draw's (taken out of the draw into functions of their
+    own, in `draw.cpp` and `vkdraw.cpp`), and each sample is at level 0, the one level there
+    is (a compute shader has no derivatives; one whose sampler filters differently near and
+    far stays on the CPU). On its own it moves nothing yet: every dispatch that samples is
+    stopped before it, by its micro-tiled image stores or its stores into part of a page.
+    With both of those let through as well (micro-tiled stores, and item 73's stores into
+    part of a page), `--gpu-check` compared 180 dispatches, nine shaders, and found two
+    faults on the way, both fixed: two stores of one dispatch into the same memory each had
+    an image of their own, so the second's copy back undid what only the first stored; and
+    the CPU read 8-bit unorm texels as k × (1/255), one step off the nearest float to
+    k / 255 for some k, where the GPU gives the nearest (the CPU now divides; frames the
+    same). Then all 180 stored the same as the CPU in every byte. But together they were
+    slower: read-backs fell from about 38,000 to 8,500, yet each copy back waits (batch
+    waits 34 to 81 seconds), and draws fell to about 1.61 million (2.02 million at
+    item 73). And micro-tiled stores alone are slower still for now (about 1.84 million):
+    the memory they keep on the GPU is read back by the dispatches that stay on the CPU (the
+    1920x1088 one went from 18 to 36 seconds). So only the sampling is kept, with the
+    CPU's fix; draws 1,953,157 and 2,002,317, the same as before. Next for these
+    dispatches: stores into part of a page that go back into the memory without a wait
+    each; micro-tiled stores with them.
+
 ## Files
 
 | Path | |

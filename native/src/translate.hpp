@@ -115,6 +115,9 @@ struct CsState {
     };
     std::vector<Access> stores, loads;
     u32 store_slot = 0, load_slot = 0;
+    // its image instructions' textures, as a pixel shader's (bindings 1-15, then 40 on): each
+    // sampled at level 0, the one level there is
+    PsState sampled;
 };
 
 struct Glsl {
@@ -134,7 +137,7 @@ Glsl vertex_shader(const Program& p, const VsState& s);
 std::string rect_geometry_shader(u32 attributes);
 
 // The compute shader. Bindings: the images it stores into from 32, those it loads from 36, the
-// unpacked buffers it loads from 56.
+// unpacked buffers it loads from 56, the textures it reads as a pixel shader's.
 Glsl compute_shader(const Program& p, const CsState& s);
 
 // A trivial vertex shader that passes on a position and n attributes, computed on the CPU

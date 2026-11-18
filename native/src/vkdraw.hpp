@@ -129,6 +129,7 @@ struct Dispatch {
     // An array's memory as it is (address, bytes), if it is kept on the GPU (its array left
     // empty): copied from there on the GPU, not read back first
     std::vector<std::pair<u64, u64>> array_from;
+    std::vector<Texture> textures;  // as a draw's
 };
 bool dispatch(Dispatch& d, std::string& why);
 // Whether that memory is kept on the GPU, an element of bpp bytes a texel
