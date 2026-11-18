@@ -1257,6 +1257,19 @@ the repository's root, or name the folders with `--app0` (more than once, first 
     256x256; 18 and 24 of 36, 64x64): 77 of 80 the same as the CPU's, as before, depth the
     same, the validation layer reporting nothing; all 100 dispatches compared the same.
 
+72. **Tried, and not kept: a store into part of a page kept as whole pages, merged.** Item
+    70's other two parts, tried together: the image stores done on the GPU (item 68's
+    translation), and a store into part of a page kept as its whole pages, as one piece with
+    any memory kept in them of the same size of texel, and theirs, and so on (so that a
+    texture's mips, sharing pages, wouldn't let each other go). The pieces grew far past the
+    textures: 6,851 of them made so in a 300-second run, 4,878 dispatches then storing into
+    more than an image can hold, and the memory around the textures, read by draws and the
+    CPU, bringing whole pieces back, about 17 milliseconds each (125 seconds reading back in
+    all, 71 of them while preparing draws). Draws fell to 377,982 (about 1.95 million
+    before), and it was taken back out. Memory guarded a page at a time can't be shared
+    finely between the GPU and the CPU; what would end item 70's chain is the draws reading
+    such memory from the GPU (as buffers and textures there), so that it needn't come back.
+
 ## Files
 
 | Path | |
